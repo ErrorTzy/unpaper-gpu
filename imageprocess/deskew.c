@@ -7,6 +7,7 @@
 #include <libavutil/mathematics.h> // for M_PI
 
 #include "constants.h"
+#include "imageprocess/backend.h"
 #include "imageprocess/blit.h"
 #include "imageprocess/deskew.h"
 #include "imageprocess/interpolate.h"
@@ -172,8 +173,8 @@ static float detect_edge_rotation(Image image, const Rectangle mask,
  * either the horizontal or vertical edges of the area specified by left, top,
  * right, bottom.
  */
-float detect_rotation(Image image, const Rectangle mask,
-                      const DeskewParameters params) {
+float detect_rotation_cpu(Image image, const Rectangle mask,
+                          const DeskewParameters params) {
   float rotation[4];
   int count = 0;
   float total;
@@ -239,6 +240,11 @@ float detect_rotation(Image image, const Rectangle mask,
   }
 }
 
+float detect_rotation(Image image, const Rectangle mask,
+                      const DeskewParameters params) {
+  return image_backend_get()->detect_rotation(image, mask, params);
+}
+
 /**
  * Rotates a whole image buffer by the specified radians, around its
  * middle-point. (To rotate parts of an image, extract the part with copyBuffer,
@@ -265,8 +271,8 @@ static void rotate(Image source, Rectangle source_area, Image target,
   }
 }
 
-void deskew(Image source, Rectangle mask, float radians,
-            Interpolation interpolate_type) {
+void deskew_cpu(Image source, Rectangle mask, float radians,
+                Interpolation interpolate_type) {
   Image rotated =
       create_compatible_image(source, size_of_rectangle(mask), true);
 
@@ -277,4 +283,9 @@ void deskew(Image source, Rectangle mask, float radians,
   copy_rectangle(rotated, source, full_image(rotated), mask.vertex[0]);
 
   free_image(&rotated);
+}
+
+void deskew(Image source, Rectangle mask, float radians,
+            Interpolation interpolate_type) {
+  image_backend_get()->deskew(source, mask, radians, interpolate_type);
 }

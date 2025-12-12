@@ -6,6 +6,7 @@
 #include <stdint.h>
 
 #include "constants.h"
+#include "imageprocess/backend.h"
 #include "imageprocess/blit.h"
 #include "imageprocess/fill.h"
 #include "imageprocess/filters.h"
@@ -107,7 +108,7 @@ static void blackfilter_scan(Image image, BlackfilterParameters params,
  * A virtual bar of width 'size' and height 'depth' is horizontally moved
  * above the middle of the sheet (or the full sheet, if depth ==-1).
  */
-void blackfilter(Image image, BlackfilterParameters params) {
+void blackfilter_cpu(Image image, BlackfilterParameters params) {
   // Left-to-Right scan.
   if (params.scan_direction.horizontal) {
     blackfilter_scan(
@@ -123,6 +124,10 @@ void blackfilter(Image image, BlackfilterParameters params) {
         (RectangleSize){params.scan_depth.horizontal, params.scan_size.height},
         (Delta){params.scan_depth.horizontal, 0});
   }
+}
+
+void blackfilter(Image image, BlackfilterParameters params) {
+  image_backend_get()->blackfilter(image, params);
 }
 
 /**************
@@ -141,8 +146,8 @@ bool validate_blurfilter_parameters(BlurfilterParameters *params,
   return true;
 }
 
-void blurfilter(Image image, BlurfilterParameters params,
-                uint8_t abs_white_threshold) {
+void blurfilter_cpu(Image image, BlurfilterParameters params,
+                    uint8_t abs_white_threshold) {
   verboseLog(VERBOSE_NORMAL, "blur-filter...");
 
   RectangleSize image_size = size_of_image(image);
@@ -224,6 +229,11 @@ void blurfilter(Image image, BlurfilterParameters params,
   }
 
   verboseLog(VERBOSE_NORMAL, " deleted %" PRIu64 " pixels.\n", count);
+}
+
+void blurfilter(Image image, BlurfilterParameters params,
+                uint8_t abs_white_threshold) {
+  image_backend_get()->blurfilter(image, params, abs_white_threshold);
 }
 
 /***************
@@ -311,7 +321,7 @@ static void noisefilter_clear_pixel_neighbors(Image image, Point p,
  *
  * @param intensity maximum cluster size to delete
  */
-void noisefilter(Image image, uint64_t intensity, uint8_t min_white_level) {
+void noisefilter_cpu(Image image, uint64_t intensity, uint8_t min_white_level) {
   uint64_t count = 0;
   Rectangle area = full_image(image);
 
@@ -337,6 +347,10 @@ void noisefilter(Image image, uint64_t intensity, uint8_t min_white_level) {
   verboseLog(VERBOSE_NORMAL, " deleted %" PRIu64 " clusters.\n", count);
 }
 
+void noisefilter(Image image, uint64_t intensity, uint8_t min_white_level) {
+  image_backend_get()->noisefilter(image, intensity, min_white_level);
+}
+
 /***************
  * Grayfilter *
  ***************/
@@ -353,7 +367,7 @@ bool validate_grayfilter_parameters(GrayfilterParameters *params,
   return true;
 }
 
-void grayfilter(Image image, GrayfilterParameters params) {
+void grayfilter_cpu(Image image, GrayfilterParameters params) {
   RectangleSize image_size = size_of_image(image);
   Point filter_origin = POINT_ORIGIN;
   uint64_t count = 0;
@@ -385,4 +399,8 @@ void grayfilter(Image image, GrayfilterParameters params) {
   } while (filter_origin.y <= image_size.height);
 
   verboseLog(VERBOSE_NORMAL, " deleted %" PRIu64 " pixels.\n", count);
+}
+
+void grayfilter(Image image, GrayfilterParameters params) {
+  image_backend_get()->grayfilter(image, params);
 }

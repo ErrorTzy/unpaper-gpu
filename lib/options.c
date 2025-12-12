@@ -19,6 +19,8 @@ static struct MultiIndex multi_index_empty(void) {
 
 void options_init(Options *o) {
   *o = (Options){
+      .device = UNPAPER_DEVICE_CPU,
+
       .write_output = true,
       .overwrite_output = false,
       .multiple_sheets = true,

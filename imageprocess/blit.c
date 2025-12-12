@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "imageprocess/blit.h"
+#include "imageprocess/backend.h"
 #include "imageprocess/interpolate.h"
 #include "imageprocess/pixel.h"
 #include "lib/logging.h"
@@ -12,14 +13,18 @@
  * Wipe a rectangular area of pixels with the defined color.
  * @return The number of pixels actually changed.
  */
-void wipe_rectangle(Image image, Rectangle input_area, Pixel color) {
+void wipe_rectangle_cpu(Image image, Rectangle input_area, Pixel color) {
   Rectangle area = clip_rectangle(image, input_area);
 
   scan_rectangle(area) { set_pixel(image, (Point){x, y}, color); }
 }
 
-void copy_rectangle(Image source, Image target, Rectangle source_area,
-                    Point target_coords) {
+void wipe_rectangle(Image image, Rectangle input_area, Pixel color) {
+  image_backend_get()->wipe_rectangle(image, input_area, color);
+}
+
+void copy_rectangle_cpu(Image source, Image target, Rectangle source_area,
+                        Point target_coords) {
   Rectangle area = clip_rectangle(source, source_area);
 
   // naive but generic implementation
@@ -30,6 +35,12 @@ void copy_rectangle(Image source, Image target, Rectangle source_area,
       set_pixel(target, (Point){tX, tY}, get_pixel(source, (Point){sX, sY}));
     }
   }
+}
+
+void copy_rectangle(Image source, Image target, Rectangle source_area,
+                    Point target_coords) {
+  image_backend_get()->copy_rectangle(source, target, source_area,
+                                     target_coords);
 }
 
 /**
@@ -119,8 +130,8 @@ uint64_t count_pixels_within_brightness(Image image, Rectangle area,
  * surrounded by a white border, if it is bigger, it gets equally cropped
  * at the edges.
  */
-void center_image(Image source, Image target, Point target_origin,
-                  RectangleSize target_size) {
+void center_image_cpu(Image source, Image target, Point target_origin,
+                      RectangleSize target_size) {
   Point source_origin = POINT_ORIGIN;
   RectangleSize source_size = size_of_image(source);
 
@@ -148,6 +159,11 @@ void center_image(Image source, Image target, Point target_origin,
                  target_origin);
 }
 
+void center_image(Image source, Image target, Point target_origin,
+                  RectangleSize target_size) {
+  image_backend_get()->center_image(source, target, target_origin, target_size);
+}
+
 static void stretch_frame(Image source, Image target,
                           Interpolation interpolate_type) {
   RectangleSize source_size = size_of_image(source),
@@ -169,8 +185,8 @@ static void stretch_frame(Image source, Image target,
   }
 }
 
-void stretch_and_replace(Image *pImage, RectangleSize size,
-                         Interpolation interpolate_type) {
+void stretch_and_replace_cpu(Image *pImage, RectangleSize size,
+                             Interpolation interpolate_type) {
   if (compare_sizes(size_of_image(*pImage), size) == 0)
     return;
 
@@ -180,8 +196,13 @@ void stretch_and_replace(Image *pImage, RectangleSize size,
   replace_image(pImage, &target);
 }
 
-void resize_and_replace(Image *pImage, RectangleSize size,
-                        Interpolation interpolate_type) {
+void stretch_and_replace(Image *pImage, RectangleSize size,
+                         Interpolation interpolate_type) {
+  image_backend_get()->stretch_and_replace(pImage, size, interpolate_type);
+}
+
+void resize_and_replace_cpu(Image *pImage, RectangleSize size,
+                            Interpolation interpolate_type) {
   RectangleSize image_size = size_of_image(*pImage);
   if (compare_sizes(image_size, size) == 0)
     return;
@@ -220,7 +241,12 @@ void resize_and_replace(Image *pImage, RectangleSize size,
   replace_image(pImage, &resized);
 }
 
-void flip_rotate_90(Image *pImage, RotationDirection direction) {
+void resize_and_replace(Image *pImage, RectangleSize size,
+                        Interpolation interpolate_type) {
+  image_backend_get()->resize_and_replace(pImage, size, interpolate_type);
+}
+
+void flip_rotate_90_cpu(Image *pImage, RotationDirection direction) {
   RectangleSize image_size = size_of_image(*pImage);
 
   // exchanged width and height
@@ -245,7 +271,11 @@ void flip_rotate_90(Image *pImage, RotationDirection direction) {
   replace_image(pImage, &newimage);
 }
 
-void mirror(Image image, Direction direction) {
+void flip_rotate_90(Image *pImage, RotationDirection direction) {
+  image_backend_get()->flip_rotate_90(pImage, direction);
+}
+
+void mirror_cpu(Image image, Direction direction) {
   Rectangle source = {{POINT_ORIGIN, POINT_INFINITY}};
   RectangleSize image_size = size_of_image(image);
 
@@ -281,7 +311,11 @@ void mirror(Image image, Direction direction) {
   }
 }
 
-void shift_image(Image *pImage, Delta d) {
+void mirror(Image image, Direction direction) {
+  image_backend_get()->mirror(image, direction);
+}
+
+void shift_image_cpu(Image *pImage, Delta d) {
   // allocate new buffer's memory
   Image newimage =
       create_compatible_image(*pImage, size_of_image(*pImage), true);
@@ -289,4 +323,8 @@ void shift_image(Image *pImage, Delta d) {
   copy_rectangle(*pImage, newimage, full_image(*pImage),
                  shift_point(POINT_ORIGIN, d));
   replace_image(pImage, &newimage);
+}
+
+void shift_image(Image *pImage, Delta d) {
+  image_backend_get()->shift_image(pImage, d);
 }

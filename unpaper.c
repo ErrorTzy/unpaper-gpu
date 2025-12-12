@@ -19,6 +19,7 @@
 #include <libavutil/avutil.h>
 
 #include "imageprocess/blit.h"
+#include "imageprocess/backend.h"
 #include "imageprocess/deskew.h"
 #include "imageprocess/filters.h"
 #include "imageprocess/image.h"
@@ -40,6 +41,8 @@
 #define USAGE                                                                  \
   WELCOME "\n"                                                                 \
           "Usage: unpaper [options] <input-file(s)> <output-file(s)>\n"        \
+          "\n"                                                                 \
+          "Options: --device=cpu|cuda (default: cpu)\n"                        \
           "\n"                                                                 \
           "Filenames may contain a formatting placeholder starting with '%%' " \
           "to insert a\n"                                                      \
@@ -138,6 +141,7 @@ enum LONG_OPTION_VALUES {
   OPT_DEBUG,
   OPT_DEBUG_SAVE,
   OPT_INTERPOLATE,
+  OPT_DEVICE,
 };
 
 /****************************************************************************
@@ -389,6 +393,7 @@ int main(int argc, char *argv[]) {
           {"debug-save", no_argument, NULL, OPT_DEBUG_SAVE},
           {"vvvv", no_argument, NULL, OPT_DEBUG_SAVE},
           {"interpolate", required_argument, NULL, OPT_INTERPOLATE},
+          {"device", required_argument, NULL, OPT_DEVICE},
           {NULL, no_argument, NULL, 0}};
 
       c = getopt_long_only(argc, argv, "hVl:S:x::n::M:s:z:p:m:W:B:w:b:Tt:qv",
@@ -931,6 +936,22 @@ int main(int argc, char *argv[]) {
           errOutput("unable to parse interpolate: '%s'", optarg);
         }
         break;
+
+      case OPT_DEVICE:
+        if (strcmp(optarg, "cpu") == 0) {
+          options.device = UNPAPER_DEVICE_CPU;
+        } else if (strcmp(optarg, "cuda") == 0) {
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+          options.device = UNPAPER_DEVICE_CUDA;
+#else
+          errOutput("CUDA backend requested, but this build has no CUDA "
+                    "support.");
+#endif
+        } else {
+          errOutput("invalid value for --device: '%s' (expected cpu or cuda)",
+                    optarg);
+        }
+        break;
       }
     }
 
@@ -1009,6 +1030,8 @@ int main(int argc, char *argv[]) {
     errOutput("no input or output files given.\n");
 
   verboseLog(VERBOSE_NORMAL, WELCOME); // welcome message
+
+  image_backend_select(options.device);
 
   int inputNr = options.start_input;
   int outputNr = options.start_output;

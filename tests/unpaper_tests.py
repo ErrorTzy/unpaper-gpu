@@ -56,6 +56,24 @@ def run_unpaper(
     )
 
 
+def test_device_cpu_works_and_cuda_unavailable_errors(imgsrc_path, tmp_path):
+    source_path = imgsrc_path / "imgsrc001.png"
+    result_path = tmp_path / "result.pbm"
+
+    run_unpaper("--device", "cpu", "-n", str(source_path), str(result_path))
+
+    unpaper_path = os.getenv("TEST_UNPAPER_BINARY", "unpaper")
+    proc = subprocess.run(
+        [unpaper_path, "-vvv", "--device", "cuda", "-n", str(source_path), str(result_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert "cuda" in proc.stderr.lower()
+
+
 @pytest.fixture(name="imgsrc_path")
 def get_imgsrc_directory() -> pathlib.Path:
     return pathlib.Path(os.getenv("TEST_IMGSRC_DIR", "tests/source_images/"))
@@ -470,4 +488,3 @@ def test_valid_range_multi_index(imgsrc_path, tmp_path):
         "--no-processing", "1-100", str(source_path), str(result_path), check=False
     )
     assert unpaper_result.returncode == 0
-

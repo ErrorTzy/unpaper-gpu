@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "imageprocess/backend.h"
 #include "imageprocess/blit.h"
 #include "imageprocess/masks.h"
 #include "imageprocess/pixel.h"
@@ -177,9 +178,9 @@ static const Rectangle INVALID_MASK = {{{-1, -1}, {-1, -1}}};
  *
  * @return number of masks stored in mask[][]
  */
-size_t detect_masks(Image image, MaskDetectionParameters params,
-                    const Point points[], size_t points_count,
-                    Rectangle masks[]) {
+size_t detect_masks_cpu(Image image, MaskDetectionParameters params,
+                        const Point points[], size_t points_count,
+                        Rectangle masks[]) {
   size_t masks_count = 0;
   if (!params.scan_direction.horizontal && !params.scan_direction.vertical) {
     return masks_count;
@@ -205,6 +206,13 @@ size_t detect_masks(Image image, MaskDetectionParameters params,
   }
 
   return masks_count;
+}
+
+size_t detect_masks(Image image, MaskDetectionParameters params,
+                    const Point points[], size_t points_count,
+                    Rectangle masks[]) {
+  return image_backend_get()->detect_masks(image, params, points, points_count,
+                                          masks);
 }
 
 /**
@@ -254,8 +262,8 @@ bool validate_mask_alignment_parameters(MaskAlignmentParameters *params,
  * Moves a rectangular area of pixels to be centered inside a specified area
  * coordinates.
  */
-void align_mask(Image image, const Rectangle inside_area,
-                const Rectangle outside, MaskAlignmentParameters params) {
+void align_mask_cpu(Image image, const Rectangle inside_area,
+                    const Rectangle outside, MaskAlignmentParameters params) {
   const RectangleSize inside_size = size_of_rectangle(inside_area);
 
   Point target;
@@ -291,12 +299,17 @@ void align_mask(Image image, const Rectangle inside_area,
   free_image(&newimage);
 }
 
+void align_mask(Image image, const Rectangle inside_area,
+                const Rectangle outside, MaskAlignmentParameters params) {
+  image_backend_get()->align_mask(image, inside_area, outside, params);
+}
+
 /**
  * Permanently applies image masks. Each pixel which is not covered by at least
  * one mask is set to maskColor.
  */
-void apply_masks(Image image, const Rectangle masks[], size_t masks_count,
-                 Pixel color) {
+void apply_masks_cpu(Image image, const Rectangle masks[], size_t masks_count,
+                     Pixel color) {
   if (masks_count <= 0) {
     return;
   }
@@ -311,11 +324,16 @@ void apply_masks(Image image, const Rectangle masks[], size_t masks_count,
   }
 }
 
+void apply_masks(Image image, const Rectangle masks[], size_t masks_count,
+                 Pixel color) {
+  image_backend_get()->apply_masks(image, masks, masks_count, color);
+}
+
 /**
  * Permanently wipes out areas of an images. Each pixel covered by a wipe-area
  * is set to wipeColor.
  */
-void apply_wipes(Image image, Wipes wipes, Pixel color) {
+void apply_wipes_cpu(Image image, Wipes wipes, Pixel color) {
   for (size_t i = 0; i < wipes.count; i++) {
     scan_rectangle(wipes.areas[i]) { set_pixel(image, (Point){x, y}, color); }
 
@@ -324,6 +342,10 @@ void apply_wipes(Image image, Wipes wipes, Pixel color) {
                wipes.areas[i].vertex[0].x, wipes.areas[i].vertex[0].y,
                wipes.areas[i].vertex[1].x, wipes.areas[i].vertex[1].y);
   }
+}
+
+void apply_wipes(Image image, Wipes wipes, Pixel color) {
+  image_backend_get()->apply_wipes(image, wipes, color);
 }
 
 Rectangle border_to_mask(Image image, const Border border) {
@@ -346,7 +368,7 @@ Rectangle border_to_mask(Image image, const Border border) {
  * Applies a border to the whole image. All pixels in the border range at the
  * edges of the sheet will be cleared.
  */
-void apply_border(Image image, const Border border, Pixel color) {
+void apply_border_cpu(Image image, const Border border, Pixel color) {
   if (memcmp(&border, &BORDER_NULL, sizeof(BORDER_NULL)) == 0) {
     return;
   }
@@ -357,6 +379,10 @@ void apply_border(Image image, const Border border, Pixel color) {
              mask.vertex[0].x, mask.vertex[0].y, mask.vertex[1].x,
              mask.vertex[1].y);
   apply_masks(image, &mask, 1, color);
+}
+
+void apply_border(Image image, const Border border, Pixel color) {
+  image_backend_get()->apply_border(image, border, color);
 }
 
 bool validate_border_scan_parameters(
@@ -425,8 +451,8 @@ static uint32_t detect_border_edge(Image image, const Rectangle outside_mask,
  * Detects a border of completely non-black pixels around the area
  * outsideBorder.
  */
-Border detect_border(Image image, BorderScanParameters params,
-                     const Rectangle outside_mask) {
+Border detect_border_cpu(Image image, BorderScanParameters params,
+                         const Rectangle outside_mask) {
   RectangleSize image_size = size_of_image(image);
 
   Border border = {
@@ -459,4 +485,9 @@ Border detect_border(Image image, BorderScanParameters params,
              outside_mask.vertex[1].y);
 
   return border;
+}
+
+Border detect_border(Image image, BorderScanParameters params,
+                     const Rectangle outside_mask) {
+  return image_backend_get()->detect_border(image, params, outside_mask);
 }

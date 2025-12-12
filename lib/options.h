@@ -16,7 +16,14 @@
 #include "imageprocess/primitives.h"
 #include "parse.h"
 
+typedef enum {
+  UNPAPER_DEVICE_CPU = 0,
+  UNPAPER_DEVICE_CUDA = 1,
+} UnpaperDevice;
+
 typedef struct {
+  UnpaperDevice device;
+
   bool write_output;
   bool overwrite_output;
   bool multiple_sheets;
