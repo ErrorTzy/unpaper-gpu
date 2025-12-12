@@ -33,6 +33,8 @@ static void *k_mirror_bytes;
 static void *k_mirror_mono;
 static void *k_rotate90_bytes;
 static void *k_rotate90_mono;
+static void *k_stretch_bytes;
+static void *k_stretch_mono;
 
 static void cuda_unimplemented(const char *op_name) {
   errOutput("CUDA backend selected, but it is not implemented yet (%s).",
@@ -61,6 +63,10 @@ static void ensure_kernels_loaded(void) {
       unpaper_cuda_module_get_function(cuda_module, "unpaper_rotate90_bytes");
   k_rotate90_mono =
       unpaper_cuda_module_get_function(cuda_module, "unpaper_rotate90_mono");
+  k_stretch_bytes =
+      unpaper_cuda_module_get_function(cuda_module, "unpaper_stretch_bytes");
+  k_stretch_mono =
+      unpaper_cuda_module_get_function(cuda_module, "unpaper_stretch_mono");
 }
 
 static inline uint8_t pixel_grayscale(Pixel pixel) {
@@ -452,26 +458,102 @@ static void shift_image_cuda(Image *pImage, Delta d) {
 
 static void stretch_and_replace_cuda(Image *pImage, RectangleSize size,
                                      Interpolation interpolate_type) {
-  (void)interpolate_type;
   if (pImage == NULL || pImage->frame == NULL) {
     return;
   }
   if (compare_sizes(size_of_image(*pImage), size) == 0) {
     return;
   }
-  cuda_unimplemented("stretch_and_replace");
+
+  ensure_kernels_loaded();
+
+  const UnpaperCudaFormat fmt = cuda_format_from_av(pImage->frame->format);
+  if (fmt == UNPAPER_CUDA_FMT_INVALID) {
+    errOutput("CUDA stretch requested, but pixel format is unsupported.");
+  }
+
+  image_ensure_cuda(pImage);
+  ImageCudaState *src = image_cuda_state(*pImage);
+  if (src == NULL || src->dptr == 0) {
+    errOutput("CUDA image state missing for stretch_and_replace (source).");
+  }
+
+  Image target = create_compatible_image(*pImage, size, false);
+  image_ensure_cuda_alloc(&target);
+  ImageCudaState *dst = image_cuda_state(target);
+  if (dst == NULL || dst->dptr == 0) {
+    errOutput("CUDA image state missing for stretch_and_replace (target).");
+  }
+
+  const int interp = (int)interpolate_type;
+  if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
+    void *params[] = {
+        &src->dptr, &src->linesize, &fmt, &dst->dptr, &dst->linesize, &fmt,
+        &src->width, &src->height, &dst->width, &dst->height, &interp,
+        &target.abs_black_threshold,
+    };
+    const uint32_t block_x = 32;
+    const uint32_t block_y = 8;
+    const uint32_t bytes_per_row = ((uint32_t)dst->width + 7u) / 8u;
+    const uint32_t grid_x = (bytes_per_row + block_x - 1) / block_x;
+    const uint32_t grid_y = ((uint32_t)dst->height + block_y - 1) / block_y;
+    unpaper_cuda_launch_kernel(k_stretch_mono, grid_x, grid_y, 1, block_x,
+                               block_y, 1, params);
+  } else {
+    void *params[] = {
+        &src->dptr, &src->linesize, &dst->dptr, &dst->linesize, &fmt,
+        &src->width, &src->height, &dst->width, &dst->height, &interp,
+    };
+    const uint32_t block_x = 16;
+    const uint32_t block_y = 16;
+    const uint32_t grid_x = ((uint32_t)dst->width + block_x - 1) / block_x;
+    const uint32_t grid_y = ((uint32_t)dst->height + block_y - 1) / block_y;
+    unpaper_cuda_launch_kernel(k_stretch_bytes, grid_x, grid_y, 1, block_x,
+                               block_y, 1, params);
+  }
+
+  dst->cuda_dirty = true;
+  dst->cpu_dirty = false;
+
+  replace_image(pImage, &target);
 }
 
 static void resize_and_replace_cuda(Image *pImage, RectangleSize size,
                                     Interpolation interpolate_type) {
-  (void)interpolate_type;
   if (pImage == NULL || pImage->frame == NULL) {
     return;
   }
   if (compare_sizes(size_of_image(*pImage), size) == 0) {
     return;
   }
-  cuda_unimplemented("resize_and_replace");
+
+  RectangleSize image_size = size_of_image(*pImage);
+  verboseLog(VERBOSE_NORMAL, "resizing %dx%d -> %dx%d\n", image_size.width,
+             image_size.height, size.width, size.height);
+
+  const float horizontal_ratio = (float)size.width / (float)image_size.width;
+  const float vertical_ratio = (float)size.height / (float)image_size.height;
+
+  RectangleSize stretch_size;
+  if (horizontal_ratio < vertical_ratio) {
+    stretch_size =
+        (RectangleSize){size.width, (int32_t)(image_size.height * horizontal_ratio)};
+  } else if (vertical_ratio < horizontal_ratio) {
+    stretch_size =
+        (RectangleSize){(int32_t)(image_size.width * vertical_ratio), size.height};
+  } else {
+    stretch_size = size;
+  }
+
+  stretch_and_replace_cuda(pImage, stretch_size, interpolate_type);
+
+  if (size.width == stretch_size.width && size.height == stretch_size.height) {
+    return;
+  }
+
+  Image resized = create_compatible_image(*pImage, size, true);
+  center_image_cuda(*pImage, resized, POINT_ORIGIN, size);
+  replace_image(pImage, &resized);
 }
 
 static void apply_masks_cuda(Image image, const Rectangle masks[],

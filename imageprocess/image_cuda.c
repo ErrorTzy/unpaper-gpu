@@ -177,6 +177,65 @@ void image_ensure_cuda(Image *image) {
 #endif
 }
 
+void image_ensure_cuda_alloc(Image *image) {
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+  ImageCudaState *st = image_cuda_state_get(image, true);
+  if (st == NULL || image == NULL || image->frame == NULL) {
+    return;
+  }
+
+  if (image->frame->width <= 0 || image->frame->height <= 0) {
+    errOutput("invalid image size for CUDA allocation.");
+  }
+
+  switch (image->frame->format) {
+  case AV_PIX_FMT_Y400A:
+  case AV_PIX_FMT_GRAY8:
+  case AV_PIX_FMT_RGB24:
+  case AV_PIX_FMT_MONOBLACK:
+  case AV_PIX_FMT_MONOWHITE:
+    break;
+  default:
+    errOutput("CUDA allocation requested, but pixel format is unsupported.");
+  }
+
+  UnpaperCudaInitStatus init_status = unpaper_cuda_try_init();
+  if (init_status != UNPAPER_CUDA_INIT_OK) {
+    errOutput("%s", unpaper_cuda_init_status_string(init_status));
+  }
+
+  const size_t bytes = (size_t)image->frame->linesize[0] *
+                       (size_t)image->frame->height;
+  if (bytes == 0) {
+    errOutput("invalid image buffer size for CUDA allocation.");
+  }
+
+  const bool need_alloc =
+      (st->dptr == 0) || (st->bytes != bytes) ||
+      (st->format != image->frame->format) ||
+      (st->width != image->frame->width) || (st->height != image->frame->height) ||
+      (st->linesize != image->frame->linesize[0]);
+  if (need_alloc) {
+    if (st->dptr != 0) {
+      unpaper_cuda_free(st->dptr);
+      st->dptr = 0;
+    }
+    st->dptr = unpaper_cuda_malloc(bytes);
+    st->bytes = bytes;
+    st->format = image->frame->format;
+    st->width = image->frame->width;
+    st->height = image->frame->height;
+    st->linesize = image->frame->linesize[0];
+  }
+
+  st->cpu_dirty = false;
+  st->cuda_dirty = false;
+#else
+  (void)image;
+  errOutput("CUDA allocation requested, but this build has no CUDA support.");
+#endif
+}
+
 void image_ensure_cpu(Image *image) {
 #if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
   ImageCudaState *st = image_cuda_state_get(image, false);

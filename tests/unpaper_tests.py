@@ -114,6 +114,45 @@ def test_cuda_pre_ops_match_cpu(imgsrc_path, tmp_path, extra_args):
     assert compare_images(golden=cpu_path, result=cuda_path) == 0.0
 
 
+@pytest.mark.parametrize("interp", ["nearest", "linear", "cubic"])
+def test_cuda_stretch_and_post_size_match_cpu(imgsrc_path, tmp_path, interp):
+    if not _cuda_runtime_available(imgsrc_path=imgsrc_path, tmp_path=tmp_path):
+        pytest.skip("CUDA runtime/device not available")
+
+    source_path = imgsrc_path / "imgsrc003.png"
+    cpu_path = tmp_path / f"cpu-{interp}.ppm"
+    cuda_path = tmp_path / f"cuda-{interp}.ppm"
+
+    run_unpaper(
+        "--device",
+        "cpu",
+        "-n",
+        "--interpolate",
+        interp,
+        "--stretch",
+        "200mils,150mils",
+        "--post-size",
+        "250mils,200mils",
+        str(source_path),
+        str(cpu_path),
+    )
+    run_unpaper(
+        "--device",
+        "cuda",
+        "-n",
+        "--interpolate",
+        interp,
+        "--stretch",
+        "200mils,150mils",
+        "--post-size",
+        "250mils,200mils",
+        str(source_path),
+        str(cuda_path),
+    )
+
+    assert compare_images(golden=cpu_path, result=cuda_path) == 0.0
+
+
 @pytest.fixture(name="imgsrc_path")
 def get_imgsrc_directory() -> pathlib.Path:
     return pathlib.Path(os.getenv("TEST_IMGSRC_DIR", "tests/source_images/"))

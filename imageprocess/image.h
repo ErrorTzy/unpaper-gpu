@@ -32,5 +32,7 @@ Rectangle clip_rectangle(Image image, Rectangle area);
 void image_ensure_cuda(Image *image);
 void image_ensure_cpu(Image *image);
 
+void image_ensure_cuda_alloc(Image *image);
+
 void image_mark_cpu_dirty(Image *image);
 void image_mark_cuda_dirty(Image *image);

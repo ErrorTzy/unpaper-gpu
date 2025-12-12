@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include <stdint.h>
+#include <math.h>
 
 #include "imageprocess/cuda_kernels_format.h"
 
@@ -54,6 +55,178 @@ static __device__ __forceinline__ void read_rgb(const uint8_t *src,
     *b = 255u;
     break;
   }
+}
+
+static __device__ __forceinline__ void read_rgb_safe(
+    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
+    int src_h, int x, int y, uint8_t *r, uint8_t *g, uint8_t *b) {
+  if (x < 0 || y < 0 || x >= src_w || y >= src_h) {
+    *r = 255u;
+    *g = 255u;
+    *b = 255u;
+    return;
+  }
+  read_rgb(src, src_linesize, fmt, x, y, r, g, b);
+}
+
+static __device__ __forceinline__ uint8_t clip_uint8(int v) {
+  if (v < 0) {
+    return 0u;
+  }
+  if (v > 255) {
+    return 255u;
+  }
+  return (uint8_t)v;
+}
+
+static __device__ __forceinline__ uint8_t linear_scale(float x, uint8_t a,
+                                                       uint8_t b) {
+  const float fa = (1.0f - x) * (float)a;
+  const float fb = x * (float)b;
+  return (uint8_t)(fa + fb);
+}
+
+static __device__ __forceinline__ void linear_pixel(float x, uint8_t ar,
+                                                    uint8_t ag, uint8_t ab,
+                                                    uint8_t br, uint8_t bg,
+                                                    uint8_t bb, uint8_t *or_,
+                                                    uint8_t *og,
+                                                    uint8_t *ob) {
+  *or_ = linear_scale(x, ar, br);
+  *og = linear_scale(x, ag, bg);
+  *ob = linear_scale(x, ab, bb);
+}
+
+static __device__ __forceinline__ uint8_t cubic_scale(float factor, uint8_t a,
+                                                      uint8_t b, uint8_t c,
+                                                      uint8_t d) {
+  const float fa = (float)a;
+  const float fb = (float)b;
+  const float fc = (float)c;
+  const float fd = (float)d;
+  const float f = factor;
+
+  const float term =
+      (fc - fa +
+       f * (2.0f * fa - 5.0f * fb + 4.0f * fc - fd +
+            f * (3.0f * (fb - fc) + fd - fa)));
+
+  const int result = (int)(fb + 0.5f * f * term);
+  return clip_uint8(result);
+}
+
+static __device__ __forceinline__ void cubic_pixel(float factor, uint8_t a0r,
+                                                   uint8_t a0g, uint8_t a0b,
+                                                   uint8_t a1r, uint8_t a1g,
+                                                   uint8_t a1b, uint8_t a2r,
+                                                   uint8_t a2g, uint8_t a2b,
+                                                   uint8_t a3r, uint8_t a3g,
+                                                   uint8_t a3b, uint8_t *or_,
+                                                   uint8_t *og, uint8_t *ob) {
+  *or_ = cubic_scale(factor, a0r, a1r, a2r, a3r);
+  *og = cubic_scale(factor, a0g, a1g, a2g, a3g);
+  *ob = cubic_scale(factor, a0b, a1b, a2b, a3b);
+}
+
+static __device__ __forceinline__ void interp_nn(const uint8_t *src,
+                                                 int src_linesize,
+                                                 UnpaperCudaFormat fmt,
+                                                 int src_w, int src_h,
+                                                 float sx, float sy,
+                                                 uint8_t *r, uint8_t *g,
+                                                 uint8_t *b) {
+  const int ix = (int)floorf(sx + 0.5f);
+  const int iy = (int)floorf(sy + 0.5f);
+  read_rgb_safe(src, src_linesize, fmt, src_w, src_h, ix, iy, r, g, b);
+}
+
+static __device__ __forceinline__ void interp_bilinear(
+    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
+    int src_h, float sx, float sy, uint8_t *r, uint8_t *g, uint8_t *b) {
+  const int p1x = (int)floorf(sx);
+  const int p1y = (int)floorf(sy);
+  const int p2x = (int)ceilf(sx);
+  const int p2y = (int)ceilf(sy);
+
+  if (p2x < 0 || p2y < 0 || p2x >= src_w || p2y >= src_h) {
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, p1x, p1y, r, g, b);
+    return;
+  }
+
+  if (p1x == p2x && p1y == p2y) {
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, p1x, p1y, r, g, b);
+    return;
+  }
+
+  if (p1x == p2x) {
+    uint8_t r1, g1, b1, r2, g2, b2;
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, p1x, p1y, &r1, &g1,
+                  &b1);
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, p2x, p2y, &r2, &g2,
+                  &b2);
+    linear_pixel(sx - (float)p1x, r1, g1, b1, r2, g2, b2, r, g, b);
+    return;
+  }
+
+  if (p1y == p2y) {
+    uint8_t r1, g1, b1, r2, g2, b2;
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, p1x, p1y, &r1, &g1,
+                  &b1);
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, p2x, p2y, &r2, &g2,
+                  &b2);
+    linear_pixel(sy - (float)p1y, r1, g1, b1, r2, g2, b2, r, g, b);
+    return;
+  }
+
+  uint8_t r11, g11, b11, r21, g21, b21, r12, g12, b12, r22, g22, b22;
+  read_rgb_safe(src, src_linesize, fmt, src_w, src_h, p1x, p1y, &r11, &g11,
+                &b11);
+  read_rgb_safe(src, src_linesize, fmt, src_w, src_h, p2x, p1y, &r21, &g21,
+                &b21);
+  read_rgb_safe(src, src_linesize, fmt, src_w, src_h, p1x, p2y, &r12, &g12,
+                &b12);
+  read_rgb_safe(src, src_linesize, fmt, src_w, src_h, p2x, p2y, &r22, &g22,
+                &b22);
+
+  uint8_t rh1, gh1, bh1, rh2, gh2, bh2;
+  linear_pixel(sx - (float)p1x, r11, g11, b11, r21, g21, b21, &rh1, &gh1,
+               &bh1);
+  linear_pixel(sx - (float)p1x, r12, g12, b12, r22, g22, b22, &rh2, &gh2,
+               &bh2);
+  linear_pixel(sy - (float)p1y, rh1, gh1, bh1, rh2, gh2, bh2, r, g, b);
+}
+
+static __device__ __forceinline__ void interp_bicubic(
+    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
+    int src_h, float sx, float sy, uint8_t *r, uint8_t *g, uint8_t *b) {
+  const int px = (int)sx;
+  const int py = (int)sy;
+
+  uint8_t row_r[4];
+  uint8_t row_g[4];
+  uint8_t row_b[4];
+
+  const float fx = sx - (float)px;
+  const float fy = sy - (float)py;
+
+  for (int i = -1; i < 3; i++) {
+    uint8_t q0r, q0g, q0b, q1r, q1g, q1b, q2r, q2g, q2b, q3r, q3g, q3b;
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, px - 1, py + i, &q0r,
+                  &q0g, &q0b);
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, px, py + i, &q1r, &q1g,
+                  &q1b);
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, px + 1, py + i, &q2r,
+                  &q2g, &q2b);
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, px + 2, py + i, &q3r,
+                  &q3g, &q3b);
+
+    cubic_pixel(fx, q0r, q0g, q0b, q1r, q1g, q1b, q2r, q2g, q2b, q3r, q3g,
+                q3b, &row_r[i + 1], &row_g[i + 1], &row_b[i + 1]);
+  }
+
+  cubic_pixel(fy, row_r[0], row_g[0], row_b[0], row_r[1], row_g[1], row_b[1],
+              row_r[2], row_g[2], row_b[2], row_r[3], row_g[3], row_b[3], r, g,
+              b);
 }
 
 static __device__ __forceinline__ void write_pixel(uint8_t *dst,
@@ -333,4 +506,80 @@ extern "C" __global__ void unpaper_rotate90_mono(const uint8_t *src,
   }
 
   dst[(size_t)dy * (size_t)dst_linesize + (size_t)byte_x] = out;
+}
+
+extern "C" __global__ void unpaper_stretch_bytes(
+    const uint8_t *src, int src_linesize, uint8_t *dst, int dst_linesize,
+    int fmt, int src_w, int src_h, int dst_w, int dst_h, int interp_type) {
+  const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+  if (x < 0 || y < 0 || x >= dst_w || y >= dst_h) {
+    return;
+  }
+
+  const float hratio = (float)src_w / (float)dst_w;
+  const float vratio = (float)src_h / (float)dst_h;
+
+  const float sx = (float)x * hratio;
+  const float sy = (float)y * vratio;
+
+  uint8_t r = 255u, g = 255u, b = 255u;
+  const UnpaperCudaFormat f = (UnpaperCudaFormat)fmt;
+  if (interp_type == 0) {
+    interp_nn(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+  } else if (interp_type == 1) {
+    interp_bilinear(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+  } else {
+    interp_bicubic(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+  }
+
+  write_pixel(dst, dst_linesize, f, x, y, r, g, b);
+}
+
+extern "C" __global__ void unpaper_stretch_mono(
+    const uint8_t *src, int src_linesize, int src_fmt, uint8_t *dst,
+    int dst_linesize, int dst_fmt, int src_w, int src_h, int dst_w, int dst_h,
+    int interp_type, uint8_t abs_black_threshold) {
+  const int bytes_per_row = (dst_w + 7) / 8;
+  const int byte_x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+  if (byte_x < 0 || byte_x >= bytes_per_row || y < 0 || y >= dst_h) {
+    return;
+  }
+
+  const float hratio = (float)src_w / (float)dst_w;
+  const float vratio = (float)src_h / (float)dst_h;
+
+  const int dst_byte_start_x = byte_x * 8;
+  uint8_t out = 0;
+  for (int bit = 0; bit < 8; bit++) {
+    const int x = dst_byte_start_x + bit;
+    if (x >= dst_w) {
+      continue;
+    }
+
+    const float sx = (float)x * hratio;
+    const float sy = (float)y * vratio;
+
+    uint8_t r = 255u, g = 255u, b = 255u;
+    const UnpaperCudaFormat f = (UnpaperCudaFormat)src_fmt;
+    if (interp_type == 0) {
+      interp_nn(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+    } else if (interp_type == 1) {
+      interp_bilinear(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+    } else {
+      interp_bicubic(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+    }
+
+    const uint8_t gray = grayscale_u8(r, g, b);
+    const bool pixel_black = gray < abs_black_threshold;
+    const bool bit_set = ((UnpaperCudaFormat)dst_fmt == UNPAPER_CUDA_FMT_MONOWHITE)
+                             ? pixel_black
+                             : !pixel_black;
+    if (bit_set) {
+      out = (uint8_t)(out | (uint8_t)(0x80u >> bit));
+    }
+  }
+
+  dst[(size_t)y * (size_t)dst_linesize + (size_t)byte_x] = out;
 }

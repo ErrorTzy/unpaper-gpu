@@ -198,6 +198,8 @@ This section is the execution checklist for adding CUDA support while keeping CP
 
 **PR 6: CUDA resize/stretch + interpolation parity**
 
+- Status: completed (2025-12-12)
+
 - Scope:
   - Implement `stretch_and_replace`, `resize_and_replace` in CUDA for NN/linear/cubic, matching CPU coordinate mapping and clamping.
   - Minimize transfers: keep data GPU-resident; only download for save/debug.
