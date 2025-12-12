@@ -151,6 +151,8 @@ This section is the execution checklist for adding CUDA support while keeping CP
 
 **PR 3: Add Meson CUDA feature option + compile-time capability flag**
 
+- Status: completed (2025-12-12)
+
 - Scope:
   - Add `meson_options.txt` with `option('cuda', type: 'feature', value: 'disabled', ...)` (CPU-only remains default).
   - When enabled, compile CUDA sources and define a capability macro (e.g., `UNPAPER_WITH_CUDA=1`).

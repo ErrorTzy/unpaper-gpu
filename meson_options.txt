@@ -1,0 +1,11 @@
+# SPDX-FileCopyrightText: 2025 The unpaper authors
+#
+# SPDX-License-Identifier: MIT
+
+option(
+  'cuda',
+  type: 'feature',
+  value: 'disabled',
+  description: 'Enable CUDA backend support (experimental)',
+)
+

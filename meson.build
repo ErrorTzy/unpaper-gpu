@@ -29,8 +29,9 @@ conf_data = configuration_data()
 conf_data.set('version', meson.project_version())
 configure_file(input: 'version.h.in', output: 'version.h', configuration: conf_data)
 
-unpaper = executable(
-    'unpaper',
+cuda_opt = get_option('cuda')
+unpaper_c_args = []
+unpaper_sources = [
     'file.c', 'parse.c', 'unpaper.c',
     'imageprocess/blit.c',
     'imageprocess/backend.c',
@@ -45,6 +46,23 @@ unpaper = executable(
     'lib/logging.c',
     'lib/options.c',
     'lib/physical.c',
+]
+
+if cuda_opt.enabled()
+    unpaper_c_args += ['-DUNPAPER_WITH_CUDA=1']
+    unpaper_sources += ['imageprocess/backend_cuda_stub.c']
+elif cuda_opt.auto()
+    nvcc = find_program('nvcc', required: false)
+    if nvcc.found()
+        unpaper_c_args += ['-DUNPAPER_WITH_CUDA=1']
+        unpaper_sources += ['imageprocess/backend_cuda_stub.c']
+    endif
+endif
+
+unpaper = executable(
+    'unpaper',
+    unpaper_sources,
+    c_args : unpaper_c_args,
     dependencies : unpaper_deps,
     install : true,
 )
