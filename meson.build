@@ -30,6 +30,7 @@ conf_data.set('version', meson.project_version())
 configure_file(input: 'version.h.in', output: 'version.h', configuration: conf_data)
 
 cuda_opt = get_option('cuda')
+have_cuda = false
 unpaper_c_args = []
 unpaper_sources = [
     'file.c', 'parse.c', 'unpaper.c',
@@ -40,6 +41,7 @@ unpaper_sources = [
     'imageprocess/fill.c',
     'imageprocess/filters.c',
     'imageprocess/image.c',
+    'imageprocess/image_cuda.c',
     'imageprocess/masks.c',
     'imageprocess/pixel.c',
     'imageprocess/primitives.c',
@@ -49,13 +51,23 @@ unpaper_sources = [
 ]
 
 if cuda_opt.enabled()
+    have_cuda = true
     unpaper_c_args += ['-DUNPAPER_WITH_CUDA=1']
-    unpaper_sources += ['imageprocess/backend_cuda_stub.c']
+    unpaper_sources += [
+        'imageprocess/backend_cuda_stub.c',
+        'imageprocess/cuda_runtime.c',
+    ]
+    unpaper_deps += [cc.find_library('dl', required : false)]
 elif cuda_opt.auto()
     nvcc = find_program('nvcc', required: false)
     if nvcc.found()
+        have_cuda = true
         unpaper_c_args += ['-DUNPAPER_WITH_CUDA=1']
-        unpaper_sources += ['imageprocess/backend_cuda_stub.c']
+        unpaper_sources += [
+            'imageprocess/backend_cuda_stub.c',
+            'imageprocess/cuda_runtime.c',
+        ]
+        unpaper_deps += [cc.find_library('dl', required : false)]
     endif
 endif
 
@@ -100,3 +112,20 @@ test(
     ],
     timeout : -1,
 )
+
+if have_cuda
+    cuda_roundtrip_test = executable(
+        'cuda_roundtrip_test',
+        [
+            'tests/cuda_roundtrip_test.c',
+            'imageprocess/image_cuda.c',
+            'imageprocess/cuda_runtime.c',
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('cuda roundtrip', cuda_roundtrip_test)
+endif

@@ -177,7 +177,7 @@ void saveImage(char *filename, Image input, int outputPixFmt) {
   if (input.frame->format != outputPixFmt) {
     output = create_image(size_of_image(input), outputPixFmt, false,
                           input.background, input.abs_black_threshold);
-    copy_rectangle(input, output, full_image(input), POINT_ORIGIN);
+    copy_rectangle_cpu(input, output, full_image(input), POINT_ORIGIN);
   }
 
   codec = avcodec_find_encoder(output_codec);

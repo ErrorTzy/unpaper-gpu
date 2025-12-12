@@ -166,6 +166,8 @@ This section is the execution checklist for adding CUDA support while keeping CP
 
 **PR 4: Extend `Image` for GPU residency + sync helpers**
 
+- Status: completed (2025-12-12)
+
 - Scope:
   - Extend `Image` to support backend-owned pixel storage and residency/sync flags:
     `Image.frame` remains the CPU I/O anchor (`AVFrame*`).

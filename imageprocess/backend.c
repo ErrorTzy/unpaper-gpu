@@ -84,7 +84,9 @@ void image_backend_select(UnpaperDevice device) {
 
   case UNPAPER_DEVICE_CUDA:
 #if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
-    errOutput("CUDA backend selected, but it is not implemented yet.");
+    extern const ImageBackend backend_cuda;
+    backend = &backend_cuda;
+    return;
 #else
     errOutput("CUDA backend requested, but this build has no CUDA support.");
 #endif
@@ -93,4 +95,3 @@ void image_backend_select(UnpaperDevice device) {
 
   errOutput("unknown device value: %" PRId32, (int32_t)device);
 }
-

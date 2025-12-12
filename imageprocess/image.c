@@ -10,6 +10,8 @@
 #include "lib/logging.h"
 #include "lib/math_util.h"
 
+void image_cuda_release(Image *image);
+
 /**
  * Allocates a memory block for storing image data and fills the AVFrame-struct
  * with the specified values.
@@ -20,6 +22,19 @@ Image create_image(RectangleSize size, int pixel_format, bool fill,
       .frame = av_frame_alloc(),
       .background = sheet_background,
       .abs_black_threshold = abs_black_threshold,
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+      .cuda =
+          {
+              .dptr = 0,
+              .bytes = 0,
+              .format = -1,
+              .width = 0,
+              .height = 0,
+              .linesize = 0,
+          },
+      .cpu_dirty = true,
+      .cuda_dirty = false,
+#endif
   };
 
   image.frame->width = size.width;
@@ -42,13 +57,24 @@ Image create_image(RectangleSize size, int pixel_format, bool fill,
 
 void replace_image(Image *image, Image *new_image) {
   free_image(image);
-  image->frame = new_image->frame;
-  image->background = new_image->background;
-  image->abs_black_threshold = new_image->abs_black_threshold;
+  *image = *new_image;
   new_image->frame = NULL;
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+  new_image->cuda.dptr = 0;
+  new_image->cuda.bytes = 0;
+  new_image->cuda.format = -1;
+  new_image->cuda.width = 0;
+  new_image->cuda.height = 0;
+  new_image->cuda.linesize = 0;
+  new_image->cpu_dirty = false;
+  new_image->cuda_dirty = false;
+#endif
 }
 
-void free_image(Image *image) { av_frame_free(&image->frame); }
+void free_image(Image *image) {
+  image_cuda_release(image);
+  av_frame_free(&image->frame);
+}
 
 Image create_compatible_image(Image source, RectangleSize size, bool fill) {
   return create_image(size, source.frame->format, fill, source.background,

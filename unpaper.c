@@ -1167,6 +1167,47 @@ int main(int argc, char *argv[]) {
             options.output_pixel_format = page.frame->format;
           }
 
+          if (options.device == UNPAPER_DEVICE_CUDA &&
+              isInMultiIndex(nr, options.ignore_multi_index) &&
+              options.input_count == 1 && options.output_count == 1 &&
+              options.sheet_size.width == -1 && options.sheet_size.height == -1 &&
+              options.page_size.width == -1 && options.page_size.height == -1 &&
+              options.post_page_size.width == -1 &&
+              options.post_page_size.height == -1 &&
+              options.stretch_size.width == -1 &&
+              options.stretch_size.height == -1 &&
+              options.post_stretch_size.width == -1 &&
+              options.post_stretch_size.height == -1 &&
+              options.pre_rotate == 0 && options.post_rotate == 0 &&
+              !options.pre_mirror.horizontal && !options.pre_mirror.vertical &&
+              !options.post_mirror.horizontal && !options.post_mirror.vertical &&
+              options.pre_shift.horizontal == 0 &&
+              options.pre_shift.vertical == 0 &&
+              options.post_shift.horizontal == 0 &&
+              options.post_shift.vertical == 0 &&
+              options.pre_zoom_factor == 1.0 && options.post_zoom_factor == 1.0 &&
+              options.pre_wipes.count == 0 && options.wipes.count == 0 &&
+              options.post_wipes.count == 0 &&
+              options.pre_border.left == 0 && options.pre_border.top == 0 &&
+              options.pre_border.right == 0 && options.pre_border.bottom == 0 &&
+              options.border.left == 0 && options.border.top == 0 &&
+              options.border.right == 0 && options.border.bottom == 0 &&
+              options.post_border.left == 0 && options.post_border.top == 0 &&
+              options.post_border.right == 0 &&
+              options.post_border.bottom == 0 &&
+              options.layout == LAYOUT_SINGLE) {
+            if (options.write_output) {
+              image_ensure_cuda(&page);
+              image_mark_cuda_dirty(&page);
+              image_ensure_cpu(&page);
+
+              verboseLog(VERBOSE_MORE, "saving file %s.\n", outputFileNames[0]);
+              saveImage(outputFileNames[0], page, options.output_pixel_format);
+            }
+            free_image(&page);
+            goto sheet_end;
+          }
+
           // pre-rotate
           if (options.pre_rotate != 0) {
             verboseLog(VERBOSE_NORMAL, "pre-rotating %hd degrees.\n",

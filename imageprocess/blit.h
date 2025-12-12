@@ -13,6 +13,8 @@
 void wipe_rectangle(Image image, Rectangle input_area, Pixel color);
 void copy_rectangle(Image source, Image target, Rectangle source_area,
                     Point target_coords);
+void copy_rectangle_cpu(Image source, Image target, Rectangle source_area,
+                        Point target_coords);
 uint8_t inverse_brightness_rect(Image image, Rectangle input_area);
 uint8_t inverse_lightness_rect(Image image, Rectangle input_area);
 uint8_t darkness_rect(Image image, Rectangle input_area);
