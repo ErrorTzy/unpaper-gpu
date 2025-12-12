@@ -183,6 +183,8 @@ This section is the execution checklist for adding CUDA support while keeping CP
 
 **PR 5: CUDA primitives (required by most of the pipeline)**
 
+- Status: completed (2025-12-12)
+
 - Scope (CUDA backend parity-first):
   - Implement: `wipe_rectangle`, `copy_rectangle`, `mirror`, `shift_image`, `flip_rotate_90`, `center_image`.
   - Ensure wrappers call CUDA implementations when `--device=cuda`.

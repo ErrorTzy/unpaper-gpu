@@ -4,6 +4,7 @@
 
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
+#include <libavutil/buffer.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -92,9 +93,7 @@ static void run_roundtrip_for_format(enum AVPixelFormat fmt) {
   free(expected_a);
   free(expected_c);
 
-  unpaper_cuda_free(image.cuda.dptr);
-  image.cuda.dptr = 0;
-
+  av_buffer_unref(&image.frame->opaque_ref);
   av_frame_free(&image.frame);
 }
 
@@ -113,4 +112,3 @@ int main(void) {
 
   return 0;
 }
-

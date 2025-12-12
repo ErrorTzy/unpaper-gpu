@@ -12,18 +12,6 @@ typedef struct {
   AVFrame *frame;
   Pixel background;
   uint8_t abs_black_threshold;
-#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
-  struct {
-    uint64_t dptr;
-    size_t bytes;
-    int format;
-    int width;
-    int height;
-    int linesize;
-  } cuda;
-  bool cpu_dirty;
-  bool cuda_dirty;
-#endif
 } Image;
 
 #define EMPTY_IMAGE                                                            \

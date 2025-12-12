@@ -31,6 +31,7 @@ configure_file(input: 'version.h.in', output: 'version.h', configuration: conf_d
 
 cuda_opt = get_option('cuda')
 have_cuda = false
+nvcc = disabler()
 unpaper_c_args = []
 unpaper_sources = [
     'file.c', 'parse.c', 'unpaper.c',
@@ -51,24 +52,55 @@ unpaper_sources = [
 ]
 
 if cuda_opt.enabled()
+    nvcc_compat = find_program('/usr/local/cuda-13.0/bin/nvcc', required: false)
+    nvcc = nvcc_compat.found() ? nvcc_compat : find_program('nvcc', required: true)
     have_cuda = true
     unpaper_c_args += ['-DUNPAPER_WITH_CUDA=1']
     unpaper_sources += [
-        'imageprocess/backend_cuda_stub.c',
+        'imageprocess/backend_cuda.c',
         'imageprocess/cuda_runtime.c',
     ]
     unpaper_deps += [cc.find_library('dl', required : false)]
 elif cuda_opt.auto()
-    nvcc = find_program('nvcc', required: false)
+    nvcc_compat = find_program('/usr/local/cuda-13.0/bin/nvcc', required: false)
+    nvcc = nvcc_compat.found() ? nvcc_compat : find_program('nvcc', required: false)
     if nvcc.found()
         have_cuda = true
         unpaper_c_args += ['-DUNPAPER_WITH_CUDA=1']
         unpaper_sources += [
-            'imageprocess/backend_cuda_stub.c',
+            'imageprocess/backend_cuda.c',
             'imageprocess/cuda_runtime.c',
         ]
         unpaper_deps += [cc.find_library('dl', required : false)]
     endif
+endif
+
+if have_cuda
+    python3 = find_program('python3', required: true)
+
+    cuda_kernels_ptx = custom_target(
+        'cuda_kernels_ptx',
+        input: 'imageprocess/cuda_kernels.cu',
+        output: 'cuda_kernels.ptx',
+        command: [
+            nvcc,
+            '--ptx',
+            '-o', '@OUTPUT@',
+            '@INPUT@',
+            '-arch=compute_75',
+            '-I', meson.project_source_root(),
+            '-Xcompiler=-U_GNU_SOURCE',
+        ],
+    )
+
+    cuda_kernels_ptx_c = custom_target(
+        'cuda_kernels_ptx_c',
+        input: cuda_kernels_ptx,
+        output: 'cuda_kernels_ptx.c',
+        command: [python3, meson.project_source_root() + '/build-scripts/ptx2c.py', '@INPUT@', '@OUTPUT@'],
+    )
+
+    unpaper_sources += [cuda_kernels_ptx_c]
 endif
 
 unpaper = executable(
@@ -128,4 +160,31 @@ if have_cuda
     )
 
     test('cuda roundtrip', cuda_roundtrip_test)
+
+    cuda_primitives_test = executable(
+        'cuda_primitives_test',
+        [
+            'tests/cuda_primitives_test.c',
+            'imageprocess/backend.c',
+            'imageprocess/backend_cuda.c',
+            'imageprocess/blit.c',
+            'imageprocess/deskew.c',
+            'imageprocess/interpolate.c',
+            'imageprocess/fill.c',
+            'imageprocess/filters.c',
+            'imageprocess/image.c',
+            'imageprocess/image_cuda.c',
+            'imageprocess/masks.c',
+            'imageprocess/pixel.c',
+            'imageprocess/primitives.c',
+            'imageprocess/cuda_runtime.c',
+            cuda_kernels_ptx_c,
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('cuda primitives', cuda_primitives_test)
 endif

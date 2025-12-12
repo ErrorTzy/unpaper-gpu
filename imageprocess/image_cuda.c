@@ -4,6 +4,7 @@
 
 #include "imageprocess/image.h"
 
+#include <libavutil/buffer.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
 
@@ -13,22 +14,74 @@
 #include "imageprocess/cuda_runtime.h"
 #endif
 
-void image_cuda_release(Image *image) {
+typedef struct {
+  uint64_t dptr;
+  size_t bytes;
+  int format;
+  int width;
+  int height;
+  int linesize;
+  bool cpu_dirty;
+  bool cuda_dirty;
+} ImageCudaState;
+
 #if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
-  if (image == NULL) {
+static void image_cuda_state_free(void *opaque, uint8_t *data) {
+  (void)opaque;
+  if (data == NULL) {
     return;
   }
-  if (image->cuda.dptr != 0) {
-    unpaper_cuda_free(image->cuda.dptr);
-    image->cuda.dptr = 0;
-    image->cuda.bytes = 0;
-    image->cuda.format = -1;
-    image->cuda.width = 0;
-    image->cuda.height = 0;
-    image->cuda.linesize = 0;
+  ImageCudaState *st = (ImageCudaState *)data;
+  if (st->dptr != 0) {
+    unpaper_cuda_free(st->dptr);
+    st->dptr = 0;
   }
-  image->cpu_dirty = false;
-  image->cuda_dirty = false;
+  av_free(st);
+}
+
+static ImageCudaState *image_cuda_state_get(Image *image, bool create) {
+  if (image == NULL || image->frame == NULL) {
+    return NULL;
+  }
+
+  if (image->frame->opaque_ref != NULL) {
+    return (ImageCudaState *)image->frame->opaque_ref->data;
+  }
+  if (!create) {
+    return NULL;
+  }
+
+  ImageCudaState *st = av_mallocz(sizeof(*st));
+  if (st == NULL) {
+    errOutput("unable to allocate CUDA image state.");
+  }
+
+  image->frame->opaque_ref =
+      av_buffer_create((uint8_t *)st, sizeof(*st), image_cuda_state_free, NULL,
+                       0);
+  if (image->frame->opaque_ref == NULL) {
+    av_free(st);
+    errOutput("unable to allocate CUDA state buffer.");
+  }
+
+  st->dptr = 0;
+  st->bytes = 0;
+  st->format = -1;
+  st->width = 0;
+  st->height = 0;
+  st->linesize = 0;
+  st->cpu_dirty = true;
+  st->cuda_dirty = false;
+  return st;
+}
+#endif
+
+void image_cuda_release(Image *image) {
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+  if (image == NULL || image->frame == NULL) {
+    return;
+  }
+  av_buffer_unref(&image->frame->opaque_ref);
 #else
   (void)image;
 #endif
@@ -36,11 +89,12 @@ void image_cuda_release(Image *image) {
 
 void image_mark_cpu_dirty(Image *image) {
 #if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
-  if (image == NULL) {
+  ImageCudaState *st = image_cuda_state_get(image, false);
+  if (st == NULL) {
     return;
   }
-  image->cpu_dirty = true;
-  image->cuda_dirty = false;
+  st->cpu_dirty = true;
+  st->cuda_dirty = false;
 #else
   (void)image;
 #endif
@@ -48,11 +102,12 @@ void image_mark_cpu_dirty(Image *image) {
 
 void image_mark_cuda_dirty(Image *image) {
 #if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
-  if (image == NULL) {
+  ImageCudaState *st = image_cuda_state_get(image, false);
+  if (st == NULL) {
     return;
   }
-  image->cuda_dirty = true;
-  image->cpu_dirty = false;
+  st->cuda_dirty = true;
+  st->cpu_dirty = false;
 #else
   (void)image;
 #endif
@@ -60,7 +115,8 @@ void image_mark_cuda_dirty(Image *image) {
 
 void image_ensure_cuda(Image *image) {
 #if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
-  if (image == NULL || image->frame == NULL) {
+  ImageCudaState *st = image_cuda_state_get(image, true);
+  if (st == NULL || image == NULL || image->frame == NULL) {
     return;
   }
 
@@ -79,9 +135,9 @@ void image_ensure_cuda(Image *image) {
     errOutput("CUDA upload requested, but pixel format is unsupported.");
   }
 
-  UnpaperCudaInitStatus st = unpaper_cuda_try_init();
-  if (st != UNPAPER_CUDA_INIT_OK) {
-    errOutput("%s", unpaper_cuda_init_status_string(st));
+  UnpaperCudaInitStatus init_status = unpaper_cuda_try_init();
+  if (init_status != UNPAPER_CUDA_INIT_OK) {
+    errOutput("%s", unpaper_cuda_init_status_string(init_status));
   }
 
   const size_t bytes = (size_t)image->frame->linesize[0] *
@@ -91,27 +147,29 @@ void image_ensure_cuda(Image *image) {
   }
 
   const bool need_alloc =
-      (image->cuda.dptr == 0) || (image->cuda.bytes != bytes) ||
-      (image->cuda.format != image->frame->format) ||
-      (image->cuda.width != image->frame->width) ||
-      (image->cuda.height != image->frame->height) ||
-      (image->cuda.linesize != image->frame->linesize[0]);
+      (st->dptr == 0) || (st->bytes != bytes) ||
+      (st->format != image->frame->format) || (st->width != image->frame->width) ||
+      (st->height != image->frame->height) ||
+      (st->linesize != image->frame->linesize[0]);
   if (need_alloc) {
-    image_cuda_release(image);
-    image->cuda.dptr = unpaper_cuda_malloc(bytes);
-    image->cuda.bytes = bytes;
-    image->cuda.format = image->frame->format;
-    image->cuda.width = image->frame->width;
-    image->cuda.height = image->frame->height;
-    image->cuda.linesize = image->frame->linesize[0];
-    image->cpu_dirty = true;
-    image->cuda_dirty = false;
+    if (st->dptr != 0) {
+      unpaper_cuda_free(st->dptr);
+      st->dptr = 0;
+    }
+    st->dptr = unpaper_cuda_malloc(bytes);
+    st->bytes = bytes;
+    st->format = image->frame->format;
+    st->width = image->frame->width;
+    st->height = image->frame->height;
+    st->linesize = image->frame->linesize[0];
+    st->cpu_dirty = true;
+    st->cuda_dirty = false;
   }
 
-  if (image->cpu_dirty) {
-    unpaper_cuda_memcpy_h2d(image->cuda.dptr, image->frame->data[0], bytes);
-    image->cpu_dirty = false;
-    image->cuda_dirty = false;
+  if (st->cpu_dirty) {
+    unpaper_cuda_memcpy_h2d(st->dptr, image->frame->data[0], bytes);
+    st->cpu_dirty = false;
+    st->cuda_dirty = false;
   }
 #else
   (void)image;
@@ -121,31 +179,31 @@ void image_ensure_cuda(Image *image) {
 
 void image_ensure_cpu(Image *image) {
 #if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
-  if (image == NULL || image->frame == NULL) {
+  ImageCudaState *st = image_cuda_state_get(image, false);
+  if (image == NULL || image->frame == NULL || st == NULL) {
     return;
   }
-  if (image->cuda.dptr == 0) {
+  if (st->dptr == 0) {
     return;
   }
 
-  if (image->cuda_dirty) {
+  if (st->cuda_dirty) {
     const size_t bytes = (size_t)image->frame->linesize[0] *
                          (size_t)image->frame->height;
-    if (bytes == 0 || bytes != image->cuda.bytes) {
+    if (bytes == 0 || bytes != st->bytes) {
       errOutput("invalid image buffer size for CUDA download.");
     }
 
-    UnpaperCudaInitStatus st = unpaper_cuda_try_init();
-    if (st != UNPAPER_CUDA_INIT_OK) {
-      errOutput("%s", unpaper_cuda_init_status_string(st));
+    UnpaperCudaInitStatus init_status = unpaper_cuda_try_init();
+    if (init_status != UNPAPER_CUDA_INIT_OK) {
+      errOutput("%s", unpaper_cuda_init_status_string(init_status));
     }
 
-    unpaper_cuda_memcpy_d2h(image->frame->data[0], image->cuda.dptr, bytes);
-    image->cuda_dirty = false;
-    image->cpu_dirty = false;
+    unpaper_cuda_memcpy_d2h(image->frame->data[0], st->dptr, bytes);
+    st->cuda_dirty = false;
+    st->cpu_dirty = false;
   }
 #else
   (void)image;
 #endif
 }
-

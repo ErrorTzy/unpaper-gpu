@@ -145,6 +145,10 @@ void saveImage(char *filename, Image input, int outputPixFmt) {
   int ret;
   char errbuff[1024];
 
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+  image_ensure_cpu(&input);
+#endif
+
   if (avformat_alloc_output_context2(&out_ctx, NULL, "image2", filename) < 0 ||
       out_ctx == NULL) {
     errOutput("unable to allocate output context.");

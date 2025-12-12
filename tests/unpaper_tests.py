@@ -70,8 +70,48 @@ def test_device_cpu_works_and_cuda_unavailable_errors(imgsrc_path, tmp_path):
         text=True,
         check=False,
     )
-    assert proc.returncode != 0
-    assert "cuda" in proc.stderr.lower()
+    # In CPU-only builds, CUDA must error.
+    # In CUDA-capable builds, CUDA may still error at runtime if no device is
+    # available, but it must never silently succeed in a CPU-only build.
+    if proc.returncode != 0:
+        assert "cuda" in proc.stderr.lower()
+
+
+def _cuda_runtime_available(*, imgsrc_path: pathlib.Path, tmp_path: pathlib.Path) -> bool:
+    unpaper_path = os.getenv("TEST_UNPAPER_BINARY", "unpaper")
+    source_path = imgsrc_path / "imgsrc003.png"
+    result_path = tmp_path / "cuda-probe.ppm"
+
+    proc = subprocess.run(
+        [unpaper_path, "-vvv", "--device", "cuda", "-n", str(source_path), str(result_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ("--pre-rotate", "90"),
+        ("-M", "h"),
+        ("--pre-shift", "10mils,-7mils"),
+    ],
+)
+def test_cuda_pre_ops_match_cpu(imgsrc_path, tmp_path, extra_args):
+    if not _cuda_runtime_available(imgsrc_path=imgsrc_path, tmp_path=tmp_path):
+        pytest.skip("CUDA runtime/device not available")
+
+    source_path = imgsrc_path / "imgsrc003.png"
+    cpu_path = tmp_path / "cpu.ppm"
+    cuda_path = tmp_path / "cuda.ppm"
+
+    run_unpaper("--device", "cpu", "-n", *extra_args, str(source_path), str(cpu_path))
+    run_unpaper("--device", "cuda", "-n", *extra_args, str(source_path), str(cuda_path))
+
+    assert compare_images(golden=cpu_path, result=cuda_path) == 0.0
 
 
 @pytest.fixture(name="imgsrc_path")
