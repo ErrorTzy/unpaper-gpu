@@ -33,6 +33,7 @@ cuda_opt = get_option('cuda')
 have_cuda = false
 nvcc = disabler()
 unpaper_c_args = []
+unpaper_cpp_args = []
 unpaper_sources = [
     'file.c', 'parse.c', 'unpaper.c',
     'imageprocess/blit.c',
@@ -51,6 +52,32 @@ unpaper_sources = [
     'lib/options.c',
     'lib/physical.c',
 ]
+
+opencv_opt = get_option('opencv')
+have_opencv = false
+opencv_dep = disabler()
+opencv_bridge_source = 'imageprocess/opencv_bridge_stub.c'
+cpp_enabled = false
+
+if opencv_opt.enabled() or opencv_opt.auto()
+    cpp_enabled = add_languages('cpp', required : opencv_opt.enabled())
+    if cpp_enabled
+        opencv_dep = dependency('opencv4', method : 'pkg-config',
+                                required : opencv_opt.enabled())
+        if opencv_dep.found()
+            have_opencv = true
+            opencv_bridge_source = 'imageprocess/opencv_bridge.cpp'
+            unpaper_c_args += ['-DUNPAPER_WITH_OPENCV=1']
+            unpaper_cpp_args += ['-DUNPAPER_WITH_OPENCV=1']
+        elif opencv_opt.enabled()
+            error('OpenCV requested but opencv4 package not found')
+        endif
+    elif opencv_opt.enabled()
+        error('OpenCV requested but no C++ compiler available')
+    endif
+endif
+
+unpaper_sources += [opencv_bridge_source]
 
 if cuda_opt.enabled()
     nvcc_compat = find_program('/usr/local/cuda-13.0/bin/nvcc', required: false)
@@ -105,11 +132,14 @@ if have_cuda
     unpaper_sources += [cuda_kernels_ptx_c]
 endif
 
+unpaper_all_deps = have_opencv ? unpaper_deps + [opencv_dep] : unpaper_deps
+
 unpaper = executable(
     'unpaper',
     unpaper_sources,
     c_args : unpaper_c_args,
-    dependencies : unpaper_deps,
+    cpp_args : cpp_enabled ? unpaper_cpp_args : [],
+    dependencies : unpaper_all_deps,
     install : true,
 )
 

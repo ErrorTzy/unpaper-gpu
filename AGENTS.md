@@ -295,9 +295,71 @@ Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing
   - No behavior changes.
   - Enables later PRs to overlap decode/compute/encode without data races.
 
-**PR 13: Rewrite CUDA noisefilter for parallelism (largest single win)**
+**PR 12.1: Add optional OpenCV dependency hook (C++ bridge only)**
 
 - Status: completed (2025-12-13)
+- Scope:
+  - Add a Meson feature option `opencv` (default `disabled`).
+  - Detect `opencv4` via pkg-config; if enabled, switch build to allow C++ and expose a small C API shim for CUDA CCL.
+  - No functional changes; just build plumbing and CI knobs.
+- Tests:
+  - CPU + CUDA suites still pass when `-Dopencv=disabled` (default).
+  - Configure/build with `-Dopencv=enabled` (skip runtime use for now).
+- Acceptance:
+  - Build remains C-only when OpenCV is off; adds C++ compilation path when on.
+
+**PR 12.2: CUDA stream interop + mask adapter**
+
+- Status: planned
+- Scope:
+  - Add a C shim wrapping OpenCV’s CUDA stream handle from our `UnpaperCudaStream`.
+  - Implement GPU mask extraction (lightness < `min_white_level`) into `cv::cuda::GpuMat` without extra H2D copies.
+  - No noisefilter behavioral change yet; just utilities callable from backend.
+- Tests:
+  - New unit test ensuring stream interop and mask extraction round-trip equals our existing mask on CPU.
+- Acceptance:
+  - Utilities compile and run under `-Dopencv=enabled`; CPU/CUDA pipelines unchanged.
+
+**PR 12.3: OpenCV CUDA CCL noisefilter path (GRAY8)**
+
+- Status: planned
+- Scope:
+  - Implement noisefilter GPU path using `cv::cuda::connectedComponents` on GRAY8 images, with label counting and apply on GPU.
+  - Keep existing custom CCL as fallback or when OpenCV disabled.
+  - Ensure determinism and parity with CPU within tolerance.
+- Tests:
+  - Extend `tests/cuda_filters_test.c` to run both OpenCV and fallback paths; determinism checks.
+  - Re-run golden pytest on CPU/CUDA.
+- Acceptance:
+  - GRAY8 CUDA noisefilter uses OpenCV path when enabled; outputs match CPU within tolerance.
+
+**PR 12.4: Format coverage + perf gate**
+
+- Status: planned
+- Scope:
+  - Support RGB24 and Y400A by generating masks on GPU, reusing OpenCV CCL.
+  - Add A1 benchmark run with `--device=cuda` + OpenCV path; target <3.0s on this machine.
+  - Add a build/CLI capability flag showing which path is active.
+- Tests:
+  - New regression for RGB24 noisefilter parity; re-run benchmark harness.
+- Acceptance:
+  - A1 CUDA runtime <3.0s with OpenCV path enabled; parity holds across formats.
+
+**PR 12.5: Packaging + fallback polish**
+
+- Status: planned
+- Scope:
+  - Document the optional OpenCV dependency and how to enable it.
+  - Ensure clean fallbacks (clear error when `--device=cuda` + OpenCV path requested but unavailable).
+  - Trim extra allocations; prefer stream reuse; add perf logging guardable by `--perf`.
+- Tests:
+  - CPU + CUDA suites with and without OpenCV; `reuse lint` still passes.
+- Acceptance:
+  - Optional dependency well-documented; behavior predictable when absent.
+
+**PR 13: Rewrite CUDA noisefilter for parallelism (largest single win)**
+
+- Status: incomplete (2025-12-13; performance target unmet)
 - Scope:
   - Replace the current effectively-serial CUDA noisefilter kernel with a GPU-parallel implementation.
   - Preferred algorithm: connected-components labeling (CCL) on the “dark” mask (`lightness < min_white_level`) and removal of components with size `<= intensity`.
