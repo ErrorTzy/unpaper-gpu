@@ -242,4 +242,31 @@ if have_cuda
     )
 
     test('cuda filters', cuda_filters_test)
+
+    cuda_masks_border_test = executable(
+        'cuda_masks_border_test',
+        [
+            'tests/cuda_masks_border_test.c',
+            'imageprocess/backend.c',
+            'imageprocess/backend_cuda.c',
+            'imageprocess/blit.c',
+            'imageprocess/deskew.c',
+            'imageprocess/fill.c',
+            'imageprocess/filters.c',
+            'imageprocess/interpolate.c',
+            'imageprocess/image.c',
+            'imageprocess/image_cuda.c',
+            'imageprocess/masks.c',
+            'imageprocess/pixel.c',
+            'imageprocess/primitives.c',
+            'imageprocess/cuda_runtime.c',
+            cuda_kernels_ptx_c,
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('cuda masks/borders', cuda_masks_border_test)
 endif

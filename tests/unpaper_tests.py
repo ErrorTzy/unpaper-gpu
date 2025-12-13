@@ -153,6 +153,77 @@ def test_cuda_stretch_and_post_size_match_cpu(imgsrc_path, tmp_path, interp):
     assert compare_images(golden=cpu_path, result=cuda_path) == 0.0
 
 
+def test_c1_mask_border_scan_fixture(imgsrc_path, goldendir_path, tmp_path):
+    """[C1] Mask/border scan + wipes/borders, deskew disabled."""
+
+    source_path = imgsrc_path / "imgsrc006.png"
+    result_path = tmp_path / "result.ppm"
+    golden_path = goldendir_path / "goldenC1.ppm"
+
+    run_unpaper(
+        "--no-deskew",
+        "--no-blackfilter",
+        "--no-noisefilter",
+        "--no-blurfilter",
+        "--no-grayfilter",
+        "--no-mask-center",
+        "--mask-scan-direction",
+        "hv",
+        "--mask-scan-threshold",
+        "0.8,0.8",
+        "--mask-scan-minimum",
+        "1,1",
+        "--border-scan-direction",
+        "hv",
+        "--pre-wipe",
+        "0,0,9,9",
+        "--pre-border",
+        "2,2,2,2",
+        str(source_path),
+        str(result_path),
+    )
+
+    assert compare_images(golden=golden_path, result=result_path) == 0.0
+
+
+def test_cuda_mask_border_scan_fixture_match_cpu(imgsrc_path, tmp_path):
+    if not _cuda_runtime_available(imgsrc_path=imgsrc_path, tmp_path=tmp_path):
+        pytest.skip("CUDA runtime/device not available")
+
+    source_path = imgsrc_path / "imgsrc006.png"
+    cpu_path = tmp_path / "cpu.ppm"
+    cuda_path = tmp_path / "cuda.ppm"
+    cuda_path2 = tmp_path / "cuda2.ppm"
+
+    args = (
+        "--no-deskew",
+        "--no-blackfilter",
+        "--no-noisefilter",
+        "--no-blurfilter",
+        "--no-grayfilter",
+        "--no-mask-center",
+        "--mask-scan-direction",
+        "hv",
+        "--mask-scan-threshold",
+        "0.8,0.8",
+        "--mask-scan-minimum",
+        "1,1",
+        "--border-scan-direction",
+        "hv",
+        "--pre-wipe",
+        "0,0,9,9",
+        "--pre-border",
+        "2,2,2,2",
+    )
+
+    run_unpaper("--device", "cpu", *args, str(source_path), str(cpu_path))
+    run_unpaper("--device", "cuda", *args, str(source_path), str(cuda_path))
+    run_unpaper("--device", "cuda", *args, str(source_path), str(cuda_path2))
+
+    assert compare_images(golden=cpu_path, result=cuda_path) == 0.0
+    assert compare_images(golden=cuda_path, result=cuda_path2) == 0.0
+
+
 @pytest.fixture(name="imgsrc_path")
 def get_imgsrc_directory() -> pathlib.Path:
     return pathlib.Path(os.getenv("TEST_IMGSRC_DIR", "tests/source_images/"))

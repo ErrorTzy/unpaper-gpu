@@ -224,6 +224,8 @@ This section is the execution checklist for adding CUDA support while keeping CP
 
 **PR 8: CUDA masks/borders/wipes (detection + application)**
 
+- Status: completed (2025-12-13)
+
 - Scope:
   - Implement: `detect_masks`, `align_mask`, `apply_masks`, `apply_wipes`, `apply_border`, `detect_border`.
   - GPU does bulk scanning/reduction; CPU may do final selection logic if needed for determinism (this is not a fallback; it is control logic).
