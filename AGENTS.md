@@ -282,7 +282,7 @@ Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing
 
 **PR 12: CUDA throughput scaffolding (streams + async + pooling)**
 
-- Status: planned
+- Status: completed (2025-12-13)
 - Scope:
   - Extend `imageprocess/cuda_runtime.*` to support CUDA streams and stream sync.
   - Add async H2D/D2H/D2D memcpy APIs and pinned host buffers for transfers.

@@ -297,4 +297,18 @@ if have_cuda
     )
 
     test('cuda deskew', cuda_deskew_test)
+
+    cuda_stream_test = executable(
+        'cuda_stream_test',
+        [
+            'tests/cuda_stream_test.c',
+            'imageprocess/cuda_runtime.c',
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('cuda stream', cuda_stream_test)
 endif
