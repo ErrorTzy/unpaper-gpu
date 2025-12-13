@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -33,3 +34,8 @@ void unpaper_cuda_launch_kernel(void *func, uint32_t grid_x, uint32_t grid_y,
                                 uint32_t grid_z, uint32_t block_x,
                                 uint32_t block_y, uint32_t block_z,
                                 void **kernel_params);
+
+bool unpaper_cuda_events_supported(void);
+bool unpaper_cuda_event_pair_start(void **start, void **stop);
+double unpaper_cuda_event_pair_stop_ms(void **start, void **stop);
+void unpaper_cuda_stream_synchronize(void);

@@ -18,6 +18,7 @@ typedef struct CUctx_st *CUcontext;
 typedef struct CUstream_st *CUstream;
 typedef struct CUmod_st *CUmodule;
 typedef struct CUfunc_st *CUfunction;
+typedef struct CUevent_st *CUevent;
 typedef uint64_t CUdeviceptr;
 
 enum { CUDA_SUCCESS = 0 };
@@ -60,6 +61,12 @@ typedef CUresult (*cuLaunchKernel_fn)(
     unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY,
     unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream,
     void **kernelParams, void **extra);
+typedef CUresult (*cuEventCreate_fn)(CUevent *phEvent, unsigned int Flags);
+typedef CUresult (*cuEventDestroy_fn)(CUevent hEvent);
+typedef CUresult (*cuEventRecord_fn)(CUevent hEvent, CUstream hStream);
+typedef CUresult (*cuEventSynchronize_fn)(CUevent hEvent);
+typedef CUresult (*cuEventElapsedTime_fn)(float *pMilliseconds, CUevent hStart,
+                                          CUevent hEnd);
 
 typedef struct {
   void *lib;
@@ -89,6 +96,11 @@ typedef struct {
   cuModuleUnload_fn cuModuleUnload;
   cuModuleGetFunction_fn cuModuleGetFunction;
   cuLaunchKernel_fn cuLaunchKernel;
+  cuEventCreate_fn cuEventCreate;
+  cuEventDestroy_fn cuEventDestroy;
+  cuEventRecord_fn cuEventRecord;
+  cuEventSynchronize_fn cuEventSynchronize;
+  cuEventElapsedTime_fn cuEventElapsedTime;
 } CudaSymbols;
 
 static CudaSymbols syms;
@@ -161,6 +173,13 @@ static bool load_cuda_driver_symbols(void) {
   syms.cuModuleGetFunction =
       (cuModuleGetFunction_fn)load_sym("cuModuleGetFunction");
   syms.cuLaunchKernel = (cuLaunchKernel_fn)load_sym("cuLaunchKernel");
+  syms.cuEventCreate = (cuEventCreate_fn)load_sym("cuEventCreate");
+  syms.cuEventDestroy = (cuEventDestroy_fn)load_sym("cuEventDestroy");
+  syms.cuEventRecord = (cuEventRecord_fn)load_sym("cuEventRecord");
+  syms.cuEventSynchronize =
+      (cuEventSynchronize_fn)load_sym("cuEventSynchronize");
+  syms.cuEventElapsedTime =
+      (cuEventElapsedTime_fn)load_sym("cuEventElapsedTime");
 
   if (syms.cuInit == NULL || syms.cuDeviceGetCount == NULL ||
       syms.cuDeviceGet == NULL || syms.cuCtxCreate == NULL ||
@@ -411,5 +430,81 @@ void unpaper_cuda_launch_kernel(void *func, uint32_t grid_x, uint32_t grid_y,
     if (res != CUDA_SUCCESS) {
       errOutput("CUDA context synchronize failed: %s", cu_err(res));
     }
+  }
+}
+
+bool unpaper_cuda_events_supported(void) {
+  if (!cuda_initialized) {
+    UnpaperCudaInitStatus st = unpaper_cuda_try_init();
+    if (st != UNPAPER_CUDA_INIT_OK) {
+      return false;
+    }
+  }
+
+  return (cuda_stream != NULL && syms.cuEventCreate != NULL &&
+          syms.cuEventDestroy != NULL && syms.cuEventRecord != NULL &&
+          syms.cuEventSynchronize != NULL && syms.cuEventElapsedTime != NULL);
+}
+
+bool unpaper_cuda_event_pair_start(void **start, void **stop) {
+  if (start == NULL || stop == NULL) {
+    return false;
+  }
+  *start = NULL;
+  *stop = NULL;
+
+  if (!unpaper_cuda_events_supported()) {
+    return false;
+  }
+
+  CUevent ev_start = NULL;
+  CUevent ev_stop = NULL;
+  if (syms.cuEventCreate(&ev_start, 0) != CUDA_SUCCESS ||
+      syms.cuEventCreate(&ev_stop, 0) != CUDA_SUCCESS) {
+    return false;
+  }
+
+  if (syms.cuEventRecord(ev_start, cuda_stream) != CUDA_SUCCESS) {
+    (void)syms.cuEventDestroy(ev_start);
+    (void)syms.cuEventDestroy(ev_stop);
+    return false;
+  }
+
+  *start = (void *)ev_start;
+  *stop = (void *)ev_stop;
+  return true;
+}
+
+double unpaper_cuda_event_pair_stop_ms(void **start, void **stop) {
+  if (start == NULL || stop == NULL || *start == NULL || *stop == NULL) {
+    return 0.0;
+  }
+  CUevent ev_start = (CUevent)*start;
+  CUevent ev_stop = (CUevent)*stop;
+
+  double ms = 0.0;
+  if (syms.cuEventRecord(ev_stop, cuda_stream) == CUDA_SUCCESS &&
+      syms.cuEventSynchronize(ev_stop) == CUDA_SUCCESS) {
+    float elapsed = 0.0f;
+    if (syms.cuEventElapsedTime(&elapsed, ev_start, ev_stop) == CUDA_SUCCESS) {
+      ms = (double)elapsed;
+    }
+  }
+
+  (void)syms.cuEventDestroy(ev_start);
+  (void)syms.cuEventDestroy(ev_stop);
+  *start = NULL;
+  *stop = NULL;
+  return ms;
+}
+
+void unpaper_cuda_stream_synchronize(void) {
+  if (!cuda_initialized) {
+    return;
+  }
+  if (cuda_stream != NULL && syms.cuStreamSynchronize != NULL) {
+    (void)syms.cuStreamSynchronize(cuda_stream);
+  } else if (syms.cuCtxSynchronize != NULL) {
+    (void)syms.cuCtxSynchronize();
   }
 }

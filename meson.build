@@ -47,6 +47,7 @@ unpaper_sources = [
     'imageprocess/pixel.c',
     'imageprocess/primitives.c',
     'lib/logging.c',
+    'lib/perf.c',
     'lib/options.c',
     'lib/physical.c',
 ]

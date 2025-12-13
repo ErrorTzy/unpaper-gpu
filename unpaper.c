@@ -27,6 +27,7 @@
 #include "imageprocess/masks.h"
 #include "imageprocess/pixel.h"
 #include "lib/options.h"
+#include "lib/perf.h"
 #include "lib/physical.h"
 #include "parse.h"
 #include "unpaper.h"
@@ -43,6 +44,7 @@
           "Usage: unpaper [options] <input-file(s)> <output-file(s)>\n"        \
           "\n"                                                                 \
           "Options: --device=cpu|cuda (default: cpu)\n"                        \
+          "         --perf (print per-stage timings)\n"                        \
           "\n"                                                                 \
           "Filenames may contain a formatting placeholder starting with '%%' " \
           "to insert a\n"                                                      \
@@ -142,6 +144,7 @@ enum LONG_OPTION_VALUES {
   OPT_DEBUG_SAVE,
   OPT_INTERPOLATE,
   OPT_DEVICE,
+  OPT_PERF,
 };
 
 /****************************************************************************
@@ -394,6 +397,7 @@ int main(int argc, char *argv[]) {
           {"vvvv", no_argument, NULL, OPT_DEBUG_SAVE},
           {"interpolate", required_argument, NULL, OPT_INTERPOLATE},
           {"device", required_argument, NULL, OPT_DEVICE},
+          {"perf", no_argument, NULL, OPT_PERF},
           {NULL, no_argument, NULL, 0}};
 
       c = getopt_long_only(argc, argv, "hVl:S:x::n::M:s:z:p:m:W:B:w:b:Tt:qv",
@@ -952,6 +956,10 @@ int main(int argc, char *argv[]) {
                     optarg);
         }
         break;
+
+      case OPT_PERF:
+        options.perf = true;
+        break;
       }
     }
 
@@ -1040,6 +1048,7 @@ int main(int argc, char *argv[]) {
   RectangleSize previousSize = {-1, -1};
   Image sheet = EMPTY_IMAGE;
   Image page = EMPTY_IMAGE;
+  PerfRecorder perf;
 
   for (int nr = options.start_sheet;
        (options.end_sheet == -1) || (nr <= options.end_sheet); nr++) {
@@ -1054,6 +1063,8 @@ int main(int argc, char *argv[]) {
 
     bool inputWildcard =
         options.multiple_sheets && (strchr(argv[optind], '%') != NULL);
+    perf_recorder_init(&perf, options.perf,
+                       options.device == UNPAPER_DEVICE_CUDA);
     bool outputWildcard = false;
 
     for (int i = 0; i < options.input_count; i++) {
@@ -1153,6 +1164,7 @@ int main(int argc, char *argv[]) {
       }
 
       // load input image(s)
+      perf_stage_begin(&perf, PERF_STAGE_DECODE);
       for (int j = 0; j < options.input_count; j++) {
         if (inputFileNames[j] !=
             NULL) { // may be null if --insert-blank or --replace-blank
@@ -1205,6 +1217,7 @@ int main(int argc, char *argv[]) {
               saveImage(outputFileNames[0], page, options.output_pixel_format);
             }
             free_image(&page);
+            perf_stage_end(&perf, PERF_STAGE_DECODE);
             goto sheet_end;
           }
 
@@ -1271,6 +1284,13 @@ int main(int argc, char *argv[]) {
       }
 
       previousSize = inputSize;
+      perf_stage_end(&perf, PERF_STAGE_DECODE);
+
+      if (options.device == UNPAPER_DEVICE_CUDA) {
+        perf_stage_begin(&perf, PERF_STAGE_UPLOAD);
+        image_ensure_cuda(&sheet);
+        perf_stage_end(&perf, PERF_STAGE_UPLOAD);
+      }
 
       // pre-mirroring
       if (options.pre_mirror.horizontal || options.pre_mirror.vertical) {
@@ -1723,6 +1743,7 @@ int main(int argc, char *argv[]) {
         apply_border(sheet, options.pre_border, options.mask_color);
       }
 
+      perf_stage_begin(&perf, PERF_STAGE_FILTERS);
       // black area filter
       if (!isExcluded(nr, options.no_blackfilter_multi_index,
                       options.ignore_multi_index)) {
@@ -1754,7 +1775,9 @@ int main(int argc, char *argv[]) {
       } else {
         verboseLog(VERBOSE_MORE, "+ blurfilter DISABLED for sheet %d\n", nr);
       }
+      perf_stage_end(&perf, PERF_STAGE_FILTERS);
 
+      perf_stage_begin(&perf, PERF_STAGE_MASKS);
       // mask-detection
       if (!isExcluded(nr, options.no_mask_scan_multi_index,
                       options.ignore_multi_index)) {
@@ -1782,8 +1805,10 @@ int main(int argc, char *argv[]) {
       }
 
       // rotation-detection
+      perf_stage_end(&perf, PERF_STAGE_MASKS);
       if ((!isExcluded(nr, options.no_deskew_multi_index,
                        options.ignore_multi_index))) {
+        perf_stage_begin(&perf, PERF_STAGE_DESKEW);
         saveDebug("_before-deskew%d.pnm", nr, sheet);
 
         // detect masks again, we may get more precise results now after first
@@ -1812,11 +1837,13 @@ int main(int argc, char *argv[]) {
         }
 
         saveDebug("_after-deskew%d.pnm", nr, sheet);
+        perf_stage_end(&perf, PERF_STAGE_DESKEW);
       } else {
         verboseLog(VERBOSE_MORE, "+ deskewing DISABLED for sheet %d\n", nr);
       }
 
       // auto-center masks on either single-page or double-page layout
+      perf_stage_begin(&perf, PERF_STAGE_MASKS);
       if (!isExcluded(
               nr, options.no_mask_center_multi_index,
               options.ignore_multi_index)) { // (maskCount==pointCount to
@@ -1898,6 +1925,8 @@ int main(int argc, char *argv[]) {
         apply_border(sheet, options.post_border, options.mask_color);
       }
 
+      perf_stage_end(&perf, PERF_STAGE_MASKS);
+
       // post-mirroring
       if (options.post_mirror.horizontal || options.post_mirror.vertical) {
         verboseLog(VERBOSE_NORMAL, "post-mirroring %s\n",
@@ -1949,6 +1978,11 @@ int main(int argc, char *argv[]) {
           options.output_pixel_format = sheet.frame->format;
         }
 
+        perf_stage_begin(&perf, PERF_STAGE_DOWNLOAD);
+        image_ensure_cpu(&sheet);
+        perf_stage_end(&perf, PERF_STAGE_DOWNLOAD);
+
+        perf_stage_begin(&perf, PERF_STAGE_ENCODE);
         for (int j = 0; j < options.output_count; j++) {
           // get pagebuffer
           page = create_compatible_image(
@@ -1969,12 +2003,18 @@ int main(int argc, char *argv[]) {
 
           free_image(&page);
         }
+        perf_stage_end(&perf, PERF_STAGE_ENCODE);
 
         free_image(&sheet);
       }
     }
 
   sheet_end:
+    if (options.perf) {
+      perf_recorder_print(&perf, nr,
+                          options.device == UNPAPER_DEVICE_CUDA ? "cuda"
+                                                                : "cpu");
+    }
     /* if we're not given an input wildcard, and we finished the
      * arguments, we don't want to keep looping.
      */

@@ -44,6 +44,8 @@ void options_init(Options *o) {
       .insert_blank = multi_index_empty(),
       .replace_blank = multi_index_empty(),
 
+      .perf = false,
+
       .no_blackfilter_multi_index = multi_index_empty(),
       .no_noisefilter_multi_index = multi_index_empty(),
       .no_blurfilter_multi_index = multi_index_empty(),

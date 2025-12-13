@@ -113,6 +113,12 @@ Options
    error (no silent fallback). Even in CUDA-capable builds, unpaper will
    fail if no compatible CUDA runtime/device is available.
 
+.. option:: --perf
+
+   Print per-sheet stage timings (decode, upload, filters,
+   masks/borders, deskew, download, encode) after processing finishes.
+   Disabled by default so normal output remains unchanged.
+
 .. option:: --pre-rotate { -90 | 90 }
 
    Rotates the whole image clockwise (``90``) or anti-clockwise

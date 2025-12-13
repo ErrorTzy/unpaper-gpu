@@ -257,3 +257,107 @@ This section is the execution checklist for adding CUDA support while keeping CP
 - Acceptance:
   - `meson test -C builddir/ -v` runs CPU suite everywhere.
   - `meson test -C builddir-cuda/ -v` runs CPU + CUDA parity checks where CUDA is enabled.
+
+### Performance PR roadmap (PR11+)
+
+Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing CPU-driven inner loops, eliminating serial CUDA kernels, and overlapping decode/compute/encode. Performance is prioritized as long as CUDA output remains deterministic run-to-run and within the project’s existing test tolerances (unless explicitly tightened).
+
+#### Performance target (this machine)
+
+- Primary gate: `A1` (`tests/source_images/imgsrc001.png`) via `./builddir-cuda/unpaper --device cuda` mean wall time **< 2.5s** over repeated runs (after 1 warmup), writing output to a tmpfs path (e.g. `/dev/shm`) to avoid disk bottlenecks.
+
+**PR 11: Benchmark harness + stage timing (no behavior change)**
+
+- Status: completed (2025-12-13)
+- Scope:
+  - Add a small benchmark runner (e.g. `tools/bench_a1.py`) that runs warmups + N iterations and prints mean/stdev (CPU and CUDA).
+  - Add an optional `--perf` (or env-gated) stage timing output (decode, upload, filters, masks/borders, deskew, download, encode).
+  - Add CUDA event timing for kernel-heavy stages (with explicit stream sync for accurate reporting).
+- Tests:
+  - `meson test -C builddir/ -v`
+  - `meson test -C builddir-cuda/ -v`
+- Acceptance:
+  - No output changes unless `--perf` is enabled.
+  - Benchmark runner is stable and reproducible.
+
+**PR 12: CUDA throughput scaffolding (streams + async + pooling)**
+
+- Status: planned
+- Scope:
+  - Extend `imageprocess/cuda_runtime.*` to support CUDA streams and stream sync.
+  - Add async H2D/D2H/D2D memcpy APIs and pinned host buffers for transfers.
+  - Add a simple device scratch allocator (or CUDA async mempool) to avoid per-call device allocations for small reductions.
+  - Make CUDA state safe for per-page concurrency (stream-per-job).
+- Tests:
+  - Existing CPU + CUDA suites.
+  - Add a small C test covering stream correctness + determinism (identical output across repeated runs).
+- Acceptance:
+  - No behavior changes.
+  - Enables later PRs to overlap decode/compute/encode without data races.
+
+**PR 13: Rewrite CUDA noisefilter for parallelism (largest single win)**
+
+- Status: planned
+- Scope:
+  - Replace the current effectively-serial CUDA noisefilter kernel with a GPU-parallel implementation.
+  - Preferred algorithm: connected-components labeling (CCL) on the “dark” mask (`lightness < min_white_level`) and removal of components with size `<= intensity`.
+    - Use NPP if available, otherwise implement deterministic CUDA CCL (label propagation/union-find).
+  - Ensure deterministic results in CUDA mode (run-to-run identical output).
+- Tests:
+  - Extend `tests/cuda_filters_test.c` noisefilter coverage (including determinism checks on non-trivial patterns).
+  - Keep existing `pytest` golden tests passing; update/extend tolerances only if justified and agreed.
+- Acceptance:
+  - `A1` CUDA runtime drops materially (expected step change); use PR11 harness to verify.
+
+**PR 14: Remove CPU-driven tile loops (CUDA grayfilter + blurfilter)**
+
+- Status: planned
+- Scope:
+  - Replace CPU loops that repeatedly launch scalar reduction kernels (and copy scalars D2H) with bulk GPU passes:
+    - one kernel computes per-tile stats across the full grid
+    - one kernel applies wipes for all tiles in one pass
+  - Eliminate per-tile device malloc/free in hot paths (use PR12 scratch/pool).
+- Tests:
+  - Existing CPU + CUDA suites.
+  - Add regression patterns for edge-case thresholds (small synthetic fixtures).
+- Acceptance:
+  - Primary gate: `A1` CUDA mean **< 2.5s** on this machine.
+
+**PR 15: Fix CUDA blackfilter bottlenecks (remove serial flood-fill + reduce sync)**
+
+- Status: planned
+- Scope:
+  - Replace serial flood-fill behavior with a GPU-parallel approach (prefer CCL-based removal on a near-black mask; optional morphology to emulate “intensity” tolerance).
+  - Batch stripe/area statistics on GPU (avoid per-rectangle reductions with D2H feedback loops).
+- Tests:
+  - Extend `tests/cuda_filters_test.c` blackfilter coverage and determinism.
+- Acceptance:
+  - Worst-case “many dark regions” inputs improve materially without breaking parity tolerances.
+
+**PR 16: Multi-page scheduler (pipeline decode ⇄ GPU ⇄ encode)**
+
+- Status: planned
+- Scope:
+  - Add a multi-stage pipeline for multi-page runs:
+    - decode next page(s) while GPU processes current page
+    - encode previous page while GPU processes next page
+  - Add `--jobs N` (default 1); when `--device=cuda` and multi-page input is used, allow higher parallelism (bounded) for throughput.
+  - Preserve output ordering and keep debug outputs correct.
+- Tests:
+  - Extend `tests/unpaper_tests.py` to exercise `--jobs` for multi-page cases (skip if CUDA runtime unavailable).
+  - Add a determinism check under CUDA with `--jobs > 1`.
+- Acceptance:
+  - Multi-page throughput improves significantly (target: ≥2× pages/sec vs `--jobs=1` on GPU-friendly workloads).
+
+**PR 17: FFmpeg NVIDIA hwaccel (NVDEC) when `--device=cuda`**
+
+- Status: planned
+- Scope:
+  - Add `--hwaccel=auto|cuda|none` (default `auto`).
+  - When `--device=cuda` and hwaccel is enabled, create an FFmpeg CUDA hw device context and decode into hardware frames when supported by the input codec.
+  - Avoid CPU staging for decoded frames: import CUDA frames into the `Image` GPU residency and convert formats on-GPU as needed.
+  - Fall back cleanly to software decode when unsupported, without silent “CUDA disabled” behavior for processing.
+- Tests:
+  - Add runtime-probed tests verifying hwaccel selection and fallback (skip when hwaccel is unavailable).
+- Acceptance:
+  - For hw-decodable inputs, decode+upload overhead drops materially (target: >2× faster decode stage vs software on this machine).

@@ -60,6 +60,8 @@ typedef struct {
   Wipes wipes;
   Wipes post_wipes;
 
+  bool perf;
+
   Delta pre_shift;
   Delta post_shift;
 
