@@ -104,6 +104,15 @@ Options
    Excludes sheets from processing in the range between start-sheet and
    end-sheet.
 
+.. option:: --device { cpu | cuda }
+
+   Select the processing backend. The default is ``cpu``.
+
+   ``cuda`` requires unpaper to be built with CUDA support. If CUDA
+   support is not compiled in, selecting ``--device=cuda`` is a fatal
+   error (no silent fallback). Even in CUDA-capable builds, unpaper will
+   fail if no compatible CUDA runtime/device is available.
+
 .. option:: --pre-rotate { -90 | 90 }
 
    Rotates the whole image clockwise (``90``) or anti-clockwise

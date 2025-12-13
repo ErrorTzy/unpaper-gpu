@@ -10,6 +10,8 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
+from functools import lru_cache
 from typing import Sequence
 
 import pytest
@@ -77,19 +79,37 @@ def test_device_cpu_works_and_cuda_unavailable_errors(imgsrc_path, tmp_path):
         assert "cuda" in proc.stderr.lower()
 
 
-def _cuda_runtime_available(*, imgsrc_path: pathlib.Path, tmp_path: pathlib.Path) -> bool:
+@lru_cache(maxsize=1)
+def cuda_runtime_available() -> bool:
     unpaper_path = os.getenv("TEST_UNPAPER_BINARY", "unpaper")
+    imgsrc_path = pathlib.Path(os.getenv("TEST_IMGSRC_DIR", "tests/source_images/"))
     source_path = imgsrc_path / "imgsrc003.png"
-    result_path = tmp_path / "cuda-probe.ppm"
 
-    proc = subprocess.run(
-        [unpaper_path, "-vvv", "--device", "cuda", "-n", str(source_path), str(result_path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        check=False,
-    )
-    return proc.returncode == 0
+    if not source_path.exists():
+        return False
+
+    tmpdir = tempfile.TemporaryDirectory(prefix="unpaper-cuda-probe-")
+    try:
+        result_path = pathlib.Path(tmpdir.name) / "cuda-probe.ppm"
+
+        proc = subprocess.run(
+            [
+                unpaper_path,
+                "-vvv",
+                "--device",
+                "cuda",
+                "-n",
+                str(source_path),
+                str(result_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        return proc.returncode == 0
+    finally:
+        tmpdir.cleanup()
 
 
 @pytest.mark.parametrize(
@@ -101,7 +121,7 @@ def _cuda_runtime_available(*, imgsrc_path: pathlib.Path, tmp_path: pathlib.Path
     ],
 )
 def test_cuda_pre_ops_match_cpu(imgsrc_path, tmp_path, extra_args):
-    if not _cuda_runtime_available(imgsrc_path=imgsrc_path, tmp_path=tmp_path):
+    if not cuda_runtime_available():
         pytest.skip("CUDA runtime/device not available")
 
     source_path = imgsrc_path / "imgsrc003.png"
@@ -116,7 +136,7 @@ def test_cuda_pre_ops_match_cpu(imgsrc_path, tmp_path, extra_args):
 
 @pytest.mark.parametrize("interp", ["nearest", "linear", "cubic"])
 def test_cuda_stretch_and_post_size_match_cpu(imgsrc_path, tmp_path, interp):
-    if not _cuda_runtime_available(imgsrc_path=imgsrc_path, tmp_path=tmp_path):
+    if not cuda_runtime_available():
         pytest.skip("CUDA runtime/device not available")
 
     source_path = imgsrc_path / "imgsrc003.png"
@@ -187,7 +207,7 @@ def test_c1_mask_border_scan_fixture(imgsrc_path, goldendir_path, tmp_path):
 
 
 def test_cuda_mask_border_scan_fixture_match_cpu(imgsrc_path, tmp_path):
-    if not _cuda_runtime_available(imgsrc_path=imgsrc_path, tmp_path=tmp_path):
+    if not cuda_runtime_available():
         pytest.skip("CUDA runtime/device not available")
 
     source_path = imgsrc_path / "imgsrc006.png"
@@ -234,13 +254,18 @@ def get_golden_directory() -> pathlib.Path:
     return pathlib.Path(os.getenv("TEST_GOLDEN_DIR", "tests/golden_images/"))
 
 
-def test_a1(imgsrc_path, goldendir_path, tmp_path):
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_a1(imgsrc_path, goldendir_path, tmp_path, device):
     """[A1] Single-Page Template Layout, Black+White, Full Processing."""
+
+    if device == "cuda" and not cuda_runtime_available():
+        pytest.skip("CUDA runtime/device not available")
+
     source_path = imgsrc_path / "imgsrc001.png"
-    result_path = tmp_path / "result.pbm"
+    result_path = tmp_path / f"result-{device}.pbm"
     golden_path = goldendir_path / "goldenA1.pbm"
 
-    run_unpaper(str(source_path), str(result_path))
+    run_unpaper("--device", device, str(source_path), str(result_path))
 
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
@@ -258,15 +283,21 @@ def test_a2(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_b1(imgsrc_path, goldendir_path, tmp_path):
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_b1(imgsrc_path, goldendir_path, tmp_path, device):
     """[B1] Combined Color/Gray, No Processing."""
+
+    if device == "cuda" and not cuda_runtime_available():
+        pytest.skip("CUDA runtime/device not available")
 
     source1_path = imgsrc_path / "imgsrc003.png"
     source2_path = imgsrc_path / "imgsrc004.png"
-    result_path = tmp_path / "result.ppm"
+    result_path = tmp_path / f"result-{device}.ppm"
     golden_path = goldendir_path / "goldenB1.ppm"
 
     run_unpaper(
+        "--device",
+        device,
         "-n",
         "--input-pages",
         "2",
@@ -451,14 +482,25 @@ def test_e1(imgsrc_path, goldendir_path, tmp_path):
         assert compare_images(golden=golden_path, result=result) < 0.05
 
 
-def test_e2(imgsrc_path, goldendir_path, tmp_path):
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_e2(imgsrc_path, goldendir_path, tmp_path, device):
     """[E2] Splitting 2-page layout into separate output pages (with output wildcard only)."""
+
+    if device == "cuda" and not cuda_runtime_available():
+        pytest.skip("CUDA runtime/device not available")
 
     source_path = imgsrc_path / "imgsrcE001.png"
     result_path = tmp_path / "results-%02d.pbm"
 
     run_unpaper(
-        "--layout", "double", "--output-pages", "2", str(source_path), str(result_path)
+        "--device",
+        device,
+        "--layout",
+        "double",
+        "--output-pages",
+        "2",
+        str(source_path),
+        str(result_path),
     )
 
     all_results = sorted(tmp_path.iterdir())

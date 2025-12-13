@@ -249,6 +249,8 @@ This section is the execution checklist for adding CUDA support while keeping CP
 
 **PR 10: Test matrix + docs polishing**
 
+- Status: completed (2025-12-13)
+
 - Scope:
   - Update `tests/unpaper_tests.py` to parameterize device runs (CPU always; CUDA only when enabled/available).
   - Update `doc/unpaper.1.rst` for `--device` (including error behavior when CUDA is not compiled in).
