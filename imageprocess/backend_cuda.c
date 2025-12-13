@@ -985,6 +985,8 @@ static void blurfilter_cuda(Image image, BlurfilterParameters params,
     errOutput("unable to allocate blurfilter count buffers.");
   }
 
+  // Mirror the CPU implementation's pointer layout (including the +1/+2
+  // offsets) for parity.
   uint64_t *prevCounts = &count_buffers[0];
   uint64_t *curCounts = &count_buffers[1];
   uint64_t *nextCounts = &count_buffers[2];

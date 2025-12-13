@@ -188,13 +188,16 @@ static void test_grayfilter_gray8(void) {
 static void fill_blurfilter_pattern(Image image) {
   wipe_rectangle(image, full_image(image), PIXEL_WHITE);
 
-  // A sparse block (top-left 4x4).
-  set_pixel(image, (Point){1, 1}, PIXEL_BLACK);
-  set_pixel(image, (Point){2, 1}, PIXEL_BLACK);
-  set_pixel(image, (Point){1, 2}, PIXEL_BLACK);
+  // Keep the top scan row all-white to avoid depending on undefined contents of
+  // the CPU blurfilter's first-iteration buffers.
 
-  // A dense block (top-right 4x4).
-  for (int32_t y = 0; y < 4; y++) {
+  // A sparse block in the 2nd scan row (y = 4..7).
+  set_pixel(image, (Point){1, 5}, PIXEL_BLACK);
+  set_pixel(image, (Point){2, 5}, PIXEL_BLACK);
+  set_pixel(image, (Point){1, 6}, PIXEL_BLACK);
+
+  // A dense block in the 2nd scan row (y = 4..7).
+  for (int32_t y = 4; y < 8; y++) {
     for (int32_t x = 8; x < 12; x++) {
       set_pixel(image, (Point){x, y}, PIXEL_BLACK);
     }
