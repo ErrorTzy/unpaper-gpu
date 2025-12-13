@@ -215,4 +215,31 @@ if have_cuda
     )
 
     test('cuda resize', cuda_resize_test)
+
+    cuda_filters_test = executable(
+        'cuda_filters_test',
+        [
+            'tests/cuda_filters_test.c',
+            'imageprocess/backend.c',
+            'imageprocess/backend_cuda.c',
+            'imageprocess/blit.c',
+            'imageprocess/deskew.c',
+            'imageprocess/fill.c',
+            'imageprocess/filters.c',
+            'imageprocess/interpolate.c',
+            'imageprocess/image.c',
+            'imageprocess/image_cuda.c',
+            'imageprocess/masks.c',
+            'imageprocess/pixel.c',
+            'imageprocess/primitives.c',
+            'imageprocess/cuda_runtime.c',
+            cuda_kernels_ptx_c,
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('cuda filters', cuda_filters_test)
 endif

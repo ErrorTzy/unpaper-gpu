@@ -211,6 +211,8 @@ This section is the execution checklist for adding CUDA support while keeping CP
 
 **PR 7: CUDA filters**
 
+- Status: completed (2025-12-13)
+
 - Scope:
   - Implement: `blackfilter`, `noisefilter`, `blurfilter`, `grayfilter`.
   - Avoid in-place hazards: use ping-pong buffers where CPU semantics imply read-before-write behavior.

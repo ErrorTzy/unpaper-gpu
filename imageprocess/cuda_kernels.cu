@@ -583,3 +583,444 @@ extern "C" __global__ void unpaper_stretch_mono(
 
   dst[(size_t)y * (size_t)dst_linesize + (size_t)byte_x] = out;
 }
+
+static __device__ __forceinline__ uint8_t min3_u8(uint8_t a, uint8_t b,
+                                                  uint8_t c) {
+  uint8_t m = a < b ? a : b;
+  return m < c ? m : c;
+}
+
+static __device__ __forceinline__ uint8_t max3_u8(uint8_t a, uint8_t b,
+                                                  uint8_t c) {
+  uint8_t m = a > b ? a : b;
+  return m > c ? m : c;
+}
+
+static __device__ __forceinline__ uint8_t lightness_u8(uint8_t r, uint8_t g,
+                                                       uint8_t b) {
+  return min3_u8(r, g, b);
+}
+
+static __device__ __forceinline__ uint8_t darkness_inverse_u8(uint8_t r,
+                                                              uint8_t g,
+                                                              uint8_t b) {
+  return max3_u8(r, g, b);
+}
+
+static __device__ __forceinline__ void set_pixel_white_safe(
+    uint8_t *dst, int dst_linesize, UnpaperCudaFormat fmt, int dst_w, int dst_h,
+    int x, int y) {
+  if (x < 0 || y < 0 || x >= dst_w || y >= dst_h) {
+    return;
+  }
+
+  uint8_t *row = dst + (size_t)y * (size_t)dst_linesize;
+  switch (fmt) {
+  case UNPAPER_CUDA_FMT_GRAY8:
+    row[x] = 255u;
+    break;
+  case UNPAPER_CUDA_FMT_Y400A:
+    row[x * 2] = 255u;
+    row[x * 2 + 1] = 0xFFu;
+    break;
+  case UNPAPER_CUDA_FMT_RGB24: {
+    uint8_t *p = row + x * 3;
+    p[0] = 255u;
+    p[1] = 255u;
+    p[2] = 255u;
+  } break;
+  case UNPAPER_CUDA_FMT_MONOWHITE:
+  case UNPAPER_CUDA_FMT_MONOBLACK: {
+    uint8_t *bytep = row + (x / 8);
+    const uint8_t mask = (uint8_t)(0x80u >> (x & 7));
+    if (fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
+      *bytep = (uint8_t)(*bytep | mask); // bit set = white
+    } else {
+      *bytep = (uint8_t)(*bytep & (uint8_t)~mask); // bit clear = white
+    }
+  } break;
+  default:
+    break;
+  }
+}
+
+extern "C" __global__ void unpaper_count_brightness_range(
+    const uint8_t *src, int src_linesize, int src_fmt, int src_w, int src_h,
+    int x0, int y0, int x1, int y1, uint8_t min_brightness,
+    uint8_t max_brightness, unsigned long long *out_count) {
+  const int w = x1 - x0 + 1;
+  const int h = y1 - y0 + 1;
+  if (w <= 0 || h <= 0) {
+    return;
+  }
+
+  const unsigned long long total = (unsigned long long)w * (unsigned long long)h;
+  unsigned long long idx =
+      (unsigned long long)blockIdx.x * (unsigned long long)blockDim.x +
+      (unsigned long long)threadIdx.x;
+  const unsigned long long stride =
+      (unsigned long long)blockDim.x * (unsigned long long)gridDim.x;
+
+  const UnpaperCudaFormat fmt = (UnpaperCudaFormat)src_fmt;
+  while (idx < total) {
+    const int rx = (int)(idx % (unsigned long long)w);
+    const int ry = (int)(idx / (unsigned long long)w);
+    const int x = x0 + rx;
+    const int y = y0 + ry;
+
+    uint8_t r, g, b;
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, x, y, &r, &g, &b);
+    const uint8_t gray = grayscale_u8(r, g, b);
+    if (gray >= min_brightness && gray <= max_brightness) {
+      atomicAdd(out_count, 1ull);
+    }
+
+    idx += stride;
+  }
+}
+
+extern "C" __global__ void unpaper_sum_lightness_rect(
+    const uint8_t *src, int src_linesize, int src_fmt, int src_w, int src_h,
+    int x0, int y0, int x1, int y1, unsigned long long *out_sum) {
+  const int w = x1 - x0 + 1;
+  const int h = y1 - y0 + 1;
+  if (w <= 0 || h <= 0) {
+    return;
+  }
+
+  const unsigned long long total = (unsigned long long)w * (unsigned long long)h;
+  unsigned long long idx =
+      (unsigned long long)blockIdx.x * (unsigned long long)blockDim.x +
+      (unsigned long long)threadIdx.x;
+  const unsigned long long stride =
+      (unsigned long long)blockDim.x * (unsigned long long)gridDim.x;
+
+  const UnpaperCudaFormat fmt = (UnpaperCudaFormat)src_fmt;
+  while (idx < total) {
+    const int rx = (int)(idx % (unsigned long long)w);
+    const int ry = (int)(idx / (unsigned long long)w);
+    const int x = x0 + rx;
+    const int y = y0 + ry;
+
+    uint8_t r, g, b;
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, x, y, &r, &g, &b);
+    atomicAdd(out_sum, (unsigned long long)lightness_u8(r, g, b));
+
+    idx += stride;
+  }
+}
+
+extern "C" __global__ void unpaper_sum_darkness_inverse_rect(
+    const uint8_t *src, int src_linesize, int src_fmt, int src_w, int src_h,
+    int x0, int y0, int x1, int y1, unsigned long long *out_sum) {
+  const int w = x1 - x0 + 1;
+  const int h = y1 - y0 + 1;
+  if (w <= 0 || h <= 0) {
+    return;
+  }
+
+  const unsigned long long total = (unsigned long long)w * (unsigned long long)h;
+  unsigned long long idx =
+      (unsigned long long)blockIdx.x * (unsigned long long)blockDim.x +
+      (unsigned long long)threadIdx.x;
+  const unsigned long long stride =
+      (unsigned long long)blockDim.x * (unsigned long long)gridDim.x;
+
+  const UnpaperCudaFormat fmt = (UnpaperCudaFormat)src_fmt;
+  while (idx < total) {
+    const int rx = (int)(idx % (unsigned long long)w);
+    const int ry = (int)(idx / (unsigned long long)w);
+    const int x = x0 + rx;
+    const int y = y0 + ry;
+
+    uint8_t r, g, b;
+    read_rgb_safe(src, src_linesize, fmt, src_w, src_h, x, y, &r, &g, &b);
+    atomicAdd(out_sum, (unsigned long long)darkness_inverse_u8(r, g, b));
+
+    idx += stride;
+  }
+}
+
+static __device__ __forceinline__ uint8_t get_grayscale_safe(
+    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
+    int src_h, int x, int y) {
+  uint8_t r, g, b;
+  read_rgb_safe(src, src_linesize, fmt, src_w, src_h, x, y, &r, &g, &b);
+  return grayscale_u8(r, g, b);
+}
+
+static __device__ __forceinline__ uint8_t get_lightness_safe(
+    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
+    int src_h, int x, int y) {
+  uint8_t r, g, b;
+  read_rgb_safe(src, src_linesize, fmt, src_w, src_h, x, y, &r, &g, &b);
+  return lightness_u8(r, g, b);
+}
+
+static __device__ __forceinline__ uint8_t get_darkness_inverse_safe(
+    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
+    int src_h, int x, int y) {
+  uint8_t r, g, b;
+  read_rgb_safe(src, src_linesize, fmt, src_w, src_h, x, y, &r, &g, &b);
+  return darkness_inverse_u8(r, g, b);
+}
+
+static __device__ __forceinline__ bool noisefilter_compare_and_clear_cuda(
+    uint8_t *img, int img_linesize, UnpaperCudaFormat fmt, int w, int h, int x,
+    int y, bool clear, uint8_t min_white_level) {
+  const uint8_t lightness =
+      get_lightness_safe(img, img_linesize, fmt, w, h, x, y);
+  if (lightness >= min_white_level) {
+    return false;
+  }
+
+  if (clear) {
+    set_pixel_white_safe(img, img_linesize, fmt, w, h, x, y);
+  }
+  return true;
+}
+
+static __device__ __forceinline__ unsigned long long
+noisefilter_count_neighbors_level_cuda(uint8_t *img, int img_linesize,
+                                       UnpaperCudaFormat fmt, int w, int h,
+                                       int px, int py, unsigned int level,
+                                       bool clear, uint8_t min_white_level) {
+  unsigned long long count = 0;
+
+  for (int xx = px - (int)level; xx <= px + (int)level; xx++) {
+    const int upper_y = py - (int)level;
+    const int lower_y = py + (int)level;
+    count += noisefilter_compare_and_clear_cuda(img, img_linesize, fmt, w, h,
+                                                xx, upper_y, clear,
+                                                min_white_level)
+                 ? 1ull
+                 : 0ull;
+    count += noisefilter_compare_and_clear_cuda(img, img_linesize, fmt, w, h,
+                                                xx, lower_y, clear,
+                                                min_white_level)
+                 ? 1ull
+                 : 0ull;
+  }
+
+  for (int yy = py - ((int)level - 1); yy <= py + ((int)level - 1); yy++) {
+    const int first_x = px - (int)level;
+    const int last_x = px + (int)level;
+    count += noisefilter_compare_and_clear_cuda(img, img_linesize, fmt, w, h,
+                                                first_x, yy, clear,
+                                                min_white_level)
+                 ? 1ull
+                 : 0ull;
+    count += noisefilter_compare_and_clear_cuda(img, img_linesize, fmt, w, h,
+                                                last_x, yy, clear,
+                                                min_white_level)
+                 ? 1ull
+                 : 0ull;
+  }
+
+  return count;
+}
+
+static __device__ __forceinline__ unsigned long long
+noisefilter_count_neighbors_cuda(uint8_t *img, int img_linesize,
+                                 UnpaperCudaFormat fmt, int w, int h, int px,
+                                 int py, unsigned long long intensity,
+                                 uint8_t min_white_level) {
+  unsigned long long count = 1ull;
+  unsigned long long lCount;
+  unsigned int level = 1;
+  do {
+    lCount = noisefilter_count_neighbors_level_cuda(
+        img, img_linesize, fmt, w, h, px, py, level, false, min_white_level);
+    count += lCount;
+    level++;
+  } while (lCount != 0ull && (unsigned long long)level <= intensity);
+
+  return count;
+}
+
+static __device__ __forceinline__ void noisefilter_clear_neighbors_cuda(
+    uint8_t *img, int img_linesize, UnpaperCudaFormat fmt, int w, int h, int px,
+    int py, uint8_t min_white_level) {
+  set_pixel_white_safe(img, img_linesize, fmt, w, h, px, py);
+
+  unsigned long long lCount;
+  unsigned int level = 1;
+  do {
+    lCount = noisefilter_count_neighbors_level_cuda(
+        img, img_linesize, fmt, w, h, px, py, level, true, min_white_level);
+    level++;
+  } while (lCount != 0ull);
+}
+
+extern "C" __global__ void unpaper_noisefilter(uint8_t *img, int img_linesize,
+                                               int img_fmt, int w, int h,
+                                               unsigned long long intensity,
+                                               uint8_t min_white_level) {
+  if (blockIdx.x != 0 || threadIdx.x != 0 || blockIdx.y != 0 || threadIdx.y != 0) {
+    return;
+  }
+
+  const UnpaperCudaFormat fmt = (UnpaperCudaFormat)img_fmt;
+
+  for (int y = 0; y < h; y++) {
+    for (int x = 0; x < w; x++) {
+      const uint8_t darkness =
+          get_darkness_inverse_safe(img, img_linesize, fmt, w, h, x, y);
+      if (darkness >= min_white_level) {
+        continue;
+      }
+
+      const unsigned long long neighbors = noisefilter_count_neighbors_cuda(
+          img, img_linesize, fmt, w, h, x, y, intensity, min_white_level);
+      if (neighbors <= intensity) {
+        noisefilter_clear_neighbors_cuda(img, img_linesize, fmt, w, h, x, y,
+                                         min_white_level);
+      }
+    }
+  }
+}
+
+typedef struct {
+  int x;
+  int y;
+} UnpaperCudaPoint;
+
+static __device__ __forceinline__ unsigned long long flood_fill_line_cuda(
+    uint8_t *img, int img_linesize, UnpaperCudaFormat fmt, int w, int h, int px,
+    int py, int step_x, int step_y, uint8_t mask_min, uint8_t mask_max,
+    unsigned long long intensity) {
+  unsigned long long distance = 0;
+  unsigned long long intensityCount = 1ull;
+
+  int x = px;
+  int y = py;
+  while (true) {
+    x += step_x;
+    y += step_y;
+
+    if (x < 0 || y < 0 || x >= w || y >= h) {
+      return distance;
+    }
+
+    const uint8_t pixel =
+        get_grayscale_safe(img, img_linesize, fmt, w, h, x, y);
+    if (pixel >= mask_min && pixel <= mask_max) {
+      intensityCount = intensity;
+    } else {
+      intensityCount--;
+    }
+
+    if (intensityCount == 0ull) {
+      return distance;
+    }
+
+    set_pixel_white_safe(img, img_linesize, fmt, w, h, x, y);
+    distance++;
+  }
+}
+
+static __device__ __forceinline__ void stack_push(UnpaperCudaPoint *stack,
+                                                  int *top, int cap, int x,
+                                                  int y) {
+  const int t = *top;
+  if (t >= cap) {
+    return;
+  }
+  stack[t] = (UnpaperCudaPoint){.x = x, .y = y};
+  *top = t + 1;
+}
+
+static __device__ __forceinline__ bool stack_pop(UnpaperCudaPoint *stack,
+                                                 int *top,
+                                                 UnpaperCudaPoint *out) {
+  const int t = *top;
+  if (t <= 0) {
+    return false;
+  }
+  *top = t - 1;
+  *out = stack[t - 1];
+  return true;
+}
+
+static __device__ __forceinline__ void flood_fill_cuda(
+    uint8_t *img, int img_linesize, UnpaperCudaFormat fmt, int w, int h, int sx,
+    int sy, uint8_t mask_min, uint8_t mask_max, unsigned long long intensity,
+    UnpaperCudaPoint *stack, int stack_cap) {
+  const uint8_t seed = get_grayscale_safe(img, img_linesize, fmt, w, h, sx, sy);
+  if (seed < mask_min || seed > mask_max) {
+    return;
+  }
+
+  int top = 0;
+  stack_push(stack, &top, stack_cap, sx, sy);
+
+  UnpaperCudaPoint p;
+  while (stack_pop(stack, &top, &p)) {
+    const uint8_t pixel =
+        get_grayscale_safe(img, img_linesize, fmt, w, h, p.x, p.y);
+    if (pixel < mask_min || pixel > mask_max) {
+      continue;
+    }
+
+    set_pixel_white_safe(img, img_linesize, fmt, w, h, p.x, p.y);
+
+    const unsigned long long left = flood_fill_line_cuda(
+        img, img_linesize, fmt, w, h, p.x, p.y, -1, 0, mask_min, mask_max,
+        intensity);
+    const unsigned long long up = flood_fill_line_cuda(
+        img, img_linesize, fmt, w, h, p.x, p.y, 0, -1, mask_min, mask_max,
+        intensity);
+    const unsigned long long right = flood_fill_line_cuda(
+        img, img_linesize, fmt, w, h, p.x, p.y, 1, 0, mask_min, mask_max,
+        intensity);
+    const unsigned long long down = flood_fill_line_cuda(
+        img, img_linesize, fmt, w, h, p.x, p.y, 0, 1, mask_min, mask_max,
+        intensity);
+
+    int qx = p.x;
+    for (unsigned long long d = 0; d < left; d++) {
+      qx -= 1;
+      stack_push(stack, &top, stack_cap, qx, p.y + 1);
+      stack_push(stack, &top, stack_cap, qx, p.y - 1);
+    }
+
+    int qy = p.y;
+    for (unsigned long long d = 0; d < up; d++) {
+      qy -= 1;
+      stack_push(stack, &top, stack_cap, p.x + 1, qy);
+      stack_push(stack, &top, stack_cap, p.x - 1, qy);
+    }
+
+    qx = p.x;
+    for (unsigned long long d = 0; d < right; d++) {
+      qx += 1;
+      stack_push(stack, &top, stack_cap, qx, p.y + 1);
+      stack_push(stack, &top, stack_cap, qx, p.y - 1);
+    }
+
+    qy = p.y;
+    for (unsigned long long d = 0; d < down; d++) {
+      qy += 1;
+      stack_push(stack, &top, stack_cap, p.x + 1, qy);
+      stack_push(stack, &top, stack_cap, p.x - 1, qy);
+    }
+  }
+}
+
+extern "C" __global__ void unpaper_blackfilter_floodfill_rect(
+    uint8_t *img, int img_linesize, int img_fmt, int w, int h, int x0, int y0,
+    int x1, int y1, uint8_t mask_max, unsigned long long intensity,
+    UnpaperCudaPoint *stack, int stack_cap) {
+  if (blockIdx.x != 0 || threadIdx.x != 0 || blockIdx.y != 0 || threadIdx.y != 0) {
+    return;
+  }
+
+  const UnpaperCudaFormat fmt = (UnpaperCudaFormat)img_fmt;
+
+  for (int y = y0; y <= y1; y++) {
+    for (int x = x0; x <= x1; x++) {
+      flood_fill_cuda(img, img_linesize, fmt, w, h, x, y, 0u, mask_max,
+                      intensity, stack, stack_cap);
+    }
+  }
+}
