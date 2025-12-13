@@ -269,4 +269,31 @@ if have_cuda
     )
 
     test('cuda masks/borders', cuda_masks_border_test)
+
+    cuda_deskew_test = executable(
+        'cuda_deskew_test',
+        [
+            'tests/cuda_deskew_test.c',
+            'imageprocess/backend.c',
+            'imageprocess/backend_cuda.c',
+            'imageprocess/blit.c',
+            'imageprocess/deskew.c',
+            'imageprocess/fill.c',
+            'imageprocess/filters.c',
+            'imageprocess/interpolate.c',
+            'imageprocess/image.c',
+            'imageprocess/image_cuda.c',
+            'imageprocess/masks.c',
+            'imageprocess/pixel.c',
+            'imageprocess/primitives.c',
+            'imageprocess/cuda_runtime.c',
+            cuda_kernels_ptx_c,
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('cuda deskew', cuda_deskew_test)
 endif

@@ -237,6 +237,8 @@ This section is the execution checklist for adding CUDA support while keeping CP
 
 **PR 9: CUDA deskew (detect + apply)**
 
+- Status: completed (2025-12-13)
+
 - Scope:
   - Implement `detect_rotation` and `deskew` in CUDA mode.
   - Strategy: GPU computes per-angle metrics; CPU selects best angle deterministically; GPU applies the final warp using the same interpolation kernels.

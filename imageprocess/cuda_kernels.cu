@@ -254,6 +254,208 @@ static __device__ __forceinline__ void write_pixel(uint8_t *dst,
   }
 }
 
+static __device__ __forceinline__ uint8_t darkness_inverse_u8(uint8_t r,
+                                                              uint8_t g,
+                                                              uint8_t b);
+
+static __device__ __forceinline__ uint8_t read_darkness_inverse(
+    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
+    int src_h, int x, int y) {
+  if (x < 0 || y < 0 || x >= src_w || y >= src_h) {
+    return 255u;
+  }
+
+  const uint8_t *row = src + (size_t)y * (size_t)src_linesize;
+  switch (fmt) {
+  case UNPAPER_CUDA_FMT_GRAY8:
+    return row[x];
+  case UNPAPER_CUDA_FMT_Y400A:
+    return row[x * 2];
+  case UNPAPER_CUDA_FMT_RGB24: {
+    const uint8_t *p = row + x * 3;
+    return darkness_inverse_u8(p[0], p[1], p[2]);
+  }
+  case UNPAPER_CUDA_FMT_MONOWHITE:
+  case UNPAPER_CUDA_FMT_MONOBLACK: {
+    const uint8_t byte = row[x / 8];
+    const uint8_t mask = (uint8_t)(0x80u >> (x & 7));
+    const bool bit_set = (byte & mask) != 0;
+    const bool is_white = (fmt == UNPAPER_CUDA_FMT_MONOBLACK) ? bit_set
+                                                              : (!bit_set);
+    return is_white ? 255u : 0u;
+  }
+  default:
+    return 255u;
+  }
+}
+
+extern "C" __global__ void unpaper_detect_edge_rotation_peaks(
+    const uint8_t *src, int src_linesize, int fmt, int src_w, int src_h,
+    const int *base_x_all, const int *base_y_all, int scan_size, int max_depth,
+    int shift_x, int shift_y, int mask_x0, int mask_y0, int mask_x1,
+    int mask_y1, int max_blackness_abs, int *out_peaks) {
+  const int angle_idx = (int)blockIdx.x;
+  const int tid = (int)threadIdx.x;
+
+  const int *base_x = base_x_all + (size_t)angle_idx * (size_t)scan_size;
+  const int *base_y = base_y_all + (size_t)angle_idx * (size_t)scan_size;
+
+  __shared__ int sh_sum[256];
+  __shared__ int sh_last_blackness;
+  __shared__ int sh_max_diff;
+  __shared__ int sh_accumulated;
+  __shared__ int sh_dep;
+  __shared__ int sh_continue;
+
+  const UnpaperCudaFormat f = (UnpaperCudaFormat)fmt;
+
+  if (tid == 0) {
+    sh_last_blackness = 0;
+    sh_max_diff = 0;
+    sh_accumulated = 0;
+    sh_dep = 0;
+    sh_continue = 1;
+  }
+  __syncthreads();
+
+  while (true) {
+    if (tid == 0) {
+      sh_continue =
+          (sh_accumulated < max_blackness_abs && sh_dep < max_depth) ? 1 : 0;
+    }
+    __syncthreads();
+    if (sh_continue == 0) {
+      break;
+    }
+
+    const int dep = sh_dep;
+
+    int local_sum = 0;
+    for (int i = tid; i < scan_size; i += (int)blockDim.x) {
+      const int x = base_x[i] + dep * shift_x;
+      const int y = base_y[i] + dep * shift_y;
+      if (x < mask_x0 || x > mask_x1 || y < mask_y0 || y > mask_y1) {
+        continue;
+      }
+      const uint8_t inv =
+          read_darkness_inverse(src, src_linesize, f, src_w, src_h, x, y);
+      local_sum += (int)(255u - inv);
+    }
+
+    sh_sum[tid] = local_sum;
+    __syncthreads();
+
+    for (int offset = (int)blockDim.x / 2; offset > 0; offset >>= 1) {
+      if (tid < offset) {
+        sh_sum[tid] += sh_sum[tid + offset];
+      }
+      __syncthreads();
+    }
+
+    const int blackness = sh_sum[0];
+    if (tid == 0) {
+      const int diff = blackness - sh_last_blackness;
+      sh_last_blackness = blackness;
+      if (diff >= sh_max_diff) {
+        sh_max_diff = diff;
+      }
+      sh_accumulated += blackness;
+      sh_dep++;
+    }
+    __syncthreads();
+  }
+
+  if (tid == 0) {
+    out_peaks[angle_idx] = (sh_dep < max_depth) ? sh_max_diff : 0;
+  }
+}
+
+static __device__ __forceinline__ void interp_nn_round(
+    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
+    int src_h, float sx, float sy, uint8_t *r, uint8_t *g, uint8_t *b) {
+  const int ix = (int)roundf(sx);
+  const int iy = (int)roundf(sy);
+  read_rgb_safe(src, src_linesize, fmt, src_w, src_h, ix, iy, r, g, b);
+}
+
+extern "C" __global__ void unpaper_rotate_bytes(
+    const uint8_t *src, int src_linesize, uint8_t *dst, int dst_linesize,
+    int fmt, int src_w, int src_h, int dst_w, int dst_h, float src_center_x,
+    float src_center_y, float dst_center_x, float dst_center_y, float cosval,
+    float sinval, int interp_type) {
+  const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+  if (x < 0 || y < 0 || x >= dst_w || y >= dst_h) {
+    return;
+  }
+
+  const float dx = (float)x - dst_center_x;
+  const float dy = (float)y - dst_center_y;
+  const float sx = src_center_x + dx * cosval + dy * sinval;
+  const float sy = src_center_y + dy * cosval - dx * sinval;
+
+  uint8_t r = 255u, g = 255u, b = 255u;
+  const UnpaperCudaFormat f = (UnpaperCudaFormat)fmt;
+  if (interp_type == 0) {
+    interp_nn_round(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+  } else if (interp_type == 1) {
+    interp_bilinear(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+  } else {
+    interp_bicubic(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+  }
+
+  write_pixel(dst, dst_linesize, f, x, y, r, g, b);
+}
+
+extern "C" __global__ void unpaper_rotate_mono(
+    const uint8_t *src, int src_linesize, int src_fmt, uint8_t *dst,
+    int dst_linesize, int dst_fmt, int src_w, int src_h, int dst_w, int dst_h,
+    float src_center_x, float src_center_y, float dst_center_x,
+    float dst_center_y, float cosval, float sinval, int interp_type,
+    uint8_t abs_black_threshold) {
+  const int bytes_per_row = (dst_w + 7) / 8;
+  const int byte_x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+  if (byte_x < 0 || byte_x >= bytes_per_row || y < 0 || y >= dst_h) {
+    return;
+  }
+
+  const int dst_byte_start_x = byte_x * 8;
+  uint8_t out = 0;
+  for (int bit = 0; bit < 8; bit++) {
+    const int x = dst_byte_start_x + bit;
+    if (x >= dst_w) {
+      continue;
+    }
+
+    const float dx = (float)x - dst_center_x;
+    const float dy = (float)y - dst_center_y;
+    const float sx = src_center_x + dx * cosval + dy * sinval;
+    const float sy = src_center_y + dy * cosval - dx * sinval;
+
+    uint8_t r = 255u, g = 255u, b = 255u;
+    const UnpaperCudaFormat f = (UnpaperCudaFormat)src_fmt;
+    if (interp_type == 0) {
+      interp_nn_round(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+    } else if (interp_type == 1) {
+      interp_bilinear(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+    } else {
+      interp_bicubic(src, src_linesize, f, src_w, src_h, sx, sy, &r, &g, &b);
+    }
+
+    const uint8_t gray = grayscale_u8(r, g, b);
+    const bool pixel_black = gray < abs_black_threshold;
+    const bool bit_set = ((UnpaperCudaFormat)dst_fmt == UNPAPER_CUDA_FMT_MONOWHITE)
+                             ? pixel_black
+                             : !pixel_black;
+    if (bit_set) {
+      out = (uint8_t)(out | (uint8_t)(0x80u >> bit));
+    }
+  }
+
+  dst[(size_t)y * (size_t)dst_linesize + (size_t)byte_x] = out;
+}
+
 extern "C" __global__ void unpaper_wipe_rect_bytes(
     uint8_t *dst, int dst_linesize, int x0, int y0, int x1, int y1,
     int bytes_per_pixel, uint8_t c0, uint8_t c1, uint8_t c2) {
