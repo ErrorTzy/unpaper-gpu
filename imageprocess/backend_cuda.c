@@ -49,7 +49,10 @@ static void *k_sum_grayscale_rect;
 static void *k_sum_darkness_inverse_rect;
 static void *k_apply_masks_bytes;
 static void *k_apply_masks_mono;
-static void *k_noisefilter;
+static void *k_noisefilter_build_labels;
+static void *k_noisefilter_propagate;
+static void *k_noisefilter_count;
+static void *k_noisefilter_apply;
 static void *k_blackfilter_floodfill_rect;
 static void *k_detect_edge_rotation_peaks;
 static void *k_rotate_bytes;
@@ -98,8 +101,14 @@ static void ensure_kernels_loaded(void) {
       unpaper_cuda_module_get_function(cuda_module, "unpaper_apply_masks_bytes");
   k_apply_masks_mono =
       unpaper_cuda_module_get_function(cuda_module, "unpaper_apply_masks_mono");
-  k_noisefilter =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_noisefilter");
+  k_noisefilter_build_labels = unpaper_cuda_module_get_function(
+      cuda_module, "unpaper_noisefilter_build_labels");
+  k_noisefilter_propagate = unpaper_cuda_module_get_function(
+      cuda_module, "unpaper_noisefilter_propagate");
+  k_noisefilter_count = unpaper_cuda_module_get_function(
+      cuda_module, "unpaper_noisefilter_count");
+  k_noisefilter_apply = unpaper_cuda_module_get_function(
+      cuda_module, "unpaper_noisefilter_apply");
   k_blackfilter_floodfill_rect = unpaper_cuda_module_get_function(
       cuda_module, "unpaper_blackfilter_floodfill_rect");
   k_detect_edge_rotation_peaks = unpaper_cuda_module_get_function(
@@ -1495,11 +1504,101 @@ static void noisefilter_cuda(Image image, uint64_t intensity,
   const int img_fmt = (int)fmt;
   const int w = image.frame->width;
   const int h = image.frame->height;
+  if (w <= 0 || h <= 0) {
+    return;
+  }
 
-  void *params[] = {
-      &st->dptr, &st->linesize, &img_fmt, &w, &h, &intensity, &min_white_level,
-  };
-  unpaper_cuda_launch_kernel(k_noisefilter, 1, 1, 1, 1, 1, 1, params);
+  const size_t num_pixels = (size_t)w * (size_t)h;
+  if (num_pixels == 0) {
+    return;
+  }
+
+  UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+  const uint32_t block2d_x = 16u;
+  const uint32_t block2d_y = 16u;
+  const uint32_t grid2d_x =
+      (uint32_t)((w + (int)block2d_x - 1) / (int)block2d_x);
+  const uint32_t grid2d_y =
+      (uint32_t)((h + (int)block2d_y - 1) / (int)block2d_y);
+
+  const size_t labels_bytes = num_pixels * sizeof(uint32_t);
+  const size_t counts_bytes = (num_pixels + 1) * sizeof(uint32_t);
+  const size_t total_bytes =
+      labels_bytes * 2 + counts_bytes + sizeof(uint32_t);
+  size_t scratch_capacity = 0;
+  const uint64_t scratch =
+      unpaper_cuda_scratch_reserve(total_bytes, &scratch_capacity);
+  if (scratch_capacity < total_bytes) {
+    errOutput("CUDA noisefilter: unable to reserve scratch buffer.");
+  }
+
+  const uint64_t labels_a = scratch;
+  const uint64_t labels_b = labels_a + labels_bytes;
+  const uint64_t counts = labels_b + labels_bytes;
+  const uint64_t changed = counts + counts_bytes;
+
+  void *params_build[] = {&st->dptr, &st->linesize, &img_fmt, &w, &h,
+                          &min_white_level, &labels_a};
+  unpaper_cuda_launch_kernel_on_stream(
+      stream, k_noisefilter_build_labels, grid2d_x, grid2d_y, 1, block2d_x,
+      block2d_y, 1, params_build);
+
+  size_t pinned_capacity = 0;
+  int *changed_host = (int *)unpaper_cuda_stream_pinned_reserve(
+      stream, sizeof(int), &pinned_capacity);
+  int changed_fallback = 0;
+  if (changed_host == NULL) {
+    changed_host = &changed_fallback;
+  }
+
+  uint64_t labels_in = labels_a;
+  uint64_t labels_out = labels_b;
+  const int max_iters = (w + h > 0) ? (w + h) : 1;
+
+  for (int iter = 0; iter < max_iters; iter++) {
+    unpaper_cuda_memset_d8(changed, 0, sizeof(int));
+    void *params_prop[] = {&labels_in, &labels_out, &w, &h, &changed};
+    unpaper_cuda_launch_kernel_on_stream(
+        stream, k_noisefilter_propagate, grid2d_x, grid2d_y, 1, block2d_x,
+        block2d_y, 1, params_prop);
+
+    *changed_host = 0;
+    if (changed_host == &changed_fallback) {
+      unpaper_cuda_memcpy_d2h(changed_host, changed, sizeof(int));
+    } else {
+      unpaper_cuda_memcpy_d2h_async(stream, changed_host, changed,
+                                    sizeof(int));
+      unpaper_cuda_stream_synchronize_on(stream);
+    }
+
+    if (*changed_host == 0) {
+      labels_in = labels_out;
+      break;
+    }
+
+    uint64_t tmp = labels_in;
+    labels_in = labels_out;
+    labels_out = tmp;
+  }
+
+  const uint64_t final_labels = labels_in;
+
+  unpaper_cuda_memset_d8(counts, 0, counts_bytes);
+  const uint32_t block1d = 256u;
+  const uint32_t grid1d =
+      (uint32_t)(((num_pixels + block1d - 1) / block1d));
+  const int num_pixels_i = (int)num_pixels;
+  void *params_count[] = {&final_labels, &num_pixels_i, &counts};
+  unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_count, grid1d, 1,
+                                       1, block1d, 1, 1, params_count);
+
+  void *params_apply[] = {&st->dptr, &st->linesize, &img_fmt, &w, &h,
+                          &final_labels, &counts, &intensity};
+  unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_apply, grid2d_x,
+                                       grid2d_y, 1, block2d_x, block2d_y, 1,
+                                       params_apply);
+
+  unpaper_cuda_stream_synchronize_on(stream);
 
   st->cuda_dirty = true;
   st->cpu_dirty = false;

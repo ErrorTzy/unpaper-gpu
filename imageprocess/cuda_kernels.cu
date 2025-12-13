@@ -1064,14 +1064,6 @@ static __device__ __forceinline__ uint8_t get_grayscale_safe(
   return grayscale_u8(r, g, b);
 }
 
-static __device__ __forceinline__ uint8_t get_lightness_safe(
-    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
-    int src_h, int x, int y) {
-  uint8_t r, g, b;
-  read_rgb_safe(src, src_linesize, fmt, src_w, src_h, x, y, &r, &g, &b);
-  return lightness_u8(r, g, b);
-}
-
 static __device__ __forceinline__ uint8_t get_darkness_inverse_safe(
     const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
     int src_h, int x, int y) {
@@ -1080,118 +1072,106 @@ static __device__ __forceinline__ uint8_t get_darkness_inverse_safe(
   return darkness_inverse_u8(r, g, b);
 }
 
-static __device__ __forceinline__ bool noisefilter_compare_and_clear_cuda(
-    uint8_t *img, int img_linesize, UnpaperCudaFormat fmt, int w, int h, int x,
-    int y, bool clear, uint8_t min_white_level) {
-  const uint8_t lightness =
-      get_lightness_safe(img, img_linesize, fmt, w, h, x, y);
-  if (lightness >= min_white_level) {
-    return false;
-  }
-
-  if (clear) {
-    set_pixel_white_safe(img, img_linesize, fmt, w, h, x, y);
-  }
-  return true;
+static __device__ __forceinline__ bool noisefilter_is_dark(
+    const uint8_t *img, int img_linesize, UnpaperCudaFormat fmt, int w, int h,
+    int x, int y, uint8_t min_white_level) {
+  const uint8_t darkness =
+      get_darkness_inverse_safe(img, img_linesize, fmt, w, h, x, y);
+  return darkness < min_white_level;
 }
 
-static __device__ __forceinline__ unsigned long long
-noisefilter_count_neighbors_level_cuda(uint8_t *img, int img_linesize,
-                                       UnpaperCudaFormat fmt, int w, int h,
-                                       int px, int py, unsigned int level,
-                                       bool clear, uint8_t min_white_level) {
-  unsigned long long count = 0;
-
-  for (int xx = px - (int)level; xx <= px + (int)level; xx++) {
-    const int upper_y = py - (int)level;
-    const int lower_y = py + (int)level;
-    count += noisefilter_compare_and_clear_cuda(img, img_linesize, fmt, w, h,
-                                                xx, upper_y, clear,
-                                                min_white_level)
-                 ? 1ull
-                 : 0ull;
-    count += noisefilter_compare_and_clear_cuda(img, img_linesize, fmt, w, h,
-                                                xx, lower_y, clear,
-                                                min_white_level)
-                 ? 1ull
-                 : 0ull;
-  }
-
-  for (int yy = py - ((int)level - 1); yy <= py + ((int)level - 1); yy++) {
-    const int first_x = px - (int)level;
-    const int last_x = px + (int)level;
-    count += noisefilter_compare_and_clear_cuda(img, img_linesize, fmt, w, h,
-                                                first_x, yy, clear,
-                                                min_white_level)
-                 ? 1ull
-                 : 0ull;
-    count += noisefilter_compare_and_clear_cuda(img, img_linesize, fmt, w, h,
-                                                last_x, yy, clear,
-                                                min_white_level)
-                 ? 1ull
-                 : 0ull;
-  }
-
-  return count;
-}
-
-static __device__ __forceinline__ unsigned long long
-noisefilter_count_neighbors_cuda(uint8_t *img, int img_linesize,
-                                 UnpaperCudaFormat fmt, int w, int h, int px,
-                                 int py, unsigned long long intensity,
-                                 uint8_t min_white_level) {
-  unsigned long long count = 1ull;
-  unsigned long long lCount;
-  unsigned int level = 1;
-  do {
-    lCount = noisefilter_count_neighbors_level_cuda(
-        img, img_linesize, fmt, w, h, px, py, level, false, min_white_level);
-    count += lCount;
-    level++;
-  } while (lCount != 0ull && (unsigned long long)level <= intensity);
-
-  return count;
-}
-
-static __device__ __forceinline__ void noisefilter_clear_neighbors_cuda(
-    uint8_t *img, int img_linesize, UnpaperCudaFormat fmt, int w, int h, int px,
-    int py, uint8_t min_white_level) {
-  set_pixel_white_safe(img, img_linesize, fmt, w, h, px, py);
-
-  unsigned long long lCount;
-  unsigned int level = 1;
-  do {
-    lCount = noisefilter_count_neighbors_level_cuda(
-        img, img_linesize, fmt, w, h, px, py, level, true, min_white_level);
-    level++;
-  } while (lCount != 0ull);
-}
-
-extern "C" __global__ void unpaper_noisefilter(uint8_t *img, int img_linesize,
-                                               int img_fmt, int w, int h,
-                                               unsigned long long intensity,
-                                               uint8_t min_white_level) {
-  if (blockIdx.x != 0 || threadIdx.x != 0 || blockIdx.y != 0 || threadIdx.y != 0) {
+extern "C" __global__ void unpaper_noisefilter_build_labels(
+    const uint8_t *img, int img_linesize, int img_fmt, int w, int h,
+    uint8_t min_white_level, uint32_t *labels) {
+  const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+  if (x >= w || y >= h) {
     return;
   }
 
+  const int idx = y * w + x;
   const UnpaperCudaFormat fmt = (UnpaperCudaFormat)img_fmt;
+  labels[idx] = noisefilter_is_dark(img, img_linesize, fmt, w, h, x, y,
+                                    min_white_level)
+                    ? (uint32_t)(idx + 1)
+                    : 0u;
+}
 
-  for (int y = 0; y < h; y++) {
-    for (int x = 0; x < w; x++) {
-      const uint8_t darkness =
-          get_darkness_inverse_safe(img, img_linesize, fmt, w, h, x, y);
-      if (darkness >= min_white_level) {
+extern "C" __global__ void unpaper_noisefilter_propagate(
+    const uint32_t *labels_in, uint32_t *labels_out, int w, int h,
+    int *changed) {
+  const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+  if (x >= w || y >= h) {
+    return;
+  }
+
+  const int idx = y * w + x;
+  const uint32_t self = labels_in[idx];
+  if (self == 0u) {
+    labels_out[idx] = 0u;
+    return;
+  }
+
+  uint32_t min_label = self;
+  for (int dy = -1; dy <= 1; dy++) {
+    const int yy = y + dy;
+    if (yy < 0 || yy >= h) {
+      continue;
+    }
+    for (int dx = -1; dx <= 1; dx++) {
+      const int xx = x + dx;
+      if (xx < 0 || xx >= w) {
         continue;
       }
-
-      const unsigned long long neighbors = noisefilter_count_neighbors_cuda(
-          img, img_linesize, fmt, w, h, x, y, intensity, min_white_level);
-      if (neighbors <= intensity) {
-        noisefilter_clear_neighbors_cuda(img, img_linesize, fmt, w, h, x, y,
-                                         min_white_level);
+      const uint32_t neighbor = labels_in[yy * w + xx];
+      if (neighbor != 0u && neighbor < min_label) {
+        min_label = neighbor;
       }
     }
+  }
+
+  labels_out[idx] = min_label;
+  if (min_label != self) {
+    atomicExch(changed, 1);
+  }
+}
+
+extern "C" __global__ void unpaper_noisefilter_count(const uint32_t *labels,
+                                                     int num_pixels,
+                                                     uint32_t *counts) {
+  const int idx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  if (idx >= num_pixels) {
+    return;
+  }
+
+  const uint32_t label = labels[idx];
+  if (label == 0u) {
+    return;
+  }
+  atomicAdd(&counts[label], 1u);
+}
+
+extern "C" __global__ void unpaper_noisefilter_apply(
+    uint8_t *img, int img_linesize, int img_fmt, int w, int h,
+    const uint32_t *labels, const uint32_t *counts,
+    unsigned long long intensity) {
+  const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+  if (x >= w || y >= h) {
+    return;
+  }
+
+  const int idx = y * w + x;
+  const uint32_t label = labels[idx];
+  if (label == 0u) {
+    return;
+  }
+
+  const uint32_t comp_size = counts[label];
+  if ((unsigned long long)comp_size <= intensity) {
+    set_pixel_white_safe(img, img_linesize, (UnpaperCudaFormat)img_fmt, w, h, x,
+                         y);
   }
 }
 

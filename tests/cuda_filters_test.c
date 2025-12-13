@@ -53,6 +53,42 @@ static void fill_noise_pattern(Image image) {
   }
 }
 
+static void fill_noisefilter_diagonal_pattern(Image image) {
+  wipe_rectangle(image, full_image(image), PIXEL_WHITE);
+
+  // Diagonal chain (length 4) that should be wiped at intensity >= 4.
+  for (int i = 0; i < 4; i++) {
+    set_pixel(image, (Point){2 + i, 2 + i}, PIXEL_BLACK);
+  }
+
+  // Plus-shaped cluster (size 5) that should remain when intensity is 4.
+  const Point center = {12, 12};
+  set_pixel(image, center, PIXEL_BLACK);
+  set_pixel(image, (Point){center.x + 1, center.y}, PIXEL_BLACK);
+  set_pixel(image, (Point){center.x - 1, center.y}, PIXEL_BLACK);
+  set_pixel(image, (Point){center.x, center.y + 1}, PIXEL_BLACK);
+  set_pixel(image, (Point){center.x, center.y - 1}, PIXEL_BLACK);
+
+  // Small horizontal pair to check two-pixel components.
+  set_pixel(image, (Point){24, 6}, PIXEL_BLACK);
+  set_pixel(image, (Point){25, 6}, PIXEL_BLACK);
+}
+
+static void fill_noisefilter_rgb_pattern(Image image) {
+  wipe_rectangle(image, full_image(image), PIXEL_WHITE);
+
+  // Dark red pixels forming a tiny cluster (expected to be removed).
+  set_pixel(image, (Point){4, 4}, (Pixel){30, 0, 0});
+  set_pixel(image, (Point){5, 4}, (Pixel){28, 0, 0});
+
+  // Mixed-color cluster that should stay.
+  for (int y = 10; y < 13; y++) {
+    for (int x = 14; x < 17; x++) {
+      set_pixel(image, (Point){x, y}, (Pixel){20, 40, 60});
+    }
+  }
+}
+
 static void test_noisefilter_gray8(void) {
   const RectangleSize sz = {.width = 32, .height = 24};
   const uint8_t abs_black_threshold = 64;
@@ -95,6 +131,77 @@ static void test_noisefilter_gray8(void) {
   free_image(&gpu);
   free_image(&gpu1);
   free_image(&gpu2);
+}
+
+static void test_noisefilter_diagonal(void) {
+  const RectangleSize sz = {.width = 32, .height = 24};
+  const uint8_t abs_black_threshold = 96;
+  const uint64_t intensity = 4;
+  const uint8_t min_white_level = 180;
+
+  image_backend_select(UNPAPER_DEVICE_CPU);
+  Image cpu = create_image(sz, AV_PIX_FMT_GRAY8, true, PIXEL_WHITE,
+                           abs_black_threshold);
+  Image gpu = create_image(sz, AV_PIX_FMT_GRAY8, true, PIXEL_WHITE,
+                           abs_black_threshold);
+  fill_noisefilter_diagonal_pattern(cpu);
+  fill_noisefilter_diagonal_pattern(gpu);
+
+  image_backend_select(UNPAPER_DEVICE_CPU);
+  noisefilter(cpu, intensity, min_white_level);
+
+  image_backend_select(UNPAPER_DEVICE_CUDA);
+  noisefilter(gpu, intensity, min_white_level);
+  image_ensure_cpu(&gpu);
+
+  assert_images_equal("noisefilter_diagonal", cpu, gpu);
+
+  // Determinism on the more complex pattern.
+  Image gpu1 = create_image(sz, AV_PIX_FMT_GRAY8, true, PIXEL_WHITE,
+                            abs_black_threshold);
+  Image gpu2 = create_image(sz, AV_PIX_FMT_GRAY8, true, PIXEL_WHITE,
+                            abs_black_threshold);
+  fill_noisefilter_diagonal_pattern(gpu1);
+  fill_noisefilter_diagonal_pattern(gpu2);
+
+  image_backend_select(UNPAPER_DEVICE_CUDA);
+  noisefilter(gpu1, intensity, min_white_level);
+  noisefilter(gpu2, intensity, min_white_level);
+  image_ensure_cpu(&gpu1);
+  image_ensure_cpu(&gpu2);
+  assert_images_equal("noisefilter_diagonal_determinism", gpu1, gpu2);
+
+  free_image(&cpu);
+  free_image(&gpu);
+  free_image(&gpu1);
+  free_image(&gpu2);
+}
+
+static void test_noisefilter_rgb24(void) {
+  const RectangleSize sz = {.width = 24, .height = 18};
+  const uint8_t abs_black_threshold = 80;
+  const uint64_t intensity = 3;
+  const uint8_t min_white_level = 190;
+
+  image_backend_select(UNPAPER_DEVICE_CPU);
+  Image cpu = create_image(sz, AV_PIX_FMT_RGB24, true, PIXEL_WHITE,
+                           abs_black_threshold);
+  Image gpu = create_image(sz, AV_PIX_FMT_RGB24, true, PIXEL_WHITE,
+                           abs_black_threshold);
+  fill_noisefilter_rgb_pattern(cpu);
+  fill_noisefilter_rgb_pattern(gpu);
+
+  image_backend_select(UNPAPER_DEVICE_CPU);
+  noisefilter(cpu, intensity, min_white_level);
+
+  image_backend_select(UNPAPER_DEVICE_CUDA);
+  noisefilter(gpu, intensity, min_white_level);
+  image_ensure_cpu(&gpu);
+
+  assert_images_equal("noisefilter_rgb24", cpu, gpu);
+
+  free_image(&cpu);
+  free_image(&gpu);
 }
 
 static void fill_blackfilter_pattern(Image image) {
@@ -244,6 +351,8 @@ int main(void) {
   }
 
   test_noisefilter_gray8();
+  test_noisefilter_diagonal();
+  test_noisefilter_rgb24();
   test_blackfilter_gray8();
   test_grayfilter_gray8();
   test_blurfilter_gray8();

@@ -297,7 +297,7 @@ Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing
 
 **PR 13: Rewrite CUDA noisefilter for parallelism (largest single win)**
 
-- Status: planned
+- Status: completed (2025-12-13)
 - Scope:
   - Replace the current effectively-serial CUDA noisefilter kernel with a GPU-parallel implementation.
   - Preferred algorithm: connected-components labeling (CCL) on the “dark” mask (`lightness < min_white_level`) and removal of components with size `<= intensity`.
