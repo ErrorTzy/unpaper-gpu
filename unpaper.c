@@ -28,10 +28,13 @@
 #include "imageprocess/opencv_bridge.h"
 #include "imageprocess/pixel.h"
 #include "lib/batch.h"
+#include "lib/batch_worker.h"
 #include "lib/options.h"
 #include "lib/perf.h"
 #include "lib/physical.h"
+#include "lib/threadpool.h"
 #include "parse.h"
+#include "sheet_process.h"
 #include "unpaper.h"
 #include "version.h"
 
@@ -1191,6 +1194,39 @@ int main(int argc, char *argv[]) {
     }
 
     batch_progress_start(&batch_queue);
+
+    // Parallel batch processing when parallelism > 1
+    if (batch_queue.parallelism > 1) {
+      // Set up sheet processing configuration
+      SheetProcessConfig config;
+      sheet_process_config_init(&config, &options, preMasks, preMaskCount, points,
+                                pointCount, middleWipe, blackfilterExclude, 0);
+
+      // Create thread pool
+      ThreadPool *pool = threadpool_create(batch_queue.parallelism);
+      if (!pool) {
+        errOutput("Failed to create thread pool");
+      }
+
+      verboseLog(VERBOSE_NORMAL, "Parallel batch processing with %d workers\n",
+                 threadpool_get_num_threads(pool));
+
+      // Set up batch worker context
+      BatchWorkerContext worker_ctx;
+      batch_worker_init(&worker_ctx, &options, &batch_queue);
+      batch_worker_set_config(&worker_ctx, &config);
+
+      // Process all jobs in parallel
+      int failed = batch_process_parallel(&worker_ctx, pool);
+
+      // Cleanup
+      batch_worker_cleanup(&worker_ctx);
+      threadpool_destroy(pool);
+      batch_progress_finish(&batch_queue);
+      batch_queue_free(&batch_queue);
+
+      return (failed > 0) ? 1 : 0;
+    }
   }
 
   int inputNr = options.start_input;

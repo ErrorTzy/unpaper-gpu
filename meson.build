@@ -22,7 +22,8 @@ endif
 
 unpaper_deps = [
     dependency('libavformat'), dependency('libavcodec'), dependency('libavutil'),
-    cc.find_library('m', required : false)
+    cc.find_library('m', required : false),
+    dependency('threads')
 ]
 
 conf_data = configuration_data()
@@ -35,7 +36,7 @@ nvcc = disabler()
 unpaper_c_args = []
 unpaper_cpp_args = []
 unpaper_sources = [
-    'file.c', 'parse.c', 'unpaper.c',
+    'file.c', 'parse.c', 'sheet_process.c', 'unpaper.c',
     'imageprocess/blit.c',
     'imageprocess/backend.c',
     'imageprocess/deskew.c',
@@ -48,10 +49,12 @@ unpaper_sources = [
     'imageprocess/pixel.c',
     'imageprocess/primitives.c',
     'lib/batch.c',
+    'lib/batch_worker.c',
     'lib/logging.c',
     'lib/perf.c',
     'lib/options.c',
     'lib/physical.c',
+    'lib/threadpool.c',
 ]
 
 # OpenCV and CUDA setup - OpenCV is mandatory when CUDA is enabled

@@ -1,0 +1,89 @@
+// SPDX-FileCopyrightText: 2025 The unpaper authors
+//
+// SPDX-License-Identifier: GPL-2.0-only
+
+#pragma once
+
+#include "constants.h"
+#include "imageprocess/image.h"
+#include "imageprocess/primitives.h"
+#include "lib/batch.h"
+#include "lib/options.h"
+#include "lib/perf.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+
+// Read-only context shared between all workers
+// Set once during command-line parsing, never modified during processing
+typedef struct {
+  const Options *options;
+
+  // Pre-set masks and points from command line
+  const Rectangle *pre_masks;
+  size_t pre_mask_count;
+
+  const Point *initial_points;
+  size_t initial_point_count;
+
+  int32_t middle_wipe[2];
+
+  // Blackfilter exclusions
+  const Rectangle *blackfilter_exclude;
+  size_t blackfilter_exclude_count;
+} SheetProcessConfig;
+
+// Per-job state - each worker gets its own instance
+typedef struct {
+  // Input/output file paths (borrowed from BatchJob)
+  char *input_files[BATCH_MAX_FILES_PER_SHEET];
+  int input_count;
+  char *output_files[BATCH_MAX_FILES_PER_SHEET];
+  int output_count;
+
+  // Sheet identification
+  int sheet_nr;
+
+  // Working images (allocated per-job)
+  Image sheet;
+  Image page;
+
+  // Per-sheet computed state
+  Point points[MAX_POINTS];
+  size_t point_count;
+  Rectangle masks[MAX_MASKS];
+  size_t mask_count;
+  Rectangle outside_borderscan_mask[MAX_PAGES];
+  size_t outside_borderscan_mask_count;
+
+  // Mutable copy of options fields that may be modified per-sheet
+  int mask_max_width;
+  int mask_max_height;
+
+  // Size tracking
+  RectangleSize input_size;
+  RectangleSize previous_size;
+
+  // Performance recording
+  PerfRecorder perf;
+} SheetProcessState;
+
+// Initialize shared config (call once after parsing)
+void sheet_process_config_init(SheetProcessConfig *config,
+                               const Options *options, const Rectangle *pre_masks,
+                               size_t pre_mask_count, const Point *initial_points,
+                               size_t initial_point_count,
+                               const int32_t middle_wipe[2],
+                               const Rectangle *blackfilter_exclude,
+                               size_t blackfilter_exclude_count);
+
+// Initialize per-job state (call for each job)
+void sheet_process_state_init(SheetProcessState *state,
+                              const SheetProcessConfig *config, BatchJob *job);
+
+// Clean up per-job state
+void sheet_process_state_cleanup(SheetProcessState *state);
+
+// Process a single sheet
+// Returns true on success, false on failure
+bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config);

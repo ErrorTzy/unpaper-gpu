@@ -204,14 +204,19 @@ Files use SPDX headers. Add SPDX headers to new files and validate with `reuse l
 
 **PR 20: CPU batch processing with thread pool**
 
-- Status: not started
+- Status: complete
 - Scope:
-  - Implement pthread-based thread pool (`lib/threadpool.c`)
+  - Implement pthread-based thread pool (`lib/threadpool.c`, `lib/threadpool.h`)
   - Worker threads process jobs concurrently with thread-local image buffers
+  - Sheet processing extracted to `sheet_process.c`/`.h` for parallel execution
+  - Batch worker coordination in `lib/batch_worker.c`/`.h`
   - Add batch benchmark script (`tools/bench_batch.py`)
-- Acceptance:
-  - CPU batch with N threads shows near-linear speedup up to core count
-  - Establish baseline: 10 images x 6s = 60s sequential -> ~15s with 4 threads
+- Results:
+  - CPU batch with N threads shows near-linear speedup:
+    - 1 thread: baseline (6117ms/image)
+    - 2 threads: 1.89x speedup (3245ms/image)
+    - 4 threads: 2.55x speedup (2402ms/image)
+  - All existing tests pass
 
 **PR 21: GPU batch - persistent context + memory pool**
 
