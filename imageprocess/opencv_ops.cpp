@@ -373,3 +373,202 @@ bool unpaper_opencv_rotate90(uint64_t src_device, int src_width, int src_height,
   return false;
 #endif
 }
+
+// Convert unpaper interpolation type to OpenCV interpolation flag
+static inline int opencv_interp_from_unpaper(int interp_type) {
+  switch (interp_type) {
+  case 0:
+    return cv::INTER_NEAREST;
+  case 1:
+    return cv::INTER_LINEAR;
+  case 2:
+  default:
+    return cv::INTER_CUBIC;
+  }
+}
+
+bool unpaper_opencv_resize(uint64_t src_device, int src_width, int src_height,
+                           size_t src_pitch, uint64_t dst_device, int dst_width,
+                           int dst_height, size_t dst_pitch, int format,
+                           int interp_type, UnpaperCudaStream *stream) {
+#ifdef HAVE_OPENCV_CUDAWARPING
+  auto fmt = static_cast<UnpaperCudaFormat>(format);
+  if (is_mono_format(fmt)) {
+    return false; // Mono formats handled by custom kernel
+  }
+
+  int cv_type = opencv_type_from_format(fmt);
+  if (cv_type < 0 || src_device == 0 || dst_device == 0) {
+    return false;
+  }
+
+  // Y400A (2 channels) is not well supported by OpenCV resize
+  if (fmt == UNPAPER_CUDA_FMT_Y400A) {
+    return false;
+  }
+
+  // Get bytes per pixel for this format
+  int elem_size = 1;
+  if (fmt == UNPAPER_CUDA_FMT_RGB24) {
+    elem_size = 3;
+  }
+
+  try {
+    cv::cuda::Stream cv_stream = get_cv_stream(stream);
+
+    cv::cuda::GpuMat src(src_height, src_width, cv_type,
+                         reinterpret_cast<void *>(src_device), src_pitch);
+
+    int cv_interp = opencv_interp_from_unpaper(interp_type);
+
+    // Resize to temporary buffer first
+    cv::cuda::GpuMat resized;
+    cv::cuda::resize(src, resized, cv::Size(dst_width, dst_height), 0, 0,
+                     cv_interp, cv_stream);
+
+    // Wait for resize to complete before copying
+    cv_stream.waitForCompletion();
+
+    // Copy to destination with correct pitch using cudaMemcpy2D
+    // This properly handles different source/destination pitches
+    cudaError_t err = cudaMemcpy2D(
+        reinterpret_cast<void *>(dst_device), dst_pitch, resized.data,
+        resized.step, (size_t)dst_width * elem_size, (size_t)dst_height,
+        cudaMemcpyDeviceToDevice);
+    if (err != cudaSuccess) {
+      fprintf(stderr, "OpenCV resize cudaMemcpy2D failed: %s\n",
+              cudaGetErrorString(err));
+      return false;
+    }
+
+    return true;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "OpenCV resize failed: %s\n", e.what());
+    return false;
+  }
+#else
+  (void)src_device;
+  (void)src_width;
+  (void)src_height;
+  (void)src_pitch;
+  (void)dst_device;
+  (void)dst_width;
+  (void)dst_height;
+  (void)dst_pitch;
+  (void)format;
+  (void)interp_type;
+  (void)stream;
+  return false;
+#endif
+}
+
+bool unpaper_opencv_deskew(uint64_t src_device, int src_width, int src_height,
+                           size_t src_pitch, uint64_t dst_device, int dst_width,
+                           int dst_height, size_t dst_pitch, int format,
+                           float src_center_x, float src_center_y,
+                           float dst_center_x, float dst_center_y, float cosval,
+                           float sinval, int interp_type,
+                           UnpaperCudaStream *stream) {
+#ifdef HAVE_OPENCV_CUDAWARPING
+  auto fmt = static_cast<UnpaperCudaFormat>(format);
+  if (is_mono_format(fmt)) {
+    return false; // Mono formats handled by custom kernel
+  }
+
+  int cv_type = opencv_type_from_format(fmt);
+  if (cv_type < 0 || src_device == 0 || dst_device == 0) {
+    return false;
+  }
+
+  // Y400A (2 channels) is not supported by warpAffine
+  if (fmt == UNPAPER_CUDA_FMT_Y400A) {
+    return false;
+  }
+
+  // Get bytes per pixel for this format
+  int elem_size = 1;
+  if (fmt == UNPAPER_CUDA_FMT_RGB24) {
+    elem_size = 3;
+  }
+
+  try {
+    cv::cuda::Stream cv_stream = get_cv_stream(stream);
+
+    cv::cuda::GpuMat src(src_height, src_width, cv_type,
+                         reinterpret_cast<void *>(src_device), src_pitch);
+
+    // Unpaper deskew coordinate mapping (inverse, dst -> src):
+    //   sx = src_center_x + (x - dst_center_x) * cosval + (y - dst_center_y) * sinval
+    //   sy = src_center_y + (y - dst_center_y) * cosval - (x - dst_center_x) * sinval
+    //
+    // Expanding:
+    //   sx = cosval * x + sinval * y + (src_center_x - dst_center_x * cosval - dst_center_y * sinval)
+    //   sy = -sinval * x + cosval * y + (src_center_y + dst_center_x * sinval - dst_center_y * cosval)
+    //
+    // Affine matrix for inverse mapping:
+    // | cosval,   sinval,   tx |
+    // | -sinval,  cosval,   ty |
+    double tx = (double)src_center_x - (double)dst_center_x * (double)cosval -
+                (double)dst_center_y * (double)sinval;
+    double ty = (double)src_center_y + (double)dst_center_x * (double)sinval -
+                (double)dst_center_y * (double)cosval;
+
+    cv::Mat M(2, 3, CV_64F);
+    M.at<double>(0, 0) = (double)cosval;
+    M.at<double>(0, 1) = (double)sinval;
+    M.at<double>(0, 2) = tx;
+    M.at<double>(1, 0) = -(double)sinval;
+    M.at<double>(1, 1) = (double)cosval;
+    M.at<double>(1, 2) = ty;
+
+    int cv_interp = opencv_interp_from_unpaper(interp_type);
+    cv::Scalar border_color = (fmt == UNPAPER_CUDA_FMT_GRAY8)
+                                  ? cv::Scalar(255)
+                                  : cv::Scalar(255, 255, 255);
+
+    // Warp to temporary buffer first
+    cv::cuda::GpuMat warped;
+    cv::cuda::warpAffine(src, warped, M, cv::Size(dst_width, dst_height),
+                         cv_interp | cv::WARP_INVERSE_MAP, cv::BORDER_CONSTANT,
+                         border_color, cv_stream);
+
+    // Wait for warp to complete before copying
+    cv_stream.waitForCompletion();
+
+    // Copy to destination with correct pitch using cudaMemcpy2D
+    cudaError_t err = cudaMemcpy2D(
+        reinterpret_cast<void *>(dst_device), dst_pitch, warped.data,
+        warped.step, (size_t)dst_width * elem_size, (size_t)dst_height,
+        cudaMemcpyDeviceToDevice);
+    if (err != cudaSuccess) {
+      fprintf(stderr, "OpenCV deskew cudaMemcpy2D failed: %s\n",
+              cudaGetErrorString(err));
+      return false;
+    }
+
+    return true;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "OpenCV deskew failed: %s\n", e.what());
+    return false;
+  }
+#else
+  (void)src_device;
+  (void)src_width;
+  (void)src_height;
+  (void)src_pitch;
+  (void)dst_device;
+  (void)dst_width;
+  (void)dst_height;
+  (void)dst_pitch;
+  (void)format;
+  (void)src_center_x;
+  (void)src_center_y;
+  (void)dst_center_x;
+  (void)dst_center_y;
+  (void)cosval;
+  (void)sinval;
+  (void)interp_type;
+  (void)stream;
+  return false;
+#endif
+}

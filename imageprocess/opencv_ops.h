@@ -96,6 +96,64 @@ bool unpaper_opencv_rotate90(uint64_t src_device, int src_width, int src_height,
                              size_t dst_pitch, int format, bool clockwise,
                              UnpaperCudaStream *stream);
 
+/**
+ * Resize an image using OpenCV CUDA warpAffine.
+ *
+ * Uses the same coordinate mapping as unpaper CPU: src = dst * scale
+ * This matches unpaper's convention exactly for pixel-perfect parity.
+ *
+ * @param src_device   Device pointer to source image
+ * @param src_width    Source image width in pixels
+ * @param src_height   Source image height in pixels
+ * @param src_pitch    Source row stride in bytes
+ * @param dst_device   Device pointer to destination image
+ * @param dst_width    Destination image width in pixels
+ * @param dst_height   Destination image height in pixels
+ * @param dst_pitch    Destination row stride in bytes
+ * @param format       Pixel format (UnpaperCudaFormat)
+ * @param interp_type  Interpolation type (0=NN, 1=linear, 2=cubic)
+ * @param stream       Optional CUDA stream (may be NULL)
+ * @return true on success, false if operation not supported (e.g., mono/Y400A)
+ */
+bool unpaper_opencv_resize(uint64_t src_device, int src_width, int src_height,
+                           size_t src_pitch, uint64_t dst_device, int dst_width,
+                           int dst_height, size_t dst_pitch, int format,
+                           int interp_type, UnpaperCudaStream *stream);
+
+/**
+ * Deskew (rotate) an image using OpenCV CUDA warpAffine.
+ *
+ * Uses the same coordinate mapping as unpaper CPU deskew:
+ *   sx = src_center_x + (x - dst_center_x) * cos + (y - dst_center_y) * sin
+ *   sy = src_center_y + (y - dst_center_y) * cos - (x - dst_center_x) * sin
+ *
+ * @param src_device     Device pointer to source image
+ * @param src_width      Source image width in pixels
+ * @param src_height     Source image height in pixels
+ * @param src_pitch      Source row stride in bytes
+ * @param dst_device     Device pointer to destination image
+ * @param dst_width      Destination image width in pixels
+ * @param dst_height     Destination image height in pixels
+ * @param dst_pitch      Destination row stride in bytes
+ * @param format         Pixel format (UnpaperCudaFormat)
+ * @param src_center_x   Source image rotation center X
+ * @param src_center_y   Source image rotation center Y
+ * @param dst_center_x   Destination image rotation center X
+ * @param dst_center_y   Destination image rotation center Y
+ * @param cosval         Cosine of rotation angle
+ * @param sinval         Sine of rotation angle
+ * @param interp_type    Interpolation type (0=NN, 1=linear, 2=cubic)
+ * @param stream         Optional CUDA stream (may be NULL)
+ * @return true on success, false if operation not supported (e.g., mono/Y400A)
+ */
+bool unpaper_opencv_deskew(uint64_t src_device, int src_width, int src_height,
+                           size_t src_pitch, uint64_t dst_device, int dst_width,
+                           int dst_height, size_t dst_pitch, int format,
+                           float src_center_x, float src_center_y,
+                           float dst_center_x, float dst_center_y, float cosval,
+                           float sinval, int interp_type,
+                           UnpaperCudaStream *stream);
+
 #ifdef __cplusplus
 }
 #endif

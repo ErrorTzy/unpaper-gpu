@@ -1066,8 +1066,6 @@ static void stretch_and_replace_cuda(Image *pImage, RectangleSize size,
     return;
   }
 
-  ensure_kernels_loaded();
-
   const UnpaperCudaFormat fmt = cuda_format_from_av(pImage->frame->format);
   if (fmt == UNPAPER_CUDA_FMT_INVALID) {
     errOutput("CUDA stretch requested, but pixel format is unsupported.");
@@ -1087,6 +1085,23 @@ static void stretch_and_replace_cuda(Image *pImage, RectangleSize size,
   }
 
   const int interp = (int)interpolate_type;
+
+  // Try OpenCV path first (supports GRAY8 and RGB24)
+#ifdef UNPAPER_WITH_OPENCV
+  if (unpaper_opencv_resize(src->dptr, src->width, src->height,
+                            (size_t)src->linesize, dst->dptr, dst->width,
+                            dst->height, (size_t)dst->linesize, (int)fmt,
+                            interp, NULL)) {
+    dst->cuda_dirty = true;
+    dst->cpu_dirty = false;
+    replace_image(pImage, &target);
+    return;
+  }
+#endif
+
+  // Fall back to custom CUDA kernels
+  ensure_kernels_loaded();
+
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
     void *params[] = {
         &src->dptr, &src->linesize, &fmt, &dst->dptr, &dst->linesize, &fmt,
@@ -2093,8 +2108,6 @@ static void deskew_cuda(Image source, Rectangle mask, float radians,
     return;
   }
 
-  ensure_kernels_loaded();
-
   Rectangle nmask = normalize_rectangle(mask);
   RectangleSize out_size = size_of_rectangle(nmask);
   Image rotated = create_compatible_image(source, out_size, false);
@@ -2130,13 +2143,32 @@ static void deskew_cuda(Image source, Rectangle mask, float radians,
   const int dst_h = rotated.frame->height;
   const int interp = (int)interpolate_type;
 
+  const float src_center_x = source_center.x;
+  const float src_center_y = source_center.y;
+  const float dst_center_x = target_center.x;
+  const float dst_center_y = target_center.y;
+
+  // Try OpenCV path first (supports GRAY8 and RGB24)
+#ifdef UNPAPER_WITH_OPENCV
+  if (unpaper_opencv_deskew(src_st->dptr, src_w, src_h,
+                            (size_t)src_st->linesize, dst_st->dptr, dst_w,
+                            dst_h, (size_t)dst_st->linesize, (int)fmt,
+                            src_center_x, src_center_y, dst_center_x,
+                            dst_center_y, cosval, sinval, interp, NULL)) {
+    dst_st->cuda_dirty = true;
+    dst_st->cpu_dirty = false;
+    copy_rectangle(rotated, source, full_image(rotated), mask.vertex[0]);
+    free_image(&rotated);
+    return;
+  }
+#endif
+
+  // Fall back to custom CUDA kernels
+  ensure_kernels_loaded();
+
   const int bytespp = bytes_per_pixel_from_av(source.frame->format);
   if (bytespp != 0) {
     const int img_fmt = (int)fmt;
-    const float src_center_x = source_center.x;
-    const float src_center_y = source_center.y;
-    const float dst_center_x = target_center.x;
-    const float dst_center_y = target_center.y;
     void *params_k[] = {
         &src_st->dptr,     &src_st->linesize, &dst_st->dptr,
         &dst_st->linesize, &img_fmt,          &src_w,
@@ -2155,10 +2187,6 @@ static void deskew_cuda(Image source, Rectangle mask, float radians,
   } else {
     const int src_fmt = (int)fmt;
     const int dst_fmt = (int)fmt;
-    const float src_center_x = source_center.x;
-    const float src_center_y = source_center.y;
-    const float dst_center_x = target_center.x;
-    const float dst_center_y = target_center.y;
     const uint8_t abs_black_threshold = source.abs_black_threshold;
 
     void *params_k[] = {
