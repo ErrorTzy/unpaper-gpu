@@ -127,6 +127,58 @@ void loadImage(const char *filename, Image *image, Pixel sheet_background,
 }
 
 /**
+ * Fast direct PNM writer - bypasses FFmpeg for simple formats.
+ * Returns true if handled, false to fall back to FFmpeg.
+ */
+static bool saveImageDirect(const char *filename, Image output) {
+  FILE *f = fopen(filename, "wb");
+  if (!f)
+    return false;
+
+  int width = output.frame->width;
+  int height = output.frame->height;
+  int format = output.frame->format;
+
+  switch (format) {
+  case AV_PIX_FMT_GRAY8: {
+    fprintf(f, "P5\n%d %d\n255\n", width, height);
+    for (int y = 0; y < height; y++) {
+      fwrite(output.frame->data[0] + y * output.frame->linesize[0], 1, width,
+             f);
+    }
+    break;
+  }
+  case AV_PIX_FMT_RGB24: {
+    fprintf(f, "P6\n%d %d\n255\n", width, height);
+    for (int y = 0; y < height; y++) {
+      fwrite(output.frame->data[0] + y * output.frame->linesize[0], 1,
+             width * 3, f);
+    }
+    break;
+  }
+  case AV_PIX_FMT_MONOWHITE: {
+    fprintf(f, "P4\n%d %d\n", width, height);
+    int row_bytes = (width + 7) / 8;
+    for (int y = 0; y < height; y++) {
+      const uint8_t *src =
+          output.frame->data[0] + y * output.frame->linesize[0];
+      for (int x = 0; x < row_bytes; x++) {
+        uint8_t inverted = src[x] ^ 0xFF;
+        fputc(inverted, f);
+      }
+    }
+    break;
+  }
+  default:
+    fclose(f);
+    return false;
+  }
+
+  fclose(f);
+  return true;
+}
+
+/**
  * Saves image data to a file in pgm or pbm format.
  *
  * @param filename file name to save image to
@@ -135,19 +187,79 @@ void loadImage(const char *filename, Image *image, Pixel sheet_background,
  * @return true on success, false on failure
  */
 void saveImage(char *filename, Image input, int outputPixFmt) {
+  Image output = input;
+
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+  image_ensure_cpu(&input);
+#endif
+
+  switch (outputPixFmt) {
+  case AV_PIX_FMT_Y400A:
+    outputPixFmt = AV_PIX_FMT_GRAY8;
+    break;
+  case AV_PIX_FMT_MONOBLACK:
+    outputPixFmt = AV_PIX_FMT_MONOWHITE;
+    break;
+  }
+
+  if (input.frame->format != outputPixFmt) {
+    output = create_image(size_of_image(input), outputPixFmt, false,
+                          input.background, input.abs_black_threshold);
+
+    int width = input.frame->width;
+    int height = input.frame->height;
+    bool fast_path = false;
+
+    if (input.frame->format == AV_PIX_FMT_RGB24 &&
+        outputPixFmt == AV_PIX_FMT_MONOWHITE) {
+      for (int y = 0; y < height; y++) {
+        const uint8_t *src = input.frame->data[0] + y * input.frame->linesize[0];
+        uint8_t *dst = output.frame->data[0] + y * output.frame->linesize[0];
+        for (int x = 0; x < width; x++) {
+          int gray = (src[x * 3] + src[x * 3 + 1] + src[x * 3 + 2]) / 3;
+          int bit_index = x % 8;
+          if (bit_index == 0)
+            dst[x / 8] = 0;
+          if (gray > 127)
+            dst[x / 8] |= (0x80 >> bit_index);
+        }
+      }
+      fast_path = true;
+    } else if (input.frame->format == AV_PIX_FMT_GRAY8 &&
+               outputPixFmt == AV_PIX_FMT_MONOWHITE) {
+      for (int y = 0; y < height; y++) {
+        const uint8_t *src = input.frame->data[0] + y * input.frame->linesize[0];
+        uint8_t *dst = output.frame->data[0] + y * output.frame->linesize[0];
+        for (int x = 0; x < width; x++) {
+          int bit_index = x % 8;
+          if (bit_index == 0)
+            dst[x / 8] = 0;
+          if (src[x] > 127)
+            dst[x / 8] |= (0x80 >> bit_index);
+        }
+      }
+      fast_path = true;
+    }
+
+    if (!fast_path) {
+      copy_rectangle_cpu(input, output, full_image(input), POINT_ORIGIN);
+    }
+  }
+
+  if (saveImageDirect(filename, output)) {
+    if (output.frame != input.frame)
+      av_frame_free(&output.frame);
+    return;
+  }
+
   enum AVCodecID output_codec = -1;
   const AVCodec *codec;
   AVFormatContext *out_ctx;
   AVCodecContext *codec_ctx;
   AVStream *video_st;
-  Image output = input;
   AVPacket *pkt = NULL;
   int ret;
   char errbuff[1024];
-
-#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
-  image_ensure_cpu(&input);
-#endif
 
   if (avformat_alloc_output_context2(&out_ctx, NULL, "image2", filename) < 0 ||
       out_ctx == NULL) {
@@ -163,25 +275,15 @@ void saveImage(char *filename, Image input, int outputPixFmt) {
   case AV_PIX_FMT_RGB24:
     output_codec = AV_CODEC_ID_PPM;
     break;
-  case AV_PIX_FMT_Y400A:
   case AV_PIX_FMT_GRAY8:
-    outputPixFmt = AV_PIX_FMT_GRAY8;
     output_codec = AV_CODEC_ID_PGM;
     break;
-  case AV_PIX_FMT_MONOBLACK:
   case AV_PIX_FMT_MONOWHITE:
-    outputPixFmt = AV_PIX_FMT_MONOWHITE;
     output_codec = AV_CODEC_ID_PBM;
     break;
   default:
     output_codec = -1;
     break;
-  }
-
-  if (input.frame->format != outputPixFmt) {
-    output = create_image(size_of_image(input), outputPixFmt, false,
-                          input.background, input.abs_black_threshold);
-    copy_rectangle_cpu(input, output, full_image(input), POINT_ORIGIN);
   }
 
   codec = avcodec_find_encoder(output_codec);

@@ -1997,25 +1997,30 @@ int main(int argc, char *argv[]) {
         perf_stage_end(&perf, PERF_STAGE_DOWNLOAD);
 
         perf_stage_begin(&perf, PERF_STAGE_ENCODE);
-        for (int j = 0; j < options.output_count; j++) {
-          // get pagebuffer
-          page = create_compatible_image(
-              sheet,
-              (RectangleSize){sheet.frame->width / options.output_count,
-                              sheet.frame->height},
-              false);
-          copy_rectangle(
-              sheet, page,
-              (Rectangle){{{page.frame->width * j, 0},
-                           {page.frame->width * j + page.frame->width,
-                            page.frame->height}}},
-              POINT_ORIGIN);
+        if (options.output_count == 1) {
+          verboseLog(VERBOSE_MORE, "saving file %s.\n", outputFileNames[0]);
+          saveImage(outputFileNames[0], sheet, options.output_pixel_format);
+        } else {
+          for (int j = 0; j < options.output_count; j++) {
+            // get pagebuffer
+            page = create_compatible_image(
+                sheet,
+                (RectangleSize){sheet.frame->width / options.output_count,
+                                sheet.frame->height},
+                false);
+            copy_rectangle(
+                sheet, page,
+                (Rectangle){{{page.frame->width * j, 0},
+                             {page.frame->width * j + page.frame->width,
+                              page.frame->height}}},
+                POINT_ORIGIN);
 
-          verboseLog(VERBOSE_MORE, "saving file %s.\n", outputFileNames[j]);
+            verboseLog(VERBOSE_MORE, "saving file %s.\n", outputFileNames[j]);
 
-          saveImage(outputFileNames[j], page, options.output_pixel_format);
+            saveImage(outputFileNames[j], page, options.output_pixel_format);
 
-          free_image(&page);
+            free_image(&page);
+          }
         }
         perf_stage_end(&perf, PERF_STAGE_ENCODE);
 
