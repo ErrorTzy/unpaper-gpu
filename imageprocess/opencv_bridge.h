@@ -129,6 +129,82 @@ bool unpaper_opencv_blackfilter(uint64_t src_device, int width, int height,
                                 const int32_t *exclusions, int exclusion_count,
                                 UnpaperCudaStream *stream);
 
+/**
+ * Sum grayscale values in a rectangle using OpenCV CUDA.
+ *
+ * @param src_device     Device pointer to image
+ * @param width          Image width in pixels
+ * @param height         Image height in pixels
+ * @param pitch_bytes    Row stride in bytes
+ * @param format         Pixel format (UnpaperCudaFormat)
+ * @param x0, y0         Top-left corner of rectangle (inclusive)
+ * @param x1, y1         Bottom-right corner of rectangle (inclusive)
+ * @param stream         Optional CUDA stream (may be NULL)
+ * @param result_out     Output: sum of grayscale values
+ * @return true on success, false if operation not supported
+ */
+bool unpaper_opencv_sum_rect(uint64_t src_device, int width, int height,
+                             size_t pitch_bytes, int format, int x0, int y0,
+                             int x1, int y1, UnpaperCudaStream *stream,
+                             unsigned long long *result_out);
+
+/**
+ * Count pixels in a brightness range using OpenCV CUDA.
+ *
+ * @param src_device     Device pointer to image
+ * @param width          Image width in pixels
+ * @param height         Image height in pixels
+ * @param pitch_bytes    Row stride in bytes
+ * @param format         Pixel format (UnpaperCudaFormat)
+ * @param x0, y0         Top-left corner of rectangle (inclusive)
+ * @param x1, y1         Bottom-right corner of rectangle (inclusive)
+ * @param min_brightness Minimum brightness (inclusive)
+ * @param max_brightness Maximum brightness (inclusive)
+ * @param stream         Optional CUDA stream (may be NULL)
+ * @param result_out     Output: count of pixels in range
+ * @return true on success, false if operation not supported
+ */
+bool unpaper_opencv_count_brightness_range(uint64_t src_device, int width,
+                                           int height, size_t pitch_bytes,
+                                           int format, int x0, int y0, int x1,
+                                           int y1, uint8_t min_brightness,
+                                           uint8_t max_brightness,
+                                           UnpaperCudaStream *stream,
+                                           unsigned long long *result_out);
+
+/**
+ * Detect edge rotation peaks using OpenCV CUDA.
+ * Computes blackness sums along scan lines at different angles.
+ *
+ * @param src_device     Device pointer to image
+ * @param width          Image width in pixels
+ * @param height         Image height in pixels
+ * @param pitch_bytes    Row stride in bytes
+ * @param format         Pixel format (UnpaperCudaFormat)
+ * @param base_x         Array of X coordinates for base scan line points
+ *                       [rotations_count * scan_size]
+ * @param base_y         Array of Y coordinates for base scan line points
+ * @param scan_size      Number of points in each scan line
+ * @param max_depth      Maximum depth to scan perpendicular to line
+ * @param shift_x        X direction for perpendicular scan
+ * @param shift_y        Y direction for perpendicular scan
+ * @param mask_x0        Mask region left boundary
+ * @param mask_y0        Mask region top boundary
+ * @param mask_x1        Mask region right boundary
+ * @param mask_y1        Mask region bottom boundary
+ * @param max_blackness_abs Maximum accumulated blackness threshold
+ * @param rotations_count Number of rotation angles to test
+ * @param stream         Optional CUDA stream (may be NULL)
+ * @param peaks_out      Output: array of peak values [rotations_count]
+ * @return true on success, false if operation not supported
+ */
+bool unpaper_opencv_detect_edge_rotation_peaks(
+    uint64_t src_device, int width, int height, size_t pitch_bytes, int format,
+    const int *base_x, const int *base_y, int scan_size, int max_depth,
+    int shift_x, int shift_y, int mask_x0, int mask_y0, int mask_x1,
+    int mask_y1, int max_blackness_abs, int rotations_count,
+    UnpaperCudaStream *stream, int *peaks_out);
+
 #ifdef __cplusplus
 }
 #endif

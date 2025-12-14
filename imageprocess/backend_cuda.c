@@ -1938,6 +1938,50 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
     }
   }
 
+  const int src_w = image.frame->width;
+  const int src_h = image.frame->height;
+  const int shift_x = shift.horizontal;
+  const int shift_y = shift.vertical;
+  const int mask_x0 = nmask.vertex[0].x;
+  const int mask_y0 = nmask.vertex[0].y;
+  const int mask_x1 = nmask.vertex[1].x;
+  const int mask_y1 = nmask.vertex[1].y;
+
+  int *peaks_h = av_malloc_array((size_t)rotations_count, sizeof(int));
+  if (peaks_h == NULL) {
+    av_free(base_x_h);
+    av_free(base_y_h);
+    errOutput("unable to allocate peak buffer.");
+  }
+
+  // Try OpenCV path first (downloads image once, processes on CPU)
+#ifdef UNPAPER_WITH_OPENCV
+  UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+  if (unpaper_opencv_detect_edge_rotation_peaks(
+          st->dptr, src_w, src_h, (size_t)st->linesize, (int)fmt, base_x_h,
+          base_y_h, deskew_scan_size, max_depth, shift_x, shift_y, mask_x0,
+          mask_y0, mask_x1, mask_y1, max_blackness_abs, rotations_count, stream,
+          peaks_h)) {
+    int max_peak = 0;
+    float detected_rotation = 0.0f;
+    for (int i = 0; i < rotations_count; i++) {
+      const int peak = peaks_h[i];
+      if (peak > max_peak) {
+        max_peak = peak;
+        detected_rotation = rotations[i];
+      }
+    }
+
+    av_free(base_x_h);
+    av_free(base_y_h);
+    av_free(peaks_h);
+    return detected_rotation;
+  }
+#endif
+
+  // Fallback to custom CUDA kernel
+  ensure_kernels_loaded();
+
   const size_t coord_bytes = coord_count * sizeof(int);
   uint64_t base_x_d = unpaper_cuda_malloc(coord_bytes);
   uint64_t base_y_d = unpaper_cuda_malloc(coord_bytes);
@@ -1948,15 +1992,7 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
   unpaper_cuda_memcpy_h2d(base_y_d, base_y_h, coord_bytes);
 
   const int src_fmt = (int)fmt;
-  const int src_w = image.frame->width;
-  const int src_h = image.frame->height;
   const int scan_size = deskew_scan_size;
-  const int shift_x = shift.horizontal;
-  const int shift_y = shift.vertical;
-  const int mask_x0 = nmask.vertex[0].x;
-  const int mask_y0 = nmask.vertex[0].y;
-  const int mask_x1 = nmask.vertex[1].x;
-  const int mask_y1 = nmask.vertex[1].y;
 
   void *params_k[] = {
       &st->dptr,  &st->linesize, &src_fmt,    &src_w,   &src_h,
@@ -1970,10 +2006,6 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
                              (uint32_t)rotations_count, 1, 1, 256, 1, 1,
                              params_k);
 
-  int *peaks_h = av_malloc_array((size_t)rotations_count, sizeof(int));
-  if (peaks_h == NULL) {
-    errOutput("unable to allocate peak buffer.");
-  }
   unpaper_cuda_memcpy_d2h(peaks_h, peaks_d,
                           (size_t)rotations_count * sizeof(int));
 

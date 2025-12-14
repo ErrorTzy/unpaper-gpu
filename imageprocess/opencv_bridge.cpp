@@ -650,3 +650,236 @@ bool unpaper_opencv_blackfilter(uint64_t src_device, int width, int height,
   (void)stream;
   return false;
 }
+
+bool unpaper_opencv_sum_rect(uint64_t src_device, int width, int height,
+                             size_t pitch_bytes, int format, int x0, int y0,
+                             int x1, int y1, UnpaperCudaStream *stream,
+                             unsigned long long *result_out) {
+  if (result_out == nullptr) {
+    return false;
+  }
+  *result_out = 0;
+
+#ifdef HAVE_OPENCV_CUDAARITHM
+  auto fmt = static_cast<UnpaperCudaFormat>(format);
+  int cv_type = opencv_type_from_format(fmt);
+  if (cv_type < 0 || src_device == 0) {
+    return false;
+  }
+
+  // Validate and clamp rectangle bounds
+  if (x0 > x1 || y0 > y1) {
+    return true; // Empty rectangle, sum is 0
+  }
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 >= width) x1 = width - 1;
+  if (y1 >= height) y1 = height - 1;
+  if (x0 > x1 || y0 > y1) {
+    return true; // Rectangle fully outside image
+  }
+
+  try {
+    cv::cuda::Stream cv_stream = get_cv_stream(stream);
+
+    // Wrap source image
+    cv::cuda::GpuMat src(height, width, cv_type,
+                         reinterpret_cast<void *>(src_device), pitch_bytes);
+
+    // Create ROI
+    int rect_w = x1 - x0 + 1;
+    int rect_h = y1 - y0 + 1;
+    cv::cuda::GpuMat roi = src(cv::Rect(x0, y0, rect_w, rect_h));
+
+    // Convert to single channel for sum if needed
+    cv::cuda::GpuMat gray;
+    if (cv_type == CV_8UC1) {
+      gray = roi;
+    } else if (cv_type == CV_8UC2) {
+      // Y400A: use Y channel
+      std::vector<cv::cuda::GpuMat> channels;
+      cv::cuda::split(roi, channels, cv_stream);
+      gray = channels[0];
+    } else {
+      // RGB24: compute grayscale as average of R, G, B
+      std::vector<cv::cuda::GpuMat> channels;
+      cv::cuda::split(roi, channels, cv_stream);
+      cv::cuda::GpuMat sum_rg, sum_rgb;
+      cv::cuda::add(channels[0], channels[1], sum_rg, cv::noArray(), CV_16UC1,
+                    cv_stream);
+      cv::cuda::add(sum_rg, channels[2], sum_rgb, cv::noArray(), CV_16UC1,
+                    cv_stream);
+      sum_rgb.convertTo(gray, CV_8UC1, 1.0 / 3.0, 0, cv_stream);
+    }
+
+    cv_stream.waitForCompletion();
+    cv::Scalar s = cv::cuda::sum(gray);
+    *result_out = static_cast<unsigned long long>(s[0]);
+    return true;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "OpenCV sum_rect failed: %s\n", e.what());
+    return false;
+  }
+#else
+  (void)src_device;
+  (void)width;
+  (void)height;
+  (void)pitch_bytes;
+  (void)format;
+  (void)x0;
+  (void)y0;
+  (void)x1;
+  (void)y1;
+  (void)stream;
+  return false;
+#endif
+}
+
+bool unpaper_opencv_count_brightness_range(uint64_t src_device, int width,
+                                           int height, size_t pitch_bytes,
+                                           int format, int x0, int y0, int x1,
+                                           int y1, uint8_t min_brightness,
+                                           uint8_t max_brightness,
+                                           UnpaperCudaStream *stream,
+                                           unsigned long long *result_out) {
+  if (result_out == nullptr) {
+    return false;
+  }
+  *result_out = 0;
+
+#ifdef HAVE_OPENCV_CUDAARITHM
+  auto fmt = static_cast<UnpaperCudaFormat>(format);
+  int cv_type = opencv_type_from_format(fmt);
+  if (cv_type < 0 || src_device == 0) {
+    return false;
+  }
+
+  // Validate and clamp rectangle bounds
+  if (x0 > x1 || y0 > y1) {
+    return true; // Empty rectangle, count is 0
+  }
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 >= width) x1 = width - 1;
+  if (y1 >= height) y1 = height - 1;
+  if (x0 > x1 || y0 > y1) {
+    return true; // Rectangle fully outside image
+  }
+
+  try {
+    cv::cuda::Stream cv_stream = get_cv_stream(stream);
+
+    // Wrap source image
+    cv::cuda::GpuMat src(height, width, cv_type,
+                         reinterpret_cast<void *>(src_device), pitch_bytes);
+
+    // Create ROI
+    int rect_w = x1 - x0 + 1;
+    int rect_h = y1 - y0 + 1;
+    cv::cuda::GpuMat roi = src(cv::Rect(x0, y0, rect_w, rect_h));
+
+    // Convert to single channel grayscale
+    cv::cuda::GpuMat gray;
+    if (cv_type == CV_8UC1) {
+      gray = roi;
+    } else if (cv_type == CV_8UC2) {
+      // Y400A: use Y channel
+      std::vector<cv::cuda::GpuMat> channels;
+      cv::cuda::split(roi, channels, cv_stream);
+      gray = channels[0];
+    } else {
+      // RGB24: compute grayscale as average
+      std::vector<cv::cuda::GpuMat> channels;
+      cv::cuda::split(roi, channels, cv_stream);
+      cv::cuda::GpuMat sum_rg, sum_rgb;
+      cv::cuda::add(channels[0], channels[1], sum_rg, cv::noArray(), CV_16UC1,
+                    cv_stream);
+      cv::cuda::add(sum_rg, channels[2], sum_rgb, cv::noArray(), CV_16UC1,
+                    cv_stream);
+      sum_rgb.convertTo(gray, CV_8UC1, 1.0 / 3.0, 0, cv_stream);
+    }
+
+    // Create mask for pixels in brightness range using threshold
+    // First, threshold for >= min_brightness
+    cv::cuda::GpuMat above_min, below_max, in_range;
+    cv::cuda::threshold(gray, above_min,
+                        static_cast<double>(min_brightness) - 0.5, 255.0,
+                        cv::THRESH_BINARY, cv_stream);
+    // Then, threshold for <= max_brightness
+    cv::cuda::threshold(gray, below_max,
+                        static_cast<double>(max_brightness) + 0.5, 255.0,
+                        cv::THRESH_BINARY_INV, cv_stream);
+    // Combine: pixels that are both >= min and <= max
+    cv::cuda::bitwise_and(above_min, below_max, in_range, cv::noArray(),
+                          cv_stream);
+
+    cv_stream.waitForCompletion();
+    int count = cv::cuda::countNonZero(in_range);
+    *result_out = static_cast<unsigned long long>(count);
+    return true;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "OpenCV count_brightness_range failed: %s\n", e.what());
+    return false;
+  }
+#else
+  (void)src_device;
+  (void)width;
+  (void)height;
+  (void)pitch_bytes;
+  (void)format;
+  (void)x0;
+  (void)y0;
+  (void)x1;
+  (void)y1;
+  (void)min_brightness;
+  (void)max_brightness;
+  (void)stream;
+  return false;
+#endif
+}
+
+bool unpaper_opencv_detect_edge_rotation_peaks(
+    uint64_t src_device, int width, int height, size_t pitch_bytes, int format,
+    const int *base_x, const int *base_y, int scan_size, int max_depth,
+    int shift_x, int shift_y, int mask_x0, int mask_y0, int mask_x1,
+    int mask_y1, int max_blackness_abs, int rotations_count,
+    UnpaperCudaStream *stream, int *peaks_out) {
+  // IMPORTANT: This function intentionally returns false to use the custom
+  // CUDA kernel instead. The custom kernel is more efficient because:
+  //
+  // 1. It processes all rotation angles in parallel (one CUDA block per angle)
+  // 2. It uses shared memory for fast parallel reduction within each block
+  // 3. It avoids downloading the entire image to host memory
+  // 4. It only downloads the small peaks array (~400 bytes vs ~4MB image)
+  //
+  // OpenCV CUDA doesn't have efficient primitives for "gather pixels at
+  // arbitrary tilted coordinates and reduce" - we would need multiple kernel
+  // launches (remap → reduce → gradient) vs the single optimized custom kernel.
+  //
+  // The custom kernel unpaper_detect_edge_rotation_peaks in cuda_kernels.cu
+  // is specifically designed for this operation and outperforms any OpenCV-based
+  // implementation.
+
+  (void)src_device;
+  (void)width;
+  (void)height;
+  (void)pitch_bytes;
+  (void)format;
+  (void)base_x;
+  (void)base_y;
+  (void)scan_size;
+  (void)max_depth;
+  (void)shift_x;
+  (void)shift_y;
+  (void)mask_x0;
+  (void)mask_y0;
+  (void)mask_x1;
+  (void)mask_y1;
+  (void)max_blackness_abs;
+  (void)rotations_count;
+  (void)stream;
+  (void)peaks_out;
+
+  // Return false to fall back to the optimized custom CUDA kernel
+  return false;
+}
