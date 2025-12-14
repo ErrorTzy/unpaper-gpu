@@ -29,6 +29,11 @@ typedef struct {
   bool multiple_sheets;
   enum AVPixelFormat output_pixel_format;
 
+  // Batch processing options
+  bool batch_mode;     // Enable batch processing mode
+  int batch_jobs;      // Number of parallel workers (0 = auto-detect)
+  bool batch_progress; // Show progress output
+
   Layout layout;
   int start_sheet;
   int end_sheet;

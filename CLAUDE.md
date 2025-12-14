@@ -2,578 +2,311 @@
 
 ## Project Structure & Module Organization
 
-- `unpaper.c`, `parse.c/.h`, `file.c`: core CLI, option parsing, and file I/O.
-- `imageprocess/`: image-processing primitives and algorithms (deskew, filters, masks, etc.).
-- `lib/`: shared utilities (logging, options, physical dimension helpers).
-- `tests/`: `pytest` suite plus `source_images/` inputs and `golden_images/` expected outputs.
-- `doc/`: Sphinx sources used to build the `unpaper(1)` man page and additional Markdown docs.
+```
+unpaper/
+├── unpaper.c          # Main CLI entry point and processing loop
+├── parse.c/.h         # Command-line option parsing
+├── file.c             # Image file I/O (FFmpeg-based decode/encode, direct PNM writer)
+├── imageprocess/      # Image processing backends and algorithms
+│   ├── backend.c/.h       # Backend vtable and dispatch (CPU/CUDA selection)
+│   ├── backend_cuda.c     # CUDA backend implementation
+│   ├── image.c/.h         # Image struct and CPU memory management
+│   ├── image_cuda.c       # GPU residency, dirty flags, upload/download helpers
+│   ├── cuda_runtime.c/.h  # CUDA runtime abstraction (streams, memory, kernel launch)
+│   ├── cuda_kernels.cu    # Custom CUDA kernels (mono formats, blackfilter, deskew)
+│   ├── opencv_bridge.cpp/.h  # OpenCV CUDA integration (CCL, filters)
+│   ├── opencv_ops.cpp/.h     # OpenCV CUDA primitives (wipe, copy, resize, rotate)
+│   ├── blit.c             # Rectangle operations (wipe, copy, center)
+│   ├── deskew.c           # Rotation detection and correction
+│   ├── filters.c          # blackfilter, blurfilter, grayfilter, noisefilter
+│   ├── masks.c            # Mask detection, alignment, border detection
+│   ├── interpolate.c/.h   # Interpolation types (NN, linear, cubic)
+│   └── primitives.h       # Core types (Point, Rectangle, Pixel, etc.)
+├── lib/               # Shared utilities
+│   ├── batch.c/.h         # Batch job queue and progress reporting
+│   ├── logging.c/.h       # Verbose output and error handling
+│   ├── options.c/.h       # Options struct definition and parsing
+│   └── physical.c/.h      # Physical dimension helpers (DPI, mm)
+├── tests/             # Test suite
+│   ├── unpaper_tests.py   # Pytest golden image tests
+│   ├── source_images/     # Test input images
+│   └── golden_images/     # Expected outputs
+├── tools/             # Benchmarking tools
+│   ├── bench_a1.py        # Single-page benchmark
+│   └── bench_double.py    # Double-page benchmark
+└── doc/               # Documentation
+    ├── unpaper.1.rst      # Man page source (Sphinx)
+    └── CUDA_BACKEND_HISTORY.md  # Completed CUDA implementation history (PR1-18)
+```
+
+## Architecture Overview
+
+### Backend System
+
+unpaper uses a backend vtable (`ImageBackend` in `backend.h`) to dispatch image operations:
+
+```c
+typedef struct {
+  const char *name;
+  void (*wipe_rectangle)(Image, Rectangle, Pixel);
+  void (*copy_rectangle)(Image, Image, Rectangle, Point);
+  // ... 20+ operations for transforms, filters, masks, deskew
+} ImageBackend;
+```
+
+- **CPU backend** (`backend.c`): Default, uses FFmpeg `AVFrame` for all operations
+- **CUDA backend** (`backend_cuda.c`): GPU-accelerated, requires OpenCV with CUDA modules
+
+Selection via `--device=cpu|cuda` (default: `cpu`).
+
+### Image Memory Model
+
+The `Image` struct supports dual CPU/GPU residency:
+
+```c
+typedef struct {
+  AVFrame *frame;              // CPU data (always present for I/O)
+  Pixel background;
+  uint8_t abs_black_threshold;
+  // GPU state stored in frame->opaque_ref (ImageCudaState)
+} Image;
+```
+
+Key helpers:
+- `image_ensure_cuda(Image*)`: Upload to GPU if CPU-dirty
+- `image_ensure_cpu(Image*)`: Download from GPU if GPU-dirty
+- Dirty flags track which copy is current; minimize transfers
+
+### CUDA Backend Design
+
+When `-Dcuda=enabled`:
+- **OpenCV CUDA** is mandatory for `cudaarithm`, `cudaimgproc`, `cudawarping` modules
+- **Runtime API** (`cudaMalloc`) used for OpenCV compatibility
+- **Driver API** only for PTX kernel loading (custom kernels)
+- **Custom kernels retained** for: mono formats (1-bit packed), blackfilter flood-fill, rotation detection
+
+Performance (A1 benchmark): CUDA ~880ms vs CPU ~6.1s (~7x speedup)
 
 ## Build, Test, and Development Commands
 
-This project uses Meson (with Ninja).
+When you are building with meson, set PATH="/home/scott/Documents/unpaper/.venv/bin:/usr/bin:$PATH" and use meson in .venv.
 
-- Configure: `meson setup builddir/ --buildtype=debugoptimized`
-- Build: `meson compile -C builddir/`
-- Run tests: `meson test -C builddir/ -v`
-- Build man page: `meson compile -C builddir/ man`
-- Install (staged): `DESTDIR=/tmp/unpaper-staging meson install -C builddir/`
+### CPU-only Build (default)
 
-System dependencies include FFmpeg libraries (`libavformat`, `libavcodec`, `libavutil`) and Python packages in `requirements.txt` (Meson, Sphinx, pytest, Pillow).
+```bash
+meson setup builddir/ --buildtype=debugoptimized
+meson compile -C builddir/
+meson test -C builddir/ -v
+```
+
+### CUDA Build (requires OpenCV with CUDA)
+
+```bash
+meson setup builddir-cuda/ -Dcuda=enabled --buildtype=debugoptimized
+meson compile -C builddir-cuda/
+meson test -C builddir-cuda/ -v
+```
+
+### Other Commands
+
+```bash
+# Build man page
+meson compile -C builddir/ man
+
+# Staged install
+DESTDIR=/tmp/unpaper-staging meson install -C builddir/
+
+# Run benchmarks
+python tools/bench_a1.py --devices cpu,cuda
+python tools/bench_double.py --devices cpu,cuda
+
+# Pre-commit checks
+pre-commit run -a
+```
+
+### Dependencies
+
+- **Required**: FFmpeg libraries (`libavformat`, `libavcodec`, `libavutil`), Meson, Ninja
+- **For CUDA builds**: CUDA toolkit, OpenCV 4.x with CUDA modules (`cudaarithm`, `cudaimgproc`, `cudawarping`)
+- **For tests**: Python 3, pytest, Pillow
+- **For docs**: Sphinx
 
 ## Coding Style & Naming Conventions
 
-- Language: C11 (see `meson.build`).
-- Indentation: 2 spaces; LF line endings; trim trailing whitespace (see `.editorconfig`).
-- Formatting: `clang-format` is enforced via `pre-commit` (no repo-specific config file).
-- Keep changes focused: prefer small helpers in `lib/` over duplicating logic across modules.
+- Language: C11 (see `meson.build`)
+- Indentation: 2 spaces; LF line endings; trim trailing whitespace (see `.editorconfig`)
+- Formatting: `clang-format` enforced via `pre-commit`
+- Backend functions: `*_cpu()` and `*_cuda()` suffixes
+- Keep changes focused: prefer small helpers in `lib/` over duplicating logic
 
 ## Testing Guidelines
 
-- Tests are `pytest`-based (`tests/unpaper_tests.py`) and compare outputs to golden images.
-- When changing image-processing behavior, update/extend `tests/source_images/` and `tests/golden_images/` together and keep test output deterministic.
-- Prefer adding a focused regression case over broad rewrites.
+- Tests are `pytest`-based (`tests/unpaper_tests.py`) comparing outputs to golden images
+- CUDA tests run automatically when CUDA runtime is available
+- When changing image-processing behavior, update `tests/source_images/` and `tests/golden_images/` together
+- Keep test output deterministic (CUDA must match CPU within tolerance)
 
 ## Commit & Pull Request Guidelines
 
-- Commits: follow existing history—short, imperative subject lines; optional scope prefixes like `tests: ...`.
-- PRs: describe the behavioral change, include reproduction steps and relevant CLI flags, and note any golden image updates. Ensure `meson test -C builddir/` and `pre-commit run -a` are clean.
+- Commits: short, imperative subject lines; optional scope prefixes (`tests:`, `cuda:`, `perf:`)
+- PRs: describe behavioral change, include relevant CLI flags, note any golden image updates
+- Ensure `meson test -C builddir/ -v` and `pre-commit run -a` pass
 
 ## Licensing & Compliance
 
-Files use SPDX headers and the project uses REUSE tooling. Add SPDX headers to new files and validate with `reuse lint` (via `pre-commit`).
+Files use SPDX headers. Add SPDX headers to new files and validate with `reuse lint` (via `pre-commit`).
 
-## GPU/CUDA Backend Rewrite Plan
+---
 
-Goal: add a fully functioning CUDA backend with `--device=cpu|cuda` such that CPU remains the default and GPU mode preserves the same CLI semantics and output behavior (within the project’s test tolerances unless explicitly tightened).
+## Active Development Roadmap
 
-### Non-negotiables
+### Native Batch Processing (PR19-PR27)
 
-- Keep `--device=cpu` behavior identical to today.
-- `--device=cuda` must support the same flags and processing steps as CPU mode (no “partial pipeline” or silent fallbacks).
-- In CUDA mode, minimize CPU↔GPU transfers: upload once after `loadImage()`, keep processing GPU-resident, download once before `saveImage()` (debug outputs may force extra downloads).
-- Build must remain CPU-only by default; CUDA support is optional and should be feature-detected at build time.
+**Goal**: Add native batch processing to efficiently process multiple images in a single invocation. Primary focus is GPU batch optimization to amortize CUDA overhead and exploit GPU parallelism.
 
-### High-level approach
+**Performance target**: 10x faster than sequential CPU for batch workloads (100+ images).
 
-- Keep the existing CLI/options/tests pipeline (`unpaper.c`, `parse.c/.h`) and implement a second image-processing backend.
-- Refactor `imageprocess/` entry points to dispatch through a backend vtable selected by `--device`.
-- Extend the `Image` abstraction to support GPU residency while keeping CPU `AVFrame*` as the I/O anchor.
+**Speedup sources**:
+1. Amortize CUDA initialization across entire batch (not per-image)
+2. Overlap decode/upload/process/download/encode stages (pipelining)
+3. Process multiple images concurrently via multiple CUDA streams
+4. Thread-parallel CPU processing as baseline comparison
 
-### Backend boundaries (API surface)
+#### Architecture Analysis
 
-Introduce a backend interface covering all operations used by `unpaper.c`, including (names approximate):
+**Current limitations**:
+- Main loop processes one sheet at a time sequentially (`unpaper.c:1208-2212`)
+- File I/O is synchronous (no pipelining yet)
+- Image memory allocated/freed per-sheet, no pooling
 
-- Image transforms: `stretch_and_replace`, `resize_and_replace`, `flip_rotate_90`, `mirror`, `shift_image`
-- Blit/utility: `wipe_rectangle`, `copy_rectangle`, `center_image`
-- Masks/borders/wipes: `apply_masks`, `apply_wipes`, `apply_border`, `detect_masks`, `align_mask`, `detect_border`
-- Filters: `blackfilter`, `blurfilter`, `noisefilter`, `grayfilter`
-- Deskew: `detect_rotation`, `deskew`
+**Existing infrastructure to leverage**:
+- CUDA stream API: `unpaper_cuda_stream_create()`, async memcpy
+- Pinned memory: `unpaper_cuda_pinned_alloc()`
+- Backend vtable: clean dispatch, can be made thread-safe
+- Wildcard patterns: already support `%d` for multi-file operations
+- Batch queue: `BatchJob` struct and `BatchQueue` for job management (`lib/batch.h`)
 
-CPU backend uses existing code; CUDA backend provides equivalent implementations.
+#### PR-by-PR Roadmap
 
-### `Image` and memory model
+**PR 19: Batch CLI infrastructure + job queue**
 
-- Keep `Image.frame` (`AVFrame*`) for decoded/encoded CPU frames and metadata.
-- Add CUDA-owned storage for pixel data plus sync flags (CPU dirty / GPU dirty).
-- Provide helpers:
-  - `image_ensure_cuda(Image*)` (upload/convert as needed)
-  - `image_ensure_cpu(Image*)` (download/convert as needed)
-
-### CUDA implementation strategy (parity-first)
-
-Implement CUDA in layers, validating against CPU behavior at each step:
-
-1. CUDA runtime scaffolding:
-   - context/stream init, error handling, allocation helpers
-   - support current pixel formats used by unpaper (`GRAY8`, `RGB24`, `MONO*`, `Y400A`)
-2. GPU “primitives” first (unblocks most of pipeline):
-   - fill/wipe rectangle, copy rectangle, mirror, shift, rotate90
-   - stretch/resize with NN/bilinear/bicubic matching CPU coordinate mapping/clamping
-3. Filters:
-   - implement GPU kernels for per-pixel / local-neighborhood ops
-   - avoid in-place update hazards (use two-pass where required to match CPU semantics)
-4. Mask/border detection:
-   - compute scan statistics on GPU (parallel reductions), keep small decision logic on CPU if it helps parity/determinism
-5. Deskew:
-   - parity-first: compute per-angle/per-depth metrics on GPU, run selection logic on CPU
-   - apply final rotation/warp on GPU
-
-Only after parity is demonstrated, optimize (kernel fusion, integral images for window sums, fewer intermediates, stream overlap).
-
-### Build system changes (Meson)
-
-- Add an optional CUDA feature (build option like `-Dcuda=true/false`).
-- When enabled, compile/link CUDA sources and expose capability to the binary.
-- When disabled or not available, `--device=cuda` must fail with a clear error message (or support an explicit `--device=auto` fallback if added).
-
-### Tests (required)
-
-- Extend `tests/unpaper_tests.py` to run key cases under both `--device=cpu` and `--device=cuda`.
-- Ensure CUDA mode is deterministic run-to-run; avoid nondeterministic reductions unless ordering is fixed.
-- Keep golden comparisons stable; update golden images only if the project agrees on the acceptable behavior change.
-
-### PR-by-PR roadmap (execute in order)
-
-This section is the execution checklist for adding CUDA support while keeping CPU behavior unchanged. Each PR should be reviewable, keep diffs focused, and include a clear acceptance gate (tests + behavior).
-
-**PR 1: Add `--device` CLI option (CPU-only)**
-
-- Status: completed (2025-12-12)
-
+- Status: complete
 - Scope:
-  - Add `--device=cpu|cuda` parsing (default `cpu`) and propagate into the options struct.
-  - If `--device=cuda` is requested but CUDA support is not compiled in, fail fast with a clear error.
-- Tests:
-  - Extend `tests/unpaper_tests.py` with a small CLI-argument test that `--device=cpu` works and `--device=cuda` errors when CUDA is unavailable.
-  - Run `meson test -C builddir/ -v`.
+  - Add `--batch` / `-B` flag to enable batch processing mode
+  - Add `--jobs N` / `-j N` to control parallelism (default: auto-detect)
+  - Implement job queue abstraction: `BatchJob` struct with input/output paths (`lib/batch.c`, `lib/batch.h`)
+  - Refactor main loop to populate job queue upfront in batch mode
+  - Add progress reporting infrastructure (`--progress` flag)
 - Acceptance:
-  - `--device` appears in `--help`.
-  - No output changes for default runs (CPU path untouched).
+  - CLI accepts new flags; `--help` documents them
+  - Job queue correctly enumerates all files upfront
+  - No behavior change for existing single-image invocations
 
-**PR 2: Introduce backend vtable + CPU backend (no behavior change)**
+**PR 20: CPU batch processing with thread pool**
 
-- Status: completed (2025-12-12)
-
+- Status: not started
 - Scope:
-  - Add a backend interface (vtable) covering every operation called from `unpaper.c`:
-    `wipe_rectangle`, `copy_rectangle`, `center_image`, `stretch_and_replace`,
-    `resize_and_replace`, `flip_rotate_90`, `mirror`, `shift_image`,
-    `apply_masks`, `apply_wipes`, `apply_border`, `detect_masks`, `align_mask`,
-    `detect_border`, `blackfilter`, `blurfilter`, `noisefilter`, `grayfilter`,
-    `detect_rotation`, `deskew`.
-  - Refactor `imageprocess/*.c` public entry points into dispatch wrappers that call the selected backend.
-  - Implement a CPU backend that uses the current code paths (parity-first, minimal edits).
-- Tests:
-  - Existing `pytest` golden tests must pass unchanged.
+  - Implement pthread-based thread pool (`lib/threadpool.c`)
+  - Worker threads process jobs concurrently with thread-local image buffers
+  - Add batch benchmark script (`tools/bench_batch.py`)
 - Acceptance:
-  - `--device=cpu` produces byte-identical or within-existing-tolerance outputs.
-  - No CUDA code is introduced yet.
+  - CPU batch with N threads shows near-linear speedup up to core count
+  - Establish baseline: 10 images x 6s = 60s sequential -> ~15s with 4 threads
 
-**PR 3: Add Meson CUDA feature option + compile-time capability flag**
+**PR 21: GPU batch - persistent context + memory pool**
 
-- Status: completed (2025-12-12)
-
+- Status: not started
 - Scope:
-  - Add `meson_options.txt` with `option('cuda', type: 'feature', value: 'disabled', ...)` (CPU-only remains default).
-  - When enabled, compile CUDA sources and define a capability macro (e.g., `UNPAPER_WITH_CUDA=1`).
-  - Keep `--device=cuda` failing with a clear error unless built with CUDA enabled.
-- Tests:
-  - CPU-only build: `meson setup builddir/ && meson test -C builddir/ -v`.
-  - CUDA build: `meson setup builddir-cuda/ -Dcuda=enabled && meson test -C builddir-cuda/ -v`.
+  - Implement GPU memory pool (`imageprocess/cuda_mempool.c`)
+  - Pre-allocate N image-sized buffers; return to pool instead of `cudaFree()`
+  - Pool statistics logging (allocations, reuses, peak usage)
 - Acceptance:
-  - Default build has no CUDA dependency.
-  - CUDA-enabled build produces a binary that reports CUDA capability (at least via accepting `--device=cuda` and failing later if unimplemented).
+  - Per-image CUDA malloc overhead eliminated for homogeneous batches
+  - Flat GPU memory usage during batch processing
 
-**PR 4: Extend `Image` for GPU residency + sync helpers**
+**PR 22: GPU batch - multi-stream pipeline infrastructure**
 
-- Status: completed (2025-12-12)
-
+- Status: not started
 - Scope:
-  - Extend `Image` to support backend-owned pixel storage and residency/sync flags:
-    `Image.frame` remains the CPU I/O anchor (`AVFrame*`).
-  - Add helpers:
-    - `image_ensure_cuda(Image*)`: allocate/upload/convert once as needed
-    - `image_ensure_cpu(Image*)`: download/convert once as needed
-  - Add CUDA runtime scaffolding (device init, stream, error handling) behind `-Dcuda=enabled`.
-- Tests:
-  - Add a small C unit-test binary that verifies CPU↔CUDA round-trip copies for the supported formats used by unpaper.
-  - Keep existing `pytest` golden tests passing on CPU.
+  - Create stream pool: N `UnpaperCudaStream` instances (default N=4)
+  - Associate each in-flight job with a stream
+  - Stream synchronization points before download and stream reuse
 - Acceptance:
-  - In CUDA builds, selecting `--device=cuda -n` (no processing) can run end-to-end (load → optional upload → download → save) with stable output.
+  - Infrastructure supports concurrent GPU operations across streams
+  - No correctness issues from stream interleaving
 
-**PR 5: CUDA primitives (required by most of the pipeline)**
+**PR 23: GPU batch - decode/upload overlap (producer-consumer)**
 
-- Status: completed (2025-12-12)
-
-- Scope (CUDA backend parity-first):
-  - Implement: `wipe_rectangle`, `copy_rectangle`, `mirror`, `shift_image`, `flip_rotate_90`, `center_image`.
-  - Ensure wrappers call CUDA implementations when `--device=cuda`.
-  - Enforce “no silent fallback”: if an op is missing in CUDA mode, error out with the op name.
-- Tests:
-  - Unit tests comparing CPU vs CUDA outputs on synthetic images for each primitive.
-  - Add/extend `pytest` cases that exercise `--pre-rotate`, `--pre-mirror`, `--pre-shift` under `--device=cuda`.
-- Acceptance:
-  - CUDA output matches CPU within the existing image-diff tolerance for these operations.
-  - Deterministic run-to-run (identical output on repeated runs).
-
-**PR 6: CUDA resize/stretch + interpolation parity**
-
-- Status: completed (2025-12-12)
-
+- Status: not started
 - Scope:
-  - Implement `stretch_and_replace`, `resize_and_replace` in CUDA for NN/linear/cubic, matching CPU coordinate mapping and clamping.
-  - Minimize transfers: keep data GPU-resident; only download for save/debug.
-- Tests:
-  - Add unit tests for scale-up/scale-down cases and each interpolation type (CPU vs CUDA).
-  - Add a `pytest` case that uses `--stretch`/`--post-size` under CUDA.
+  - Producer thread: decode images (FFmpeg) -> queue decoded frames
+  - Consumer (GPU): upload -> process -> download
+  - Use pinned host memory for async H2D; double/triple buffering
 - Acceptance:
-  - CPU-vs-CUDA diffs remain within tolerance on existing golden inputs.
+  - Decode latency hidden behind GPU processing
+  - Memory bounded by queue size x image size
 
-**PR 7: CUDA filters**
+**PR 24: GPU batch - concurrent multi-image GPU processing**
 
-- Status: completed (2025-12-13)
-
+- Status: not started
 - Scope:
-  - Implement: `blackfilter`, `noisefilter`, `blurfilter`, `grayfilter`.
-  - Avoid in-place hazards: use ping-pong buffers where CPU semantics imply read-before-write behavior.
-- Tests:
-  - Add focused regression inputs (small, synthetic or minimal real images) that isolate each filter and threshold edge cases.
-  - Add a determinism check: run the same CUDA invocation twice and assert identical output.
+  - Process multiple images concurrently using different streams
+  - Work scheduling to balance load across streams
+  - GPU occupancy monitoring
 - Acceptance:
-  - CUDA runs full filter pipeline with no fallback and stable results.
+  - GPU utilization increases during batch processing
+  - NVIDIA Nsight shows concurrent kernel execution
 
-**PR 8: CUDA masks/borders/wipes (detection + application)**
+**PR 25: GPU batch - download/encode overlap**
 
-- Status: completed (2025-12-13)
-
+- Status: not started
 - Scope:
-  - Implement: `detect_masks`, `align_mask`, `apply_masks`, `apply_wipes`, `apply_border`, `detect_border`.
-  - GPU does bulk scanning/reduction; CPU may do final selection logic if needed for determinism (this is not a fallback; it is control logic).
-- Tests:
-  - Add at least 1 new integration fixture covering tricky borders/masks.
-  - Ensure both CPU and CUDA runs stay deterministic.
+  - Async D2H with pinned memory (`cudaMemcpyAsync`)
+  - Encoder thread consumes downloaded frames
+  - Pipeline: while GPU processes N, CPU encodes N-1
 - Acceptance:
-  - Mask/border-related golden tests pass under `--device=cuda`.
+  - Encode latency hidden behind GPU processing
+  - Full 4-stage pipeline operational
 
-**PR 9: CUDA deskew (detect + apply)**
+**PR 26: End-to-end batch pipeline + benchmarking**
 
-- Status: completed (2025-12-13)
-
+- Status: not started
 - Scope:
-  - Implement `detect_rotation` and `deskew` in CUDA mode.
-  - Strategy: GPU computes per-angle metrics; CPU selects best angle deterministically; GPU applies the final warp using the same interpolation kernels.
-- Tests:
-  - Add a deskew-focused fixture (slight known rotation) and compare CPU vs CUDA output within tolerance.
+  - Integrate all pipeline stages
+  - Comprehensive batch benchmark (10, 50, 100 images)
+  - `--perf` output for batch mode: total time, images/second
+  - Error handling: per-image failures logged, batch continues
+  - Progress reporting: `[42/100] processing image042.png...`
 - Acceptance:
-  - Deskew-enabled runs under CUDA match CPU within tolerance and are deterministic.
+  - **Primary gate**: 100 images batch CUDA < sequential CPU / 10
+  - All test images produce correct output
 
-**PR 10: Test matrix + docs polishing**
+**PR 27: Documentation + edge cases**
 
-- Status: completed (2025-12-13)
-
+- Status: not started
 - Scope:
-  - Update `tests/unpaper_tests.py` to parameterize device runs (CPU always; CUDA only when enabled/available).
-  - Update `doc/unpaper.1.rst` for `--device` (including error behavior when CUDA is not compiled in).
+  - Document batch processing in `doc/unpaper.1.rst`
+  - Handle edge cases: mixed image sizes, GPU memory exhaustion
+  - Graceful degradation when GPU memory exhausted
 - Acceptance:
-  - `meson test -C builddir/ -v` runs CPU suite everywhere.
-  - `meson test -C builddir-cuda/ -v` runs CPU + CUDA parity checks where CUDA is enabled.
+  - Documentation complete
+  - Robust handling of edge cases
 
-### Performance PR roadmap (PR11+)
+#### Implementation Notes
 
-Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing CPU-driven inner loops, eliminating serial CUDA kernels, and overlapping decode/compute/encode. Performance is prioritized as long as CUDA output remains deterministic run-to-run and within the project’s existing test tolerances (unless explicitly tightened).
+**Thread safety**:
+- `Options` struct: read-only after parsing
+- `ImageBackend` pointer: set once at startup
+- `Image` struct: per-job, not shared
+- CUDA state: per-stream isolation
 
-#### Performance target (this machine)
+**Memory budget for GPU batch**:
+- Typical A1 image: ~4MB (2500x3500 RGB24)
+- 4 concurrent images: ~16MB GPU memory
+- Pool should support ~8 buffers for triple-buffered 4-stream operation
 
-- Primary gate: `A1` (`tests/source_images/imgsrc001.png`) via `./builddir-cuda/unpaper --device cuda` mean wall time **< 2.5s** over repeated runs (after 1 warmup), writing output to a tmpfs path (e.g. `/dev/shm`) to avoid disk bottlenecks.
+---
 
-**PR 11: Benchmark harness + stage timing (no behavior change)**
+## Historical Documentation
 
-- Status: completed (2025-12-13)
-- Scope:
-  - Add a small benchmark runner (e.g. `tools/bench_a1.py`) that runs warmups + N iterations and prints mean/stdev (CPU and CUDA).
-  - Add an optional `--perf` (or env-gated) stage timing output (decode, upload, filters, masks/borders, deskew, download, encode).
-  - Add CUDA event timing for kernel-heavy stages (with explicit stream sync for accurate reporting).
-- Tests:
-  - `meson test -C builddir/ -v`
-  - `meson test -C builddir-cuda/ -v`
-- Acceptance:
-  - No output changes unless `--perf` is enabled.
-  - Benchmark runner is stable and reproducible.
-
-**PR 12: CUDA throughput scaffolding (streams + async + pooling)**
-
-- Status: completed (2025-12-13)
-- Scope:
-  - Extend `imageprocess/cuda_runtime.*` to support CUDA streams and stream sync.
-  - Add async H2D/D2H/D2D memcpy APIs and pinned host buffers for transfers.
-  - Add a simple device scratch allocator (or CUDA async mempool) to avoid per-call device allocations for small reductions.
-  - Make CUDA state safe for per-page concurrency (stream-per-job).
-- Tests:
-  - Existing CPU + CUDA suites.
-  - Add a small C test covering stream correctness + determinism (identical output across repeated runs).
-- Acceptance:
-  - No behavior changes.
-  - Enables later PRs to overlap decode/compute/encode without data races.
-
-**PR 12.1: Add optional OpenCV dependency hook (C++ bridge only)**
-
-- Status: completed (2025-12-13)
-- Scope:
-  - Add a Meson feature option `opencv` (default `disabled`).
-  - Detect `opencv4` via pkg-config; if enabled, switch build to allow C++ and expose a small C API shim for CUDA CCL.
-  - No functional changes; just build plumbing and CI knobs.
-- Tests:
-  - CPU + CUDA suites still pass when `-Dopencv=disabled` (default).
-  - Configure/build with `-Dopencv=enabled` (skip runtime use for now).
-- Acceptance:
-  - Build remains C-only when OpenCV is off; adds C++ compilation path when on.
-
-**PR 12.2: CUDA stream interop + mask adapter**
-
-- Status: completed (2025-12-14)
-- Scope:
-  - Add a C shim wrapping OpenCV's CUDA stream handle from our `UnpaperCudaStream`.
-  - Implement GPU mask extraction (lightness < `min_white_level`) into `cv::cuda::GpuMat` without extra H2D copies.
-  - No noisefilter behavioral change yet; just utilities callable from backend.
-- Tests:
-  - New unit test ensuring stream interop and mask extraction round-trip equals our existing mask on CPU.
-- Acceptance:
-  - Utilities compile and run under `-Dopencv=enabled`; CPU/CUDA pipelines unchanged.
-
-**PR 12.3: OpenCV CUDA CCL noisefilter path (GRAY8)**
-
-- Status: completed (2025-12-14)
-- Scope:
-  - Implement noisefilter GPU path using `cv::cuda::connectedComponents` on GRAY8 images, with label counting and apply on GPU.
-  - Keep existing custom CCL as fallback or when OpenCV disabled.
-  - Ensure determinism and parity with CPU within tolerance.
-- Implementation notes:
-  - OpenCV CUDA CCL implemented in `opencv_bridge.cpp` via `unpaper_opencv_cuda_ccl()`.
-  - Due to Driver API vs Runtime API context incompatibility, the OpenCV path currently falls back to custom CCL when called from the main binary (which uses cuCtxCreate). Works correctly in standalone tests using cudaMalloc.
-  - Fallback to custom CUDA CCL is automatic and transparent.
-- Tests:
-  - `opencv_bridge_test` verifies CCL functionality in Runtime API context.
-  - `cuda_filters_test` verifies fallback to custom CCL works correctly.
-  - All 9 tests pass; golden pytest suite passes.
-- Acceptance:
-  - GRAY8 CUDA noisefilter has OpenCV path available; falls back to custom CCL when context incompatible; outputs match CPU within tolerance.
-
-**PR 12.4: Format coverage + perf gate**
-
-- Status: completed (2025-12-14)
-- Scope:
-  - Support RGB24 and Y400A by generating masks on GPU, reusing OpenCV CCL.
-  - Add A1 benchmark run with `--device=cuda` + OpenCV path; target <3.0s on this machine.
-  - Add a build/CLI capability flag showing which path is active.
-- Implementation notes:
-  - Extended `noisefilter_cuda_opencv()` to support GRAY8, Y400A, and RGB24 formats.
-  - OpenCV path extracts dark mask and runs CCL; fallback to custom CUDA CCL when Driver API context used.
-  - Mask application loop handles all three formats with proper lightness calculations.
-  - Added Y400A noisefilter test to `cuda_filters_test.c`.
-  - Added `--perf` capability flag output: `perf backends: device=<device> opencv=<yes|no> ccl=<yes|no>`.
-  - Fixed critical kernel name mismatch bug (init/union/compress → build_labels/propagate) from prior commit.
-  - A1 benchmark: ~1.40s average, well under 3.0s target.
-- Tests:
-  - New regression for RGB24 noisefilter parity; re-run benchmark harness.
-- Acceptance:
-  - A1 CUDA runtime <3.0s with OpenCV path enabled; parity holds across formats.
-
-**PR 12.5: Packaging + fallback polish**
-
-- Status: completed (2025-12-14)
-- Scope:
-  - Document the optional OpenCV dependency and how to enable it.
-  - Ensure clean fallbacks (clear error when `--device=cuda` + OpenCV path requested but unavailable).
-  - Trim extra allocations; prefer stream reuse; add perf logging guardable by `--perf`.
-- Implementation notes:
-  - Updated README.md with build instructions for CUDA (`-Dcuda=enabled`) and OpenCV (`-Dopencv=enabled`).
-  - Updated doc/unpaper.1.rst to document OpenCV acceleration under `--device` option and capability output under `--perf`.
-  - Fallback behavior already implemented: when OpenCV is unavailable or CCL fails, noisefilter falls back to built-in CUDA CCL automatically.
-  - Stub file (`opencv_bridge_stub.c`) returns `false` for all capability queries when OpenCV disabled.
-  - Capability flags visible via `--perf`: `perf backends: device=<device> opencv=<yes|no> ccl=<yes|no>`.
-  - All files have proper SPDX headers (no new files created).
-- Tests:
-  - CPU + CUDA suites with and without OpenCV; `reuse lint` still passes.
-- Acceptance:
-  - Optional dependency well-documented; behavior predictable when absent.
-
-### OpenCV-Based GPU Backend Rewrite (PR13-PR18)
-
-**Strategy pivot**: Make OpenCV with CUDA a mandatory dependency for `--device=cuda` builds. This allows replacing custom CUDA kernels with highly-optimized OpenCV CUDA functions, reducing maintenance burden and improving performance.
-
-**Key technical considerations**:
-1. **CUDA context model**: The current code uses `cuCtxCreate` (Driver API) which is incompatible with OpenCV's Runtime API (`cudaMalloc`). Must switch to Runtime API for OpenCV compatibility.
-2. **Memory management**: Use `cv::cuda::GpuMat` for all GPU-resident images; wrap existing allocations or re-allocate via `cudaMalloc`.
-3. **Mono format handling**: OpenCV doesn't natively support 1-bit packed images. Strategy: convert mono ↔ 8-bit on GPU or keep minimal custom kernels for mono.
-4. **Format mapping**: GRAY8 → CV_8UC1, Y400A → CV_8UC2, RGB24 → CV_8UC3.
-
-**OpenCV CUDA modules required**:
-- `cudaarithm`: arithmetic, comparisons, reductions, threshold
-- `cudaimgproc`: connected components, color conversion, histograms
-- `cudawarping`: resize, warpAffine, rotate
-- `cudafilters`: morphology (optional, for blackfilter optimization)
-
-**Custom kernel → OpenCV replacement mapping**:
-| Custom Kernel | OpenCV Replacement | Module |
-|---------------|-------------------|--------|
-| wipe_rect | `GpuMat::setTo()` with ROI | core |
-| copy_rect | `GpuMat::copyTo()` with ROI | core |
-| mirror | `cv::cuda::flip()` | cudaarithm |
-| rotate90 | `cv::cuda::rotate()` or transpose+flip | cudawarping |
-| stretch/resize | `cv::cuda::resize()` | cudawarping |
-| rotate (deskew) | `cv::cuda::warpAffine()` | cudawarping |
-| count_brightness | `cv::cuda::threshold()` + `countNonZero()` | cudaarithm |
-| sum_lightness | `cv::cuda::min()` + `sum()` | cudaarithm |
-| noisefilter CCL | `cv::cuda::connectedComponents()` | cudaimgproc |
-| blackfilter | `cv::cuda::threshold()` + morphology + CCL | cudaimgproc |
-
-**PR 13: Make OpenCV mandatory + Fix CUDA context model**
-
-- Status: completed (2025-12-14)
-- Scope:
-  - Make OpenCV (with CUDA modules) a required dependency for `-Dcuda=enabled` builds.
-  - Remove `opencv_bridge_stub.c` and the `-Dopencv=` option; OpenCV is now implicit with CUDA.
-  - Switch CUDA runtime from Driver API (`cuCtxCreate`, `cuMemAlloc`) to Runtime API (`cudaMalloc`, `cudaFree`) for OpenCV compatibility.
-  - Update `cuda_runtime.c` to use `cudaMalloc`/`cudaFree` instead of `cuMemAlloc`/`cuMemFree`.
-  - Update `opencv_bridge.cpp` to work directly with our GpuMat-compatible allocations (no D2H→H2D round-trips).
-  - Update build system: require `opencv4` with `cudaarithm`, `cudaimgproc`, `cudawarping` when `-Dcuda=enabled`.
-  - Update documentation (README.md, man page) to reflect mandatory OpenCV dependency.
-- Implementation notes:
-  - Rewrote `cuda_runtime.c` to use CUDA Runtime API (`cudaMalloc`, `cudaFree`, `cudaMemcpy`, `cudaStreamCreate`, etc.) instead of Driver API. Driver API is only used for PTX module loading (`cuModuleLoadData`, `cuModuleGetFunction`, `cuLaunchKernel`).
-  - Removed `opencv_bridge_stub.c` and `-Dopencv=` meson option. OpenCV is now mandatory when `-Dcuda=enabled`.
-  - Updated `meson.build` to consolidate CUDA and OpenCV setup in a single block. OpenCV is detected and required after CUDA is detected.
-  - Updated `opencv_bridge.cpp` to include `<opencv2/core/cuda_stream_accessor.hpp>` for `cv::cuda::StreamAccessor`. Fixed `connectedComponents` call (doesn't take stream parameter).
-  - Updated `unpaper.c` to guard `unpaper_opencv_*` calls with `#ifdef UNPAPER_WITH_OPENCV` for CPU-only builds.
-  - Updated README.md and doc/unpaper.1.rst to document mandatory OpenCV dependency for CUDA builds.
-  - Memory allocations via `cudaMalloc` are now directly compatible with OpenCV's `cv::cuda::GpuMat` (no context conflicts).
-- Tests:
-  - All 9 CUDA tests pass (cuda roundtrip, primitives, resize, filters, masks/borders, deskew, stream, opencv bridge, pytest suite).
-  - All 24 CPU-only pytest tests pass; 10 CUDA tests skipped.
-  - `--device=cuda` in CPU-only builds fails with clear error message.
-  - A1 benchmark: ~1.0s with CUDA+OpenCV, performance maintained.
-- Acceptance:
-  - `--device=cuda` requires OpenCV at build time; fails clearly if unavailable.
-  - No Driver API usage for memory operations (only PTX loading uses Driver API).
-  - A1 benchmark performance maintained.
-
-**PR 14: OpenCV primitives (wipe, copy, mirror, rotate90)**
-
-- Status: completed (2025-12-14)
-- Scope:
-  - Create `opencv_ops.cpp` with C API wrappers for OpenCV CUDA primitives.
-  - Replace `wipe_rectangle_cuda` with `cv::cuda::GpuMat::setTo()` via ROI.
-  - Replace `copy_rectangle_cuda` with `cv::cuda::GpuMat::copyTo()` via ROI.
-  - Replace `mirror_cuda` with `cv::cuda::flip()`.
-  - Replace `flip_rotate_90_cuda` with `cv::cuda::rotate()` or transpose+flip combination.
-  - For mono formats: convert to 8-bit, process, convert back (or keep minimal custom kernels if performance-critical).
-  - Remove corresponding custom CUDA kernels from `cuda_kernels.cu`.
-- Implementation notes:
-  - Created `opencv_ops.h` and `opencv_ops.cpp` with C API wrappers for OpenCV CUDA primitives.
-  - OpenCV path used for GRAY8, Y400A, RGB24 formats; mono formats fall back to custom kernels.
-  - **rotate90 implementation by format:**
-    - GRAY8: Uses `cv::cuda::transpose()` + `cv::cuda::flip()` (transpose supports 1-byte elements).
-    - RGB24: Uses `cv::cuda::warpAffine()` with `WARP_INVERSE_MAP` flag. Key insight: warpAffine by default expects a forward transformation matrix and inverts it internally; since we provide an inverse (sampling) matrix, the flag is required.
-    - Y400A: Falls back to custom kernel (OpenCV warpAffine only supports 1, 3, or 4 channels, not 2).
-    - Mono formats: Fall back to custom kernels (1-bit packed format not supported by OpenCV).
-  - Custom CUDA kernels retained for: mono formats (all operations), Y400A rotate90.
-  - Updated `backend_cuda.c` to try OpenCV path first, falling back to custom kernels when OpenCV returns false.
-- Tests:
-  - Extend `cuda_primitives_test.c` to verify parity with CPU for all replaced operations.
-  - Ensure determinism across repeated runs.
-- Acceptance:
-  - All primitive operations work correctly for GRAY8, Y400A, RGB24, and mono formats.
-  - Custom kernels retained where OpenCV limitations exist (mono formats, Y400A rotate90).
-
-**PR 15: OpenCV resize and deskew (cudawarping)**
-
-- Status: completed (2025-12-14)
-- Scope:
-  - Replace `stretch_and_replace_cuda` and `resize_and_replace_cuda` with `cv::cuda::resize()`.
-  - Replace `deskew_cuda` rotation with `cv::cuda::warpAffine()`.
-- Implementation notes:
-  - Added `unpaper_opencv_resize()` function in `opencv_ops.cpp` using `cv::cuda::resize()`.
-  - Added `unpaper_opencv_deskew()` function in `opencv_ops.cpp` using `cv::cuda::warpAffine()` with `WARP_INVERSE_MAP` flag.
-  - OpenCV's coordinate convention uses half-pixel center (`src_x = (dst_x + 0.5) * scale - 0.5`) while unpaper's custom kernels use corner-based (`src_x = dst_x * scale`).
-  - This fundamental difference causes ~1 pixel sampling differences at certain positions.
-  - For document processing, these differences are negligible and don't affect visual quality.
-  - OpenCV path supports GRAY8 and RGB24 formats; mono formats and unsupported cases fall back to custom kernels.
-  - GRAY8 cubic resize falls back to custom kernels due to OpenCV texture object creation issue.
-- Tests:
-  - Updated `cuda_resize_test.c` to use tolerance-based comparison: allows up to 60% of pixels to differ by any amount (due to shifted sampling grid); mean error remains reasonable.
-  - Updated `cuda_deskew_test.c` to allow up to 15% of pixels to differ by >128 intensity levels.
-  - Added determinism check ensuring CUDA produces identical output on repeated runs.
-  - Updated `unpaper_tests.py` `test_cuda_stretch_and_post_size_match_cpu` to allow up to 20% pixel difference.
-  - All 9 CUDA tests pass, including `cuda_resize_test` and `cuda_deskew_test`.
-  - All 34 pytest tests pass.
-- Acceptance:
-  - OpenCV used for resize and deskew on GRAY8 and RGB24 formats.
-  - Differences from CPU are within acceptable tolerance for document processing.
-  - Custom stretch/rotate kernels retained as fallback for mono formats and edge cases.
-
-**PR 16: OpenCV-based filters (noisefilter, grayfilter, blurfilter, blackfilter)**
-
-- Status: completed (2025-12-14)
-- Scope:
-  - **grayfilter**: Implemented OpenCV path using integral images for efficient tile statistics.
-    - Uses `cv::cuda::cvtColor()` for RGB24 grayscale conversion (weighted luminosity method).
-    - Uses `cv::cuda::threshold()` to create dark-pixel mask.
-    - Uses CPU `cv::integral()` for summed area tables (OpenCV CUDA integral is limited).
-    - Batch collects tiles to wipe, then uses `GpuMat::setTo()` with ROI for efficient wiping.
-  - **blurfilter**: Same approach as grayfilter with integral images for block statistics.
-    - Uses integral images to compute dark pixel counts per block.
-    - Compares neighboring blocks to identify isolated clusters.
-    - Batch wipes isolated blocks on GPU.
-  - **blackfilter**: Retained custom CUDA implementation.
-    - Flood-fill algorithm doesn't map well to OpenCV CCL approach.
-    - Fallback to existing custom kernels.
-  - **noisefilter**: Already optimized with OpenCV CCL in PR 12.3/12.4.
-- Implementation notes:
-  - Added `unpaper_opencv_grayfilter()` and `unpaper_opencv_blurfilter()` in `opencv_bridge.cpp`.
-  - Grayscale conversion uses `cv::cuda::cvtColor()` with `COLOR_RGB2GRAY` for RGB24 images.
-  - Integral image computation done on CPU after downloading mask (GPU integral limited in OpenCV).
-  - Test tolerance increased to 0.06 for CUDA due to grayscale conversion differences (weighted luminosity vs simple average).
-  - Custom kernels retained as fallback for mono formats and unsupported configurations.
-- Tests:
-  - All 9 tests pass including pytest suite.
-  - A1 benchmark: ~1.0s on this machine (meets < 1.0s target).
-- Acceptance:
-  - Grayfilter and blurfilter use OpenCV path for GRAY8, Y400A, RGB24 formats.
-  - Primary gate: `A1` CUDA mean ~1.0s on this machine (achieved).
-
-**PR 17: OpenCV-based detection (masks, borders, deskew angle)**
-
-- Status: completed (2025-12-14)
-- Scope:
-  - **detect_masks_cuda**: Existing implementation uses iterative rectangle brightness scans; kept as-is since control logic is CPU-side.
-  - **detect_border_cuda**: Existing implementation uses iterative rectangle brightness scans; kept as-is since control logic is CPU-side.
-  - **detect_rotation_cuda**: Evaluated OpenCV approach but kept custom CUDA kernel:
-    - Custom kernel is more efficient: 100+ parallel blocks, shared memory reduction, no image download
-    - OpenCV lacks efficient primitives for "gather at arbitrary tilted coordinates + reduce"
-    - Any OpenCV implementation would require downloading ~4MB image vs ~400 bytes peaks array
-- Implementation notes:
-  - Added `unpaper_opencv_sum_rect()` function using `cv::cuda::sum()` with ROI (for general use)
-  - Added `unpaper_opencv_count_brightness_range()` using `cv::cuda::threshold()` + `cv::cuda::countNonZero()` (for general use)
-  - Added `unpaper_opencv_detect_edge_rotation_peaks()` stub that returns false to use custom kernel
-  - **Architectural decision**: Custom CUDA kernel `unpaper_detect_edge_rotation_peaks` outperforms any OpenCV-based implementation because:
-    - Processes all rotation angles in parallel (one CUDA block per angle)
-    - Uses shared memory for fast parallel reduction within each block
-    - Only downloads small peaks array (~400 bytes) vs entire image (~4MB)
-    - Single kernel launch vs multiple OpenCV calls (remap → reduce → gradient)
-  - Updated `backend_cuda.c` to try OpenCV path first (returns false, falls back to optimized kernel)
-- Tests:
-  - All 9 CUDA tests pass including `cuda_deskew_test`
-  - Deskew CPU vs CUDA: 0.36% pixels differ by >128 (within 15% tolerance)
-  - Deskew determinism: identical output on repeated CUDA runs
-  - All 34 pytest tests pass
-  - All 24 CPU-only pytest tests pass
-- Acceptance:
-  - Rotation detection uses optimized custom CUDA kernel (best performance)
-  - Detection produces identical angles as CPU (exact parity for deskew test)
-  - OpenCV helper functions available for other detection operations that benefit from them
-
-**PR 18: Cleanup, optimization, and final benchmarking**
-
-- Status: completed (2025-12-14)
-- Scope:
-  - Remove automatic kernel synchronization to allow kernel pipelining.
-  - Clean up unused code (unused functions, unused variables).
-  - Optimize encoding path (direct PNM write, fast format conversion).
-  - Optimize multi-page output (fast same-format copy).
-  - Add double-page benchmark (`tools/bench_double.py`).
-- Implementation notes:
-  - Removed `cudaStreamSynchronize()` after every kernel launch in `cuda_runtime.c`. Kernels now run asynchronously; synchronization happens implicitly via synchronous `cudaMemcpy` calls when results are needed.
-  - Removed unused `cuda_unimplemented()` function from `backend_cuda.c`.
-  - Removed unused `image_size` variable in `blurfilter_cuda()`.
-  - Added direct PNM writer in `file.c` that bypasses FFmpeg for GRAY8, RGB24, MONOWHITE formats (~220ms → ~34ms encode time).
-  - Added single-page output optimization: skip unnecessary copy_rectangle when output_count==1.
-  - Added fast RGB24→MONOWHITE and GRAY8→MONOWHITE format conversion paths in `file.c`.
-  - Added memcpy fast path for same-format copies in `copy_rectangle_cpu()` (GRAY8, Y400A, RGB24).
-  - Added `tools/bench_double.py` for double-page output benchmarking (`--layout double --output-pages 2`).
-- Tests:
-  - All 9 CUDA unit tests pass.
-  - Pytest suite passes (34 tests).
-  - Determinism verified across all operations.
-- Acceptance:
-  - Custom CUDA kernels retained for: mono formats, blackfilter flood-fill, rotation detection (optimized parallel implementation).
-  - **Single-page (A1) benchmark**: CUDA mean **~880-930ms** (~7x faster than CPU ~6.1-6.4s). Under 1 second target achieved.
-  - **Double-page benchmark**: CUDA mean **~743ms** (~10x faster than CPU ~7.7s).
+For the completed CUDA backend implementation history (PR1-PR18), see [doc/CUDA_BACKEND_HISTORY.md](doc/CUDA_BACKEND_HISTORY.md).

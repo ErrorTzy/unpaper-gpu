@@ -26,6 +26,11 @@ void options_init(Options *o) {
       .multiple_sheets = true,
       .output_pixel_format = AV_PIX_FMT_NONE,
 
+      // Batch processing defaults
+      .batch_mode = false,
+      .batch_jobs = 0, // 0 = auto-detect
+      .batch_progress = false,
+
       .layout = LAYOUT_SINGLE,
       .start_sheet = 1,
       .end_sheet = -1,

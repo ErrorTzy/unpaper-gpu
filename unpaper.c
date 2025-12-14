@@ -27,6 +27,7 @@
 #include "imageprocess/masks.h"
 #include "imageprocess/opencv_bridge.h"
 #include "imageprocess/pixel.h"
+#include "lib/batch.h"
 #include "lib/options.h"
 #include "lib/perf.h"
 #include "lib/physical.h"
@@ -46,6 +47,9 @@
           "\n"                                                                 \
           "Options: --device=cpu|cuda (default: cpu)\n"                        \
           "         --perf (print per-stage timings)\n"                        \
+          "         --batch, -B (enable batch processing mode)\n"              \
+          "         --jobs=N, -j N (parallel workers, 0=auto, default: 0)\n"   \
+          "         --progress (show batch progress)\n"                        \
           "\n"                                                                 \
           "Filenames may contain a formatting placeholder starting with '%%' " \
           "to insert a\n"                                                      \
@@ -146,6 +150,9 @@ enum LONG_OPTION_VALUES {
   OPT_INTERPOLATE,
   OPT_DEVICE,
   OPT_PERF,
+  OPT_BATCH,
+  OPT_JOBS,
+  OPT_PROGRESS,
 };
 
 /****************************************************************************
@@ -399,6 +406,11 @@ int main(int argc, char *argv[]) {
           {"interpolate", required_argument, NULL, OPT_INTERPOLATE},
           {"device", required_argument, NULL, OPT_DEVICE},
           {"perf", no_argument, NULL, OPT_PERF},
+          {"batch", no_argument, NULL, OPT_BATCH},
+          {"B", no_argument, NULL, OPT_BATCH},
+          {"jobs", required_argument, NULL, OPT_JOBS},
+          {"j", required_argument, NULL, OPT_JOBS},
+          {"progress", no_argument, NULL, OPT_PROGRESS},
           {NULL, no_argument, NULL, 0}};
 
       c = getopt_long_only(argc, argv, "hVl:S:x::n::M:s:z:p:m:W:B:w:b:Tt:qv",
@@ -961,6 +973,21 @@ int main(int argc, char *argv[]) {
       case OPT_PERF:
         options.perf = true;
         break;
+
+      case OPT_BATCH:
+        options.batch_mode = true;
+        break;
+
+      case OPT_JOBS:
+        if (sscanf(optarg, "%d", &options.batch_jobs) != 1 ||
+            options.batch_jobs < 0) {
+          errOutput("invalid value for --jobs: '%s'", optarg);
+        }
+        break;
+
+      case OPT_PROGRESS:
+        options.batch_progress = true;
+        break;
       }
     }
 
@@ -1042,6 +1069,130 @@ int main(int argc, char *argv[]) {
 
   image_backend_select(options.device);
 
+  // Initialize batch queue
+  BatchQueue batch_queue;
+  batch_queue_init(&batch_queue);
+  batch_queue.progress = options.batch_progress;
+  batch_queue.parallelism =
+      options.batch_jobs > 0 ? options.batch_jobs : batch_detect_parallelism();
+
+  // In batch mode, enumerate all jobs upfront
+  if (options.batch_mode) {
+    verboseLog(VERBOSE_NORMAL, "Batch mode enabled, enumerating jobs...\n");
+
+    int enum_input_nr = options.start_input;
+    int enum_output_nr = options.start_output;
+    int enum_optind = optind;
+
+    bool inputWildcard =
+        options.multiple_sheets && (strchr(argv[enum_optind], '%') != NULL);
+
+    for (int nr = options.start_sheet;
+         (options.end_sheet == -1) || (nr <= options.end_sheet); nr++) {
+
+      // Skip excluded sheets
+      if (!isInMultiIndex(nr, options.sheet_multi_index) ||
+          isInMultiIndex(nr, options.exclude_multi_index)) {
+        continue;
+      }
+
+      BatchJob *job = batch_queue_add(&batch_queue);
+      if (!job) {
+        errOutput("failed to allocate batch job");
+      }
+      job->sheet_nr = nr;
+      job->input_nr = enum_input_nr;
+      job->output_nr = enum_output_nr;
+      job->input_count = options.input_count;
+      job->output_count = options.output_count;
+
+      // Enumerate input files
+      for (int i = 0; i < options.input_count; i++) {
+        bool ins = isInMultiIndex(enum_input_nr, options.insert_blank);
+        bool repl = isInMultiIndex(enum_input_nr, options.replace_blank);
+
+        if (repl) {
+          job->input_files[i] = NULL;
+          enum_input_nr++;
+        } else if (ins) {
+          job->input_files[i] = NULL;
+        } else if (inputWildcard) {
+          char buf[PATH_MAX];
+          sprintf(buf, argv[enum_optind], enum_input_nr++);
+          job->input_files[i] = strdup(buf);
+
+          // Check if file exists
+          struct stat statBuf;
+          if (stat(job->input_files[i], &statBuf) != 0) {
+            if (options.end_sheet == -1) {
+              // End of files - remove this job and stop
+              batch_job_free(job);
+              batch_queue.count--;
+              goto batch_enum_done;
+            } else {
+              errOutput("unable to open file %s.", job->input_files[i]);
+            }
+          }
+        } else if (enum_optind >= argc) {
+          if (options.end_sheet == -1) {
+            batch_job_free(job);
+            batch_queue.count--;
+            goto batch_enum_done;
+          } else {
+            errOutput("not enough input files given.");
+          }
+        } else {
+          job->input_files[i] = strdup(argv[enum_optind++]);
+        }
+      }
+      if (inputWildcard)
+        enum_optind++;
+
+      // Enumerate output files
+      bool outputWildcard =
+          options.multiple_sheets && (strchr(argv[enum_optind], '%') != NULL);
+      for (int i = 0; i < options.output_count; i++) {
+        if (outputWildcard) {
+          char buf[PATH_MAX];
+          sprintf(buf, argv[enum_optind], enum_output_nr++);
+          job->output_files[i] = strdup(buf);
+        } else if (enum_optind >= argc) {
+          errOutput("not enough output files given.");
+        } else {
+          job->output_files[i] = strdup(argv[enum_optind++]);
+        }
+
+        // Check for existing output file
+        if (!options.overwrite_output) {
+          struct stat statbuf;
+          if (stat(job->output_files[i], &statbuf) == 0) {
+            errOutput("output file '%s' already present.\n",
+                      job->output_files[i]);
+          }
+        }
+      }
+      if (outputWildcard)
+        enum_optind++;
+
+      // Reset optind for next iteration in wildcard mode
+      if (inputWildcard) {
+        enum_optind = optind;
+      }
+    }
+
+  batch_enum_done:
+    verboseLog(VERBOSE_NORMAL, "Batch queue: %zu jobs to process\n",
+               batch_queue_count(&batch_queue));
+
+    if (batch_queue_count(&batch_queue) == 0) {
+      verboseLog(VERBOSE_NORMAL, "No jobs to process.\n");
+      batch_queue_free(&batch_queue);
+      return 0;
+    }
+
+    batch_progress_start(&batch_queue);
+  }
+
   int inputNr = options.start_input;
   int outputNr = options.start_output;
 
@@ -1050,6 +1201,9 @@ int main(int argc, char *argv[]) {
   Image sheet = EMPTY_IMAGE;
   Image page = EMPTY_IMAGE;
   PerfRecorder perf;
+
+  // Track current job index for batch mode progress
+  size_t batch_job_index = 0;
 
   for (int nr = options.start_sheet;
        (options.end_sheet == -1) || (nr <= options.end_sheet); nr++) {
@@ -1158,6 +1312,12 @@ int main(int argc, char *argv[]) {
     if (isInMultiIndex(nr, options.sheet_multi_index) &&
         (!isInMultiIndex(nr, options.exclude_multi_index))) {
       char s1[1023]; // buffers for result of implode()
+
+      // Update batch progress
+      if (options.batch_mode && batch_job_index < batch_queue_count(&batch_queue)) {
+        batch_progress_update(&batch_queue, (int)batch_job_index,
+                              BATCH_JOB_IN_PROGRESS);
+      }
       char s2[1023];
 
       verboseLog(
@@ -2034,6 +2194,14 @@ int main(int argc, char *argv[]) {
                           options.device == UNPAPER_DEVICE_CUDA ? "cuda"
                                                                 : "cpu");
     }
+
+    // Update batch progress - mark as completed
+    if (options.batch_mode && batch_job_index < batch_queue_count(&batch_queue)) {
+      batch_progress_update(&batch_queue, (int)batch_job_index,
+                            BATCH_JOB_COMPLETED);
+      batch_job_index++;
+    }
+
     /* if we're not given an input wildcard, and we finished the
      * arguments, we don't want to keep looping.
      */
@@ -2042,6 +2210,12 @@ int main(int argc, char *argv[]) {
     else if (inputWildcard && outputWildcard)
       optind -= 2;
   }
+
+  // Finish batch progress reporting and cleanup
+  if (options.batch_mode) {
+    batch_progress_finish(&batch_queue);
+  }
+  batch_queue_free(&batch_queue);
 
   return 0;
 }
