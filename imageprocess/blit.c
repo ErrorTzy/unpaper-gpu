@@ -9,6 +9,10 @@
 #include "lib/logging.h"
 #include "lib/math_util.h"
 
+#include <libavutil/frame.h>
+#include <libavutil/pixfmt.h>
+#include <string.h>
+
 /**
  * Wipe a rectangular area of pixels with the defined color.
  * @return The number of pixels actually changed.
@@ -26,8 +30,46 @@ void wipe_rectangle(Image image, Rectangle input_area, Pixel color) {
 void copy_rectangle_cpu(Image source, Image target, Rectangle source_area,
                         Point target_coords) {
   Rectangle area = clip_rectangle(source, source_area);
+  int width = area.vertex[1].x - area.vertex[0].x + 1;
+  int height = area.vertex[1].y - area.vertex[0].y + 1;
 
-  // naive but generic implementation
+  // Fast path for same-format copies: use memcpy per row
+  // Only use when all coordinates are valid and within bounds
+  if (source.frame->format == target.frame->format && width > 0 && height > 0 &&
+      target_coords.x >= 0 && target_coords.y >= 0 &&
+      target_coords.x + width <= target.frame->width &&
+      target_coords.y + height <= target.frame->height) {
+    int bytes_per_pixel = 0;
+    switch (source.frame->format) {
+    case AV_PIX_FMT_GRAY8:
+      bytes_per_pixel = 1;
+      break;
+    case AV_PIX_FMT_Y400A:
+      bytes_per_pixel = 2;
+      break;
+    case AV_PIX_FMT_RGB24:
+      bytes_per_pixel = 3;
+      break;
+    default:
+      bytes_per_pixel = 0; // Fall back to generic path for mono formats
+      break;
+    }
+
+    if (bytes_per_pixel > 0) {
+      for (int32_t sY = area.vertex[0].y, tY = target_coords.y;
+           sY <= area.vertex[1].y; sY++, tY++) {
+        const uint8_t *src = source.frame->data[0] +
+                             sY * source.frame->linesize[0] +
+                             area.vertex[0].x * bytes_per_pixel;
+        uint8_t *dst = target.frame->data[0] + tY * target.frame->linesize[0] +
+                       target_coords.x * bytes_per_pixel;
+        memcpy(dst, src, width * bytes_per_pixel);
+      }
+      return;
+    }
+  }
+
+  // Generic fallback: pixel-by-pixel copy (handles clipping, format conversion)
   for (int32_t sY = area.vertex[0].y, tY = target_coords.y;
        sY <= area.vertex[1].y; sY++, tY++) {
     for (int32_t sX = area.vertex[0].x, tX = target_coords.x;
