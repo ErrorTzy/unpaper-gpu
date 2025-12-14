@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include <opencv2/core/cuda.hpp>
+#include <opencv2/core/cuda_stream_accessor.hpp>
 #include <cuda_runtime.h>
 
 // OpenCV defines HAVE_OPENCV_* in opencv_modules.hpp if modules are present
@@ -59,53 +60,37 @@ bool unpaper_opencv_cuda_ccl(uint64_t mask_device, int width, int height,
     return false;
   }
 
-  (void)stream; // Not used in current implementation
-
   try {
-    // Wrap the mask as GpuMat (CV_8UC1 binary mask where foreground_value
-    // indicates dark pixels)
+    // Get OpenCV CUDA stream from our stream handle
+    cudaStream_t cuda_stream = nullptr;
+    if (stream != nullptr) {
+      cuda_stream =
+          static_cast<cudaStream_t>(unpaper_cuda_stream_get_raw_handle(stream));
+    }
+    cv::cuda::Stream cv_stream = cv::cuda::StreamAccessor::wrapStream(cuda_stream);
+
+    // Wrap the mask directly as GpuMat - memory is now compatible (Runtime API)
     cv::cuda::GpuMat mask(height, width, CV_8UC1,
                           reinterpret_cast<void *>(mask_device), pitch_bytes);
 
-    // Download mask to host, run CCL, then upload results
-    // This is needed because cv::cuda::connectedComponents requires contiguous
-    // memory and we need to transfer ownership safely
-    cv::Mat mask_host;
-    mask.download(mask_host);
-
-    // Convert mask to binary (OpenCV CCL expects non-zero = foreground)
-    // Our mask has foreground_value for dark pixels
-    cv::Mat binary;
+    // Convert mask to binary if needed (OpenCV CCL expects non-zero = foreground)
+    cv::cuda::GpuMat binary;
     if (foreground_value == 255) {
-      binary = mask_host;
+      binary = mask;
     } else {
-      cv::compare(mask_host, foreground_value, binary, cv::CMP_EQ);
+      cv::cuda::compare(mask, cv::Scalar(foreground_value), binary, cv::CMP_EQ,
+                        cv_stream);
     }
-
-    // Upload binary mask to GPU via cudaMalloc for OpenCV compatibility
-    void *d_binary = nullptr;
-    size_t binary_bytes = binary.step * static_cast<size_t>(height);
-    cudaError_t err = cudaMalloc(&d_binary, binary_bytes);
-    if (err != cudaSuccess || d_binary == nullptr) {
-      return false;
-    }
-    err = cudaMemcpy(d_binary, binary.data, binary_bytes, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) {
-      cudaFree(d_binary);
-      return false;
-    }
-
-    cv::cuda::GpuMat gpu_binary(height, width, CV_8UC1, d_binary, binary.step);
 
     // Run connected components labeling
+    // Note: OpenCV's connectedComponents doesn't accept a stream parameter
     cv::cuda::GpuMat labels;
-    cv::cuda::connectedComponents(gpu_binary, labels, 8, CV_32S);
+    cv::cuda::connectedComponents(binary, labels, 8, CV_32S);
 
-    // Download labels to count component sizes
+    // Download labels to count component sizes (CPU-side for determinism)
     cv::Mat labels_host;
-    labels.download(labels_host);
-
-    cudaFree(d_binary);
+    labels.download(labels_host, cv_stream);
+    cv_stream.waitForCompletion();
 
     // Count component sizes
     std::unordered_map<int32_t, uint32_t> component_sizes;
@@ -132,12 +117,15 @@ bool unpaper_opencv_cuda_ccl(uint64_t mask_device, int width, int height,
       stats_out->removed_components = static_cast<int>(small_labels.size());
     }
 
-    // Apply removal: set small component pixels to background (255 = white)
-    // by modifying the original mask in place
-    cv::Mat result_mask = mask_host.clone();
+    // Apply removal: set small component pixels to background (0 = removed)
+    // Download mask, modify, re-upload
+    cv::Mat mask_host;
+    mask.download(mask_host, cv_stream);
+    cv_stream.waitForCompletion();
+
     for (int y = 0; y < height; y++) {
       const int32_t *label_row = labels_host.ptr<int32_t>(y);
-      uint8_t *mask_row = result_mask.ptr<uint8_t>(y);
+      uint8_t *mask_row = mask_host.ptr<uint8_t>(y);
       for (int x = 0; x < width; x++) {
         int32_t label = label_row[x];
         if (label > 0 && small_labels.count(label)) {
@@ -147,12 +135,8 @@ bool unpaper_opencv_cuda_ccl(uint64_t mask_device, int width, int height,
     }
 
     // Upload modified mask back to device
-    err = cudaMemcpy(reinterpret_cast<void *>(mask_device), result_mask.data,
-                     pitch_bytes * static_cast<size_t>(height),
-                     cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) {
-      return false;
-    }
+    mask.upload(mask_host, cv_stream);
+    cv_stream.waitForCompletion();
 
     return true;
   } catch (const std::exception &e) {
@@ -186,10 +170,15 @@ bool unpaper_opencv_extract_dark_mask(uint64_t src_device, int src_width,
     return false;
   }
 
-  (void)stream; // Not used currently - we download/upload via host to avoid
-                // Driver/Runtime API context conflicts
-
   try {
+    // Get OpenCV CUDA stream from our stream handle
+    cudaStream_t cuda_stream = nullptr;
+    if (stream != nullptr) {
+      cuda_stream =
+          static_cast<cudaStream_t>(unpaper_cuda_stream_get_raw_handle(stream));
+    }
+    cv::cuda::Stream cv_stream = cv::cuda::StreamAccessor::wrapStream(cuda_stream);
+
     auto fmt = static_cast<UnpaperCudaFormat>(src_format);
 
     int cv_type = -1;
@@ -211,80 +200,50 @@ bool unpaper_opencv_extract_dark_mask(uint64_t src_device, int src_width,
       return false;
     }
 
-    // Download source from device to host first to avoid Driver/Runtime API
-    // context conflicts. The source may be allocated via cuMemAlloc (Driver API)
-    // or cudaMalloc (Runtime API). We use cudaMemcpy which handles both via
-    // Unified Virtual Addressing (UVA).
-    size_t src_bytes = src_pitch_bytes * static_cast<size_t>(src_height);
-    cv::Mat src_host(src_height, src_width, cv_type);
-
-    // cudaMemcpy works for both Driver and Runtime API pointers via UVA
-    cudaError_t err = cudaMemcpy(src_host.data,
-                                 reinterpret_cast<void *>(src_device),
-                                 src_bytes, cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) {
-      fprintf(stderr,
-              "OpenCV CUDA mask extraction: cudaMemcpy D2H failed: %s\n",
-              cudaGetErrorString(err));
-      return false;
-    }
-
-    // Re-upload via cudaMalloc (Runtime API) for OpenCV compatibility
-    void *d_src = nullptr;
-    err = cudaMalloc(&d_src, src_bytes);
-    if (err != cudaSuccess || d_src == nullptr) {
-      return false;
-    }
-    err = cudaMemcpy(d_src, src_host.data, src_bytes, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) {
-      cudaFree(d_src);
-      return false;
-    }
-
-    cv::cuda::GpuMat src(src_height, src_width, cv_type, d_src, src_pitch_bytes);
+    // Wrap source directly as GpuMat - memory is now compatible (Runtime API)
+    cv::cuda::GpuMat src(src_height, src_width, cv_type,
+                         reinterpret_cast<void *>(src_device), src_pitch_bytes);
 
     cv::cuda::GpuMat gray;
     if (channels == 1) {
       gray = src;
     } else if (channels == 2) {
       std::vector<cv::cuda::GpuMat> planes;
-      cv::cuda::split(src, planes);
+      cv::cuda::split(src, planes, cv_stream);
       gray = planes[0];
     } else {
       std::vector<cv::cuda::GpuMat> planes;
-      cv::cuda::split(src, planes);
+      cv::cuda::split(src, planes, cv_stream);
       cv::cuda::GpuMat max_rg, min_rg;
-      cv::cuda::max(planes[0], planes[1], max_rg);
-      cv::cuda::min(planes[0], planes[1], min_rg);
+      cv::cuda::max(planes[0], planes[1], max_rg, cv_stream);
+      cv::cuda::min(planes[0], planes[1], min_rg, cv_stream);
       cv::cuda::GpuMat max_rgb, min_rgb;
-      cv::cuda::max(max_rg, planes[2], max_rgb);
-      cv::cuda::min(min_rg, planes[2], min_rgb);
+      cv::cuda::max(max_rg, planes[2], max_rgb, cv_stream);
+      cv::cuda::min(min_rg, planes[2], min_rgb, cv_stream);
       cv::cuda::GpuMat sum;
-      cv::cuda::add(max_rgb, min_rgb, sum, cv::noArray(), CV_16UC1);
+      cv::cuda::add(max_rgb, min_rgb, sum, cv::noArray(), CV_16UC1, cv_stream);
       cv::cuda::GpuMat half;
-      sum.convertTo(half, CV_8UC1, 0.5, 0.0);
+      sum.convertTo(half, CV_8UC1, 0.5, 0.0, cv_stream);
       gray = half;
     }
 
     cv::cuda::GpuMat mask;
-    cv::cuda::compare(gray, cv::Scalar(min_white_level), mask, cv::CMP_LT);
+    cv::cuda::compare(gray, cv::Scalar(min_white_level), mask, cv::CMP_LT,
+                      cv_stream);
+    cv_stream.waitForCompletion();
 
-    // Download mask to CPU and re-upload via cudart for output
-    cv::Mat mask_host;
-    mask.download(mask_host);
-
-    // Free the temporary source copy
-    cudaFree(d_src);
-
-    // Allocate output mask via cudaMalloc (runtime API)
+    // Allocate output mask via cudaMalloc (Runtime API)
     void *d_mask = nullptr;
-    size_t mask_bytes = mask_host.step * static_cast<size_t>(src_height);
-    err = cudaMalloc(&d_mask, mask_bytes);
+    size_t mask_pitch = mask.step;
+    size_t mask_bytes = mask_pitch * static_cast<size_t>(src_height);
+    cudaError_t err = cudaMalloc(&d_mask, mask_bytes);
     if (err != cudaSuccess || d_mask == nullptr) {
       return false;
     }
 
-    err = cudaMemcpy(d_mask, mask_host.data, mask_bytes, cudaMemcpyHostToDevice);
+    // Copy mask data to output buffer
+    err = cudaMemcpy2D(d_mask, mask_pitch, mask.data, mask.step, src_width,
+                       src_height, cudaMemcpyDeviceToDevice);
     if (err != cudaSuccess) {
       cudaFree(d_mask);
       return false;
@@ -293,7 +252,7 @@ bool unpaper_opencv_extract_dark_mask(uint64_t src_device, int src_width,
     mask_out->device_ptr = reinterpret_cast<uint64_t>(d_mask);
     mask_out->width = src_width;
     mask_out->height = src_height;
-    mask_out->pitch_bytes = mask_host.step;
+    mask_out->pitch_bytes = mask_pitch;
     mask_out->opencv_allocated = true;
     return true;
   } catch (const std::exception &e) {
@@ -317,15 +276,11 @@ void unpaper_opencv_mask_free(UnpaperOpencvMask *mask) {
     return;
   }
   if (mask->device_ptr != 0) {
-#ifdef HAVE_OPENCV_CUDAARITHM
     if (mask->opencv_allocated) {
       cudaFree(reinterpret_cast<void *>(mask->device_ptr));
     } else {
       unpaper_cuda_free(mask->device_ptr);
     }
-#else
-    unpaper_cuda_free(mask->device_ptr);
-#endif
   }
   std::memset(mask, 0, sizeof(*mask));
 }

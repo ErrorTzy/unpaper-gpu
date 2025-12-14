@@ -1068,10 +1068,15 @@ int main(int argc, char *argv[]) {
                        options.device == UNPAPER_DEVICE_CUDA);
 
     if (options.perf) {
+#ifdef UNPAPER_WITH_OPENCV
       printf("perf backends: device=%s opencv=%s ccl=%s\n",
              options.device == UNPAPER_DEVICE_CUDA ? "cuda" : "cpu",
              unpaper_opencv_enabled() ? "yes" : "no",
              unpaper_opencv_ccl_supported() ? "yes" : "no");
+#else
+      printf("perf backends: device=%s opencv=n/a ccl=n/a\n",
+             options.device == UNPAPER_DEVICE_CUDA ? "cuda" : "cpu");
+#endif
     }
 
     bool outputWildcard = false;

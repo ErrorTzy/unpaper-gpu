@@ -6,12 +6,5 @@ option(
   'cuda',
   type: 'feature',
   value: 'disabled',
-  description: 'Enable CUDA backend support (experimental)',
-)
-
-option(
-  'opencv',
-  type: 'feature',
-  value: 'disabled',
-  description: 'Enable optional OpenCV (CUDA) acceleration hooks',
+  description: 'Enable CUDA backend support (requires OpenCV with CUDA modules)',
 )

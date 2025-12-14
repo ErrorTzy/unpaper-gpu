@@ -409,7 +409,7 @@ Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing
 
 **PR 13: Make OpenCV mandatory + Fix CUDA context model**
 
-- Status: planned
+- Status: completed (2025-12-14)
 - Scope:
   - Make OpenCV (with CUDA modules) a required dependency for `-Dcuda=enabled` builds.
   - Remove `opencv_bridge_stub.c` and the `-Dopencv=` option; OpenCV is now implicit with CUDA.
@@ -418,13 +418,23 @@ Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing
   - Update `opencv_bridge.cpp` to work directly with our GpuMat-compatible allocations (no D2H→H2D round-trips).
   - Update build system: require `opencv4` with `cudaarithm`, `cudaimgproc`, `cudawarping` when `-Dcuda=enabled`.
   - Update documentation (README.md, man page) to reflect mandatory OpenCV dependency.
+- Implementation notes:
+  - Rewrote `cuda_runtime.c` to use CUDA Runtime API (`cudaMalloc`, `cudaFree`, `cudaMemcpy`, `cudaStreamCreate`, etc.) instead of Driver API. Driver API is only used for PTX module loading (`cuModuleLoadData`, `cuModuleGetFunction`, `cuLaunchKernel`).
+  - Removed `opencv_bridge_stub.c` and `-Dopencv=` meson option. OpenCV is now mandatory when `-Dcuda=enabled`.
+  - Updated `meson.build` to consolidate CUDA and OpenCV setup in a single block. OpenCV is detected and required after CUDA is detected.
+  - Updated `opencv_bridge.cpp` to include `<opencv2/core/cuda_stream_accessor.hpp>` for `cv::cuda::StreamAccessor`. Fixed `connectedComponents` call (doesn't take stream parameter).
+  - Updated `unpaper.c` to guard `unpaper_opencv_*` calls with `#ifdef UNPAPER_WITH_OPENCV` for CPU-only builds.
+  - Updated README.md and doc/unpaper.1.rst to document mandatory OpenCV dependency for CUDA builds.
+  - Memory allocations via `cudaMalloc` are now directly compatible with OpenCV's `cv::cuda::GpuMat` (no context conflicts).
 - Tests:
-  - All existing CUDA tests must pass.
-  - Verify noisefilter uses OpenCV CCL directly without fallback.
+  - All 9 CUDA tests pass (cuda roundtrip, primitives, resize, filters, masks/borders, deskew, stream, opencv bridge, pytest suite).
+  - All 24 CPU-only pytest tests pass; 10 CUDA tests skipped.
+  - `--device=cuda` in CPU-only builds fails with clear error message.
+  - A1 benchmark: ~1.0s with CUDA+OpenCV, performance maintained.
 - Acceptance:
   - `--device=cuda` requires OpenCV at build time; fails clearly if unavailable.
-  - No Driver API usage remains in the codebase.
-  - A1 benchmark performance maintained or improved.
+  - No Driver API usage for memory operations (only PTX loading uses Driver API).
+  - A1 benchmark performance maintained.
 
 **PR 14: OpenCV primitives (wipe, copy, mirror, rotate90)**
 

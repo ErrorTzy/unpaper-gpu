@@ -53,44 +53,16 @@ unpaper_sources = [
     'lib/physical.c',
 ]
 
-opencv_opt = get_option('opencv')
+# OpenCV and CUDA setup - OpenCV is mandatory when CUDA is enabled
 have_opencv = false
 opencv_dep = disabler()
-opencv_bridge_source = 'imageprocess/opencv_bridge_stub.c'
 cpp_enabled = false
-
-if opencv_opt.enabled() or opencv_opt.auto()
-    cpp_enabled = add_languages('cpp', required : opencv_opt.enabled())
-    if cpp_enabled
-        opencv_dep = dependency('opencv4', method : 'pkg-config',
-                                required : opencv_opt.enabled())
-        if opencv_dep.found()
-            have_opencv = true
-            opencv_bridge_source = 'imageprocess/opencv_bridge.cpp'
-            unpaper_c_args += ['-DUNPAPER_WITH_OPENCV=1']
-            unpaper_cpp_args += ['-DUNPAPER_WITH_OPENCV=1']
-        elif opencv_opt.enabled()
-            error('OpenCV requested but opencv4 package not found')
-        endif
-    elif opencv_opt.enabled()
-        error('OpenCV requested but no C++ compiler available')
-    endif
-endif
-
 cuda_include_dir = ''
-
-unpaper_sources += [opencv_bridge_source]
 
 if cuda_opt.enabled()
     nvcc_compat = find_program('/usr/local/cuda-13.0/bin/nvcc', required: false)
     nvcc = nvcc_compat.found() ? nvcc_compat : find_program('nvcc', required: true)
     have_cuda = true
-    unpaper_c_args += ['-DUNPAPER_WITH_CUDA=1']
-    unpaper_sources += [
-        'imageprocess/backend_cuda.c',
-        'imageprocess/cuda_runtime.c',
-    ]
-    unpaper_deps += [cc.find_library('dl', required : false)]
     if nvcc_compat.found()
         cuda_include_dir = '/usr/local/cuda-13.0/include'
     else
@@ -101,12 +73,6 @@ elif cuda_opt.auto()
     nvcc = nvcc_compat.found() ? nvcc_compat : find_program('nvcc', required: false)
     if nvcc.found()
         have_cuda = true
-        unpaper_c_args += ['-DUNPAPER_WITH_CUDA=1']
-        unpaper_sources += [
-            'imageprocess/backend_cuda.c',
-            'imageprocess/cuda_runtime.c',
-        ]
-        unpaper_deps += [cc.find_library('dl', required : false)]
         if nvcc_compat.found()
             cuda_include_dir = '/usr/local/cuda-13.0/include'
         else
@@ -115,18 +81,32 @@ elif cuda_opt.auto()
     endif
 endif
 
-if have_cuda and have_opencv
+# When CUDA is enabled, set up OpenCV (mandatory) and CUDA sources
+if have_cuda
+    # OpenCV is mandatory for CUDA builds
+    cpp_enabled = add_languages('cpp', required : true)
+    opencv_dep = dependency('opencv4', method : 'pkg-config', required : true)
+    have_opencv = true
+
+    unpaper_c_args += ['-DUNPAPER_WITH_CUDA=1', '-DUNPAPER_WITH_OPENCV=1']
+    unpaper_cpp_args += ['-DUNPAPER_WITH_OPENCV=1']
+    unpaper_c_args += ['-I' + cuda_include_dir]
     unpaper_cpp_args += ['-I' + cuda_include_dir]
-    # Link cudart for OpenCV CUDA bridge (uses runtime API for context compatibility)
-    # Try standard CUDA lib locations
+
+    unpaper_sources += [
+        'imageprocess/backend_cuda.c',
+        'imageprocess/cuda_runtime.c',
+        'imageprocess/opencv_bridge.cpp',
+    ]
+    unpaper_deps += [cc.find_library('dl', required : false)]
+
+    # Link cudart for CUDA Runtime API (required for OpenCV compatibility)
     cudart_dep = cc.find_library('cudart', dirs : [
         '/usr/local/cuda-13.0/lib64',
         '/usr/local/cuda/lib64',
         '/usr/lib/x86_64-linux-gnu'
-    ], required : false)
-    if cudart_dep.found()
-        unpaper_deps += [cudart_dep]
-    endif
+    ], required : true)
+    unpaper_deps += [cudart_dep]
 endif
 
 if have_cuda
@@ -236,7 +216,7 @@ if have_cuda
             'imageprocess/pixel.c',
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
-            opencv_bridge_source,
+            'imageprocess/opencv_bridge.cpp',
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
@@ -265,7 +245,7 @@ if have_cuda
             'imageprocess/pixel.c',
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
-            opencv_bridge_source,
+            'imageprocess/opencv_bridge.cpp',
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
@@ -294,7 +274,7 @@ if have_cuda
             'imageprocess/pixel.c',
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
-            opencv_bridge_source,
+            'imageprocess/opencv_bridge.cpp',
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
@@ -323,7 +303,7 @@ if have_cuda
             'imageprocess/pixel.c',
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
-            opencv_bridge_source,
+            'imageprocess/opencv_bridge.cpp',
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
@@ -352,7 +332,7 @@ if have_cuda
             'imageprocess/pixel.c',
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
-            opencv_bridge_source,
+            'imageprocess/opencv_bridge.cpp',
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
@@ -383,7 +363,7 @@ if have_cuda
         [
             'tests/opencv_bridge_test.c',
             'imageprocess/cuda_runtime.c',
-            opencv_bridge_source,
+            'imageprocess/opencv_bridge.cpp',
             'lib/logging.c',
         ],
         c_args : unpaper_c_args,

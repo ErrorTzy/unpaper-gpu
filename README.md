@@ -46,13 +46,16 @@ Dependencies
 The only hard dependency of `unpaper` is [ffmpeg][4], which is used for
 file input and output.
 
-### Optional Dependencies
+### CUDA Backend Dependencies
 
-- **CUDA Toolkit**: Required for GPU-accelerated processing via
-  `--device=cuda`. Tested with CUDA 12.x and 13.x.
-- **OpenCV 4.x with CUDA support**: Optional acceleration for certain
-  operations when CUDA is enabled. Provides GPU-accelerated connected
-  component labeling for the noisefilter.
+For GPU-accelerated processing (`--device=cuda`), the following are required:
+
+- **CUDA Toolkit**: Tested with CUDA 12.x and 13.x. The `nvcc` compiler
+  and CUDA runtime library (`cudart`) must be available.
+- **OpenCV 4.x with CUDA support**: Required for CUDA builds. OpenCV must
+  be built with CUDA support enabled, including the `cudaarithm` and
+  `cudaimgproc` modules. OpenCV provides GPU-accelerated operations
+  including connected component labeling for the noisefilter.
 
 Building instructions
 ---------------------
@@ -83,28 +86,16 @@ To enable GPU-accelerated processing, configure with `-Dcuda=enabled`:
     unpaper$ meson setup builddir-cuda -Dcuda=enabled --buildtype=debugoptimized
     unpaper$ meson compile -C builddir-cuda
 
-The CUDA backend requires the NVIDIA CUDA Toolkit (nvcc compiler).
+The CUDA backend requires:
+- NVIDIA CUDA Toolkit (nvcc compiler and cudart library)
+- OpenCV 4.x with CUDA support (cudaarithm and cudaimgproc modules)
+
 Use `--device=cuda` at runtime to select GPU processing.
-
-### Building with OpenCV Acceleration
-
-For additional performance, enable OpenCV with CUDA support:
-
-    unpaper$ meson setup builddir-cuda-opencv -Dcuda=enabled -Dopencv=enabled --buildtype=debugoptimized
-    unpaper$ meson compile -C builddir-cuda-opencv
-
-This requires OpenCV 4.x built with CUDA support (cudaarithm and
-cudaimgproc modules). OpenCV acceleration is optional and provides
-faster connected component labeling for the noisefilter.
 
 To check which backends are active at runtime, use `--perf`:
 
-    unpaper$ ./builddir-cuda-opencv/unpaper --perf --device=cuda input.pgm output.pgm
+    unpaper$ ./builddir-cuda/unpaper --perf --device=cuda input.pgm output.pgm
     # Output includes: perf backends: device=cuda opencv=yes ccl=yes
-
-When OpenCV is not available or encounters runtime errors, unpaper
-automatically falls back to the built-in CUDA implementation with
-no user intervention required.
 
 Development Hints
 -----------------
