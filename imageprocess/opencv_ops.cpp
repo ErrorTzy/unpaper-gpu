@@ -16,6 +16,10 @@
 #include <opencv2/cudaarithm.hpp>
 #endif
 
+#if __has_include(<opencv2/cudawarping.hpp>)
+#include <opencv2/cudawarping.hpp>
+#endif
+
 static inline int opencv_type_from_format(UnpaperCudaFormat fmt) {
   switch (fmt) {
   case UNPAPER_CUDA_FMT_GRAY8:
@@ -277,13 +281,6 @@ bool unpaper_opencv_rotate90(uint64_t src_device, int src_width, int src_height,
     return false; // Mono formats handled by custom kernel
   }
 
-  // OpenCV CUDA transpose only supports elemSize of 1, 4, or 8 bytes.
-  // RGB24 (3 bytes) and Y400A (2 bytes) are not supported.
-  // Only GRAY8 (1 byte) works with transpose.
-  if (fmt != UNPAPER_CUDA_FMT_GRAY8) {
-    return false; // Fall back to custom kernel for RGB24 and Y400A
-  }
-
   int cv_type = opencv_type_from_format(fmt);
   if (cv_type < 0 || src_device == 0 || dst_device == 0) {
     return false;
@@ -301,16 +298,64 @@ bool unpaper_opencv_rotate90(uint64_t src_device, int src_width, int src_height,
     cv::cuda::GpuMat dst(dst_height, dst_width, cv_type,
                          reinterpret_cast<void *>(dst_device), dst_pitch);
 
-    // For 90-degree rotation, use transpose + flip:
-    // - Clockwise: transpose, then flip horizontally (flip_code = 1)
-    // - Counter-clockwise: transpose, then flip vertically (flip_code = 0)
-    cv::cuda::GpuMat transposed;
-    cv::cuda::transpose(src, transposed, cv_stream);
+    // Strategy depends on format due to OpenCV limitations:
+    // - transpose() only supports elemSize 1, 4, or 8 bytes
+    // - rotate() supports 1, 3, or 4 channels
+    // - GRAY8 (1 byte, 1 channel): use transpose + flip (fastest)
+    // - RGB24 (3 bytes, 3 channels): use rotate() with INTER_NEAREST
+    // - Y400A (2 bytes, 2 channels): not supported by OpenCV, use custom kernel
 
-    int flip_code = clockwise ? 1 : 0;
-    cv::cuda::flip(transposed, dst, flip_code, cv_stream);
+    if (fmt == UNPAPER_CUDA_FMT_GRAY8) {
+      // GRAY8: Use transpose + flip (elemSize=1 is supported)
+      cv::cuda::GpuMat transposed;
+      cv::cuda::transpose(src, transposed, cv_stream);
+      int flip_code = clockwise ? 1 : 0;
+      cv::cuda::flip(transposed, dst, flip_code, cv_stream);
+      return true;
+    }
 
-    return true;
+#ifdef HAVE_OPENCV_CUDAWARPING
+    if (fmt == UNPAPER_CUDA_FMT_RGB24) {
+      // RGB24: Use cv::cuda::warpAffine() which supports 3 channels
+      // warpAffine uses inverse mapping: for each dst pixel, compute src coords
+      //
+      // IMPORTANT: By default, warpAffine expects a FORWARD transformation matrix
+      // (source to destination) and internally inverts it. Since we provide an
+      // INVERSE matrix (destination to source), we must set WARP_INVERSE_MAP.
+      //
+      // For 90° clockwise rotation of WxH image to HxW:
+      //   src_col = dst_row, src_row = src_height - 1 - dst_col
+      // For 90° counter-clockwise rotation:
+      //   src_col = src_width - 1 - dst_row, src_row = dst_col
+      cv::Mat M(2, 3, CV_64F);
+      if (clockwise) {
+        M.at<double>(0, 0) = 0;
+        M.at<double>(0, 1) = 1;
+        M.at<double>(0, 2) = 0;
+        M.at<double>(1, 0) = -1;
+        M.at<double>(1, 1) = 0;
+        M.at<double>(1, 2) = src_height - 1;
+      } else {
+        M.at<double>(0, 0) = 0;
+        M.at<double>(0, 1) = -1;
+        M.at<double>(0, 2) = src_width - 1;
+        M.at<double>(1, 0) = 1;
+        M.at<double>(1, 1) = 0;
+        M.at<double>(1, 2) = 0;
+      }
+
+      // Use WARP_INVERSE_MAP because our matrix is already in inverse form
+      cv::cuda::warpAffine(src, dst, M, cv::Size(dst_width, dst_height),
+                           cv::INTER_NEAREST | cv::WARP_INVERSE_MAP,
+                           cv::BORDER_CONSTANT, cv::Scalar(0, 0, 0), cv_stream);
+      return true;
+    }
+#endif
+
+    // Y400A (2 channels): Not supported by OpenCV rotate/warpAffine
+    // Fall back to custom kernel
+    return false;
+
   } catch (const std::exception &e) {
     fprintf(stderr, "OpenCV rotate90 failed: %s\n", e.what());
     return false;

@@ -450,15 +450,19 @@ Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing
 - Implementation notes:
   - Created `opencv_ops.h` and `opencv_ops.cpp` with C API wrappers for OpenCV CUDA primitives.
   - OpenCV path used for GRAY8, Y400A, RGB24 formats; mono formats fall back to custom kernels.
-  - OpenCV `cv::cuda::transpose()` only supports element sizes of 1, 4, or 8 bytes. RGB24 (3 bytes) and Y400A (2 bytes) are not supported, so `rotate90` only uses OpenCV for GRAY8 and falls back to custom kernel for other formats.
-  - Custom CUDA kernels retained for: mono formats (all operations), RGB24/Y400A rotate90.
+  - **rotate90 implementation by format:**
+    - GRAY8: Uses `cv::cuda::transpose()` + `cv::cuda::flip()` (transpose supports 1-byte elements).
+    - RGB24: Uses `cv::cuda::warpAffine()` with `WARP_INVERSE_MAP` flag. Key insight: warpAffine by default expects a forward transformation matrix and inverts it internally; since we provide an inverse (sampling) matrix, the flag is required.
+    - Y400A: Falls back to custom kernel (OpenCV warpAffine only supports 1, 3, or 4 channels, not 2).
+    - Mono formats: Fall back to custom kernels (1-bit packed format not supported by OpenCV).
+  - Custom CUDA kernels retained for: mono formats (all operations), Y400A rotate90.
   - Updated `backend_cuda.c` to try OpenCV path first, falling back to custom kernels when OpenCV returns false.
 - Tests:
   - Extend `cuda_primitives_test.c` to verify parity with CPU for all replaced operations.
   - Ensure determinism across repeated runs.
 - Acceptance:
   - All primitive operations work correctly for GRAY8, Y400A, RGB24, and mono formats.
-  - Custom kernels retained where OpenCV limitations exist (mono formats, RGB24/Y400A rotate90).
+  - Custom kernels retained where OpenCV limitations exist (mono formats, Y400A rotate90).
 
 **PR 15: OpenCV resize and deskew (cudawarping)**
 
