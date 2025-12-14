@@ -1175,6 +1175,55 @@ extern "C" __global__ void unpaper_noisefilter_apply(
   }
 }
 
+// Apply noisefilter mask directly on GPU:
+// If mask is 0 (small component removed) and pixel is dark, set to white.
+extern "C" __global__ void unpaper_noisefilter_apply_mask(
+    uint8_t *img, int img_linesize, int img_fmt, int w, int h,
+    const uint8_t *mask, int mask_linesize, uint8_t min_white_level) {
+  const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+  if (x >= w || y >= h) {
+    return;
+  }
+
+  // Check mask: if non-zero, pixel is in a large component - keep as-is
+  const uint8_t mask_val = mask[y * mask_linesize + x];
+  if (mask_val != 0) {
+    return;
+  }
+
+  // Mask is 0 - check if pixel is dark
+  const UnpaperCudaFormat fmt = (UnpaperCudaFormat)img_fmt;
+  uint8_t lightness;
+
+  if (fmt == UNPAPER_CUDA_FMT_GRAY8) {
+    lightness = img[y * img_linesize + x];
+  } else if (fmt == UNPAPER_CUDA_FMT_Y400A) {
+    lightness = img[y * img_linesize + x * 2];
+  } else if (fmt == UNPAPER_CUDA_FMT_RGB24) {
+    const uint8_t *p = &img[y * img_linesize + x * 3];
+    const uint8_t max_rg = (p[0] > p[1]) ? p[0] : p[1];
+    const uint8_t min_rg = (p[0] < p[1]) ? p[0] : p[1];
+    const uint8_t max_rgb = (max_rg > p[2]) ? max_rg : p[2];
+    const uint8_t min_rgb = (min_rg < p[2]) ? min_rg : p[2];
+    lightness = (uint8_t)((max_rgb + min_rgb) / 2);
+  } else {
+    return; // Unsupported format
+  }
+
+  // If dark, set to white
+  if (lightness < min_white_level) {
+    if (fmt == UNPAPER_CUDA_FMT_GRAY8) {
+      img[y * img_linesize + x] = 255;
+    } else if (fmt == UNPAPER_CUDA_FMT_Y400A) {
+      img[y * img_linesize + x * 2] = 255; // Set Y to white, keep alpha
+    } else if (fmt == UNPAPER_CUDA_FMT_RGB24) {
+      uint8_t *p = &img[y * img_linesize + x * 3];
+      p[0] = p[1] = p[2] = 255;
+    }
+  }
+}
+
 typedef struct {
   int x;
   int y;

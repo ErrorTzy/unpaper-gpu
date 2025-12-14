@@ -284,3 +284,369 @@ void unpaper_opencv_mask_free(UnpaperOpencvMask *mask) {
   }
   std::memset(mask, 0, sizeof(*mask));
 }
+
+static inline int opencv_type_from_format(UnpaperCudaFormat fmt) {
+  switch (fmt) {
+  case UNPAPER_CUDA_FMT_GRAY8:
+    return CV_8UC1;
+  case UNPAPER_CUDA_FMT_Y400A:
+    return CV_8UC2;
+  case UNPAPER_CUDA_FMT_RGB24:
+    return CV_8UC3;
+  default:
+    return -1;
+  }
+}
+
+static inline cv::cuda::Stream get_cv_stream(UnpaperCudaStream *stream) {
+  cudaStream_t cuda_stream = nullptr;
+  if (stream != nullptr) {
+    cuda_stream =
+        static_cast<cudaStream_t>(unpaper_cuda_stream_get_raw_handle(stream));
+  }
+  return cv::cuda::StreamAccessor::wrapStream(cuda_stream);
+}
+
+// Helper: compute sum of rectangle from integral image (CPU side)
+// Integral image is (height+1) x (width+1) with first row and column being 0
+static inline int64_t integral_rect_sum(const cv::Mat &integral, int x0, int y0,
+                                        int x1, int y1) {
+  // Clamp coordinates to valid range
+  x0 = std::max(0, x0);
+  y0 = std::max(0, y0);
+  x1 = std::min(x1, integral.cols - 2);
+  y1 = std::min(y1, integral.rows - 2);
+  if (x0 > x1 || y0 > y1) {
+    return 0;
+  }
+  // Integral image formula: sum = I[y1+1][x1+1] - I[y0][x1+1] - I[y1+1][x0] + I[y0][x0]
+  int64_t a = integral.at<int32_t>(y0, x0);
+  int64_t b = integral.at<int32_t>(y0, x1 + 1);
+  int64_t c = integral.at<int32_t>(y1 + 1, x0);
+  int64_t d = integral.at<int32_t>(y1 + 1, x1 + 1);
+  return d - b - c + a;
+}
+
+bool unpaper_opencv_grayfilter(uint64_t src_device, int width, int height,
+                               size_t pitch_bytes, int format, int tile_width,
+                               int tile_height, int step_x, int step_y,
+                               uint8_t black_threshold, uint8_t gray_threshold,
+                               UnpaperCudaStream *stream) {
+#ifdef HAVE_OPENCV_CUDAARITHM
+  auto fmt = static_cast<UnpaperCudaFormat>(format);
+  int cv_type = opencv_type_from_format(fmt);
+  if (cv_type < 0 || src_device == 0) {
+    return false;
+  }
+
+  if (tile_width <= 0 || tile_height <= 0 || step_x <= 0 || step_y <= 0) {
+    return true; // Nothing to do
+  }
+
+  try {
+    cv::cuda::Stream cv_stream = get_cv_stream(stream);
+
+    // Wrap source image
+    cv::cuda::GpuMat src(height, width, cv_type,
+                         reinterpret_cast<void *>(src_device), pitch_bytes);
+
+    // Convert to grayscale for analysis
+    cv::cuda::GpuMat gray;
+    if (cv_type == CV_8UC1) {
+      gray = src;
+    } else if (cv_type == CV_8UC2) {
+      // Y400A: extract Y channel
+      std::vector<cv::cuda::GpuMat> channels;
+      cv::cuda::split(src, channels, cv_stream);
+      gray = channels[0];
+    } else {
+#ifdef HAVE_OPENCV_CUDAIMGPROC
+      // RGB24: use cvtColor for grayscale conversion
+      cv::cuda::cvtColor(src, gray, cv::COLOR_RGB2GRAY, 0, cv_stream);
+#else
+      // Fallback: compute grayscale as average
+      std::vector<cv::cuda::GpuMat> channels;
+      cv::cuda::split(src, channels, cv_stream);
+      cv::cuda::GpuMat c0_32f, c1_32f, c2_32f, sum_32f;
+      channels[0].convertTo(c0_32f, CV_32FC1, 1.0, 0, cv_stream);
+      channels[1].convertTo(c1_32f, CV_32FC1, 1.0, 0, cv_stream);
+      channels[2].convertTo(c2_32f, CV_32FC1, 1.0, 0, cv_stream);
+      cv::cuda::add(c0_32f, c1_32f, sum_32f, cv::noArray(), -1, cv_stream);
+      cv::cuda::add(sum_32f, c2_32f, sum_32f, cv::noArray(), -1, cv_stream);
+      sum_32f.convertTo(gray, CV_8UC1, 1.0 / 3.0, 0, cv_stream);
+#endif
+    }
+
+    // Create binary mask: pixels <= black_threshold -> 255, else 0
+    cv::cuda::GpuMat dark_mask;
+    cv::cuda::threshold(gray, dark_mask, static_cast<double>(black_threshold),
+                        255.0, cv::THRESH_BINARY_INV, cv_stream);
+
+    // Compute integral images on CPU (OpenCV CUDA integral is limited)
+    cv::Mat gray_host, dark_mask_host;
+    gray.download(gray_host, cv_stream);
+    dark_mask.download(dark_mask_host, cv_stream);
+    cv_stream.waitForCompletion();
+
+    cv::Mat gray_integral, dark_integral;
+    cv::integral(gray_host, gray_integral, CV_32S);
+    cv::integral(dark_mask_host, dark_integral, CV_32S);
+
+    // Scan tiles and collect those that need wiping
+    std::vector<cv::Rect> tiles_to_wipe;
+    const int tile_pixels = tile_width * tile_height;
+
+    for (int y = 0; y <= height - tile_height; y += step_y) {
+      for (int x = 0; x <= width - tile_width; x += step_x) {
+        int x1 = x + tile_width - 1;
+        int y1 = y + tile_height - 1;
+
+        // Count dark pixels in tile using integral image
+        int64_t dark_sum = integral_rect_sum(dark_integral, x, y, x1, y1);
+        int64_t dark_count = dark_sum / 255; // Each dark pixel contributes 255
+
+        if (dark_count == 0) {
+          // No black pixels, check average lightness
+          int64_t lightness_sum = integral_rect_sum(gray_integral, x, y, x1, y1);
+          uint8_t avg_lightness =
+              static_cast<uint8_t>(lightness_sum / tile_pixels);
+          uint8_t inverse_lightness = 255 - avg_lightness;
+
+          if (inverse_lightness < gray_threshold) {
+            tiles_to_wipe.push_back(cv::Rect(x, y, tile_width, tile_height));
+          }
+        }
+      }
+    }
+
+    // Wipe collected tiles on GPU
+    for (const auto &tile : tiles_to_wipe) {
+      cv::cuda::GpuMat roi = src(tile);
+      if (cv_type == CV_8UC1) {
+        roi.setTo(cv::Scalar(255), cv_stream);
+      } else if (cv_type == CV_8UC2) {
+        roi.setTo(cv::Scalar(255, 255), cv_stream);
+      } else {
+        roi.setTo(cv::Scalar(255, 255, 255), cv_stream);
+      }
+    }
+
+    cv_stream.waitForCompletion();
+    return true;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "OpenCV grayfilter failed: %s\n", e.what());
+    return false;
+  }
+#else
+  (void)src_device;
+  (void)width;
+  (void)height;
+  (void)pitch_bytes;
+  (void)format;
+  (void)tile_width;
+  (void)tile_height;
+  (void)step_x;
+  (void)step_y;
+  (void)black_threshold;
+  (void)gray_threshold;
+  (void)stream;
+  return false;
+#endif
+}
+
+bool unpaper_opencv_blurfilter(uint64_t src_device, int width, int height,
+                               size_t pitch_bytes, int format, int block_width,
+                               int block_height, int step_x, int step_y,
+                               uint8_t white_threshold, float intensity,
+                               UnpaperCudaStream *stream) {
+#ifdef HAVE_OPENCV_CUDAARITHM
+  auto fmt = static_cast<UnpaperCudaFormat>(format);
+  int cv_type = opencv_type_from_format(fmt);
+  if (cv_type < 0 || src_device == 0) {
+    return false;
+  }
+
+  if (block_width <= 0 || block_height <= 0) {
+    return true; // Nothing to do
+  }
+
+  try {
+    cv::cuda::Stream cv_stream = get_cv_stream(stream);
+
+    // Wrap source image
+    cv::cuda::GpuMat src(height, width, cv_type,
+                         reinterpret_cast<void *>(src_device), pitch_bytes);
+
+    // Convert to grayscale
+    cv::cuda::GpuMat gray;
+    if (cv_type == CV_8UC1) {
+      gray = src;
+    } else if (cv_type == CV_8UC2) {
+      std::vector<cv::cuda::GpuMat> channels;
+      cv::cuda::split(src, channels, cv_stream);
+      gray = channels[0];
+    } else {
+#ifdef HAVE_OPENCV_CUDAIMGPROC
+      // RGB24: use cvtColor for grayscale conversion
+      cv::cuda::cvtColor(src, gray, cv::COLOR_RGB2GRAY, 0, cv_stream);
+#else
+      // Fallback: compute grayscale as average
+      std::vector<cv::cuda::GpuMat> channels;
+      cv::cuda::split(src, channels, cv_stream);
+      cv::cuda::GpuMat c0_32f, c1_32f, c2_32f, sum_32f;
+      channels[0].convertTo(c0_32f, CV_32FC1, 1.0, 0, cv_stream);
+      channels[1].convertTo(c1_32f, CV_32FC1, 1.0, 0, cv_stream);
+      channels[2].convertTo(c2_32f, CV_32FC1, 1.0, 0, cv_stream);
+      cv::cuda::add(c0_32f, c1_32f, sum_32f, cv::noArray(), -1, cv_stream);
+      cv::cuda::add(sum_32f, c2_32f, sum_32f, cv::noArray(), -1, cv_stream);
+      sum_32f.convertTo(gray, CV_8UC1, 1.0 / 3.0, 0, cv_stream);
+#endif
+    }
+
+    // Create binary mask: pixels <= white_threshold -> 255 (dark), else 0
+    cv::cuda::GpuMat dark_mask;
+    cv::cuda::threshold(gray, dark_mask, static_cast<double>(white_threshold),
+                        255.0, cv::THRESH_BINARY_INV, cv_stream);
+
+    // Download and compute integral
+    cv::Mat dark_mask_host;
+    dark_mask.download(dark_mask_host, cv_stream);
+    cv_stream.waitForCompletion();
+
+    cv::Mat integral_img;
+    cv::integral(dark_mask_host, integral_img, CV_32S);
+
+    // Calculate number of blocks per row
+    const int blocks_per_row = width / block_width;
+    if (blocks_per_row == 0) {
+      return true;
+    }
+
+    const int64_t total_pixels_in_block =
+        static_cast<int64_t>(block_width) * static_cast<int64_t>(block_height);
+
+    // Allocate count arrays for 3 rows of blocks (prev, cur, next)
+    // Include boundary blocks (index 0 and blocks_per_row+1) set to max
+    std::vector<int64_t> prev_counts(blocks_per_row + 2, total_pixels_in_block);
+    std::vector<int64_t> cur_counts(blocks_per_row + 2, total_pixels_in_block);
+    std::vector<int64_t> next_counts(blocks_per_row + 2, total_pixels_in_block);
+
+    std::vector<cv::Rect> blocks_to_wipe;
+
+    // Initialize cur_counts for first row
+    for (int block = 0; block < blocks_per_row; block++) {
+      int x0 = block * block_width;
+      int x1 = x0 + block_width - 1;
+      int64_t dark_sum = integral_rect_sum(integral_img, x0, 0, x1, block_height - 1);
+      cur_counts[block + 1] = dark_sum / 255;
+    }
+
+    // Process rows
+    const int max_top = height - block_height;
+    for (int top = 0; top <= max_top; top += block_height) {
+      // Compute next row counts
+      int next_top = top + step_y;
+      if (next_top <= max_top) {
+        for (int block = 0; block < blocks_per_row; block++) {
+          int x0 = block * block_width;
+          int x1 = x0 + block_width - 1;
+          int y0 = next_top;
+          int y1 = y0 + block_height - 1;
+          int64_t dark_sum = integral_rect_sum(integral_img, x0, y0, x1, y1);
+          next_counts[block + 1] = dark_sum / 255;
+        }
+      } else {
+        std::fill(next_counts.begin(), next_counts.end(), total_pixels_in_block);
+      }
+
+      // Check each block in current row
+      for (int block = 0; block < blocks_per_row; block++) {
+        int64_t max_neighbor = std::max({
+            prev_counts[block], prev_counts[block + 2],
+            next_counts[block], next_counts[block + 2],
+            cur_counts[block]  // Left neighbor contributes to isolation check
+        });
+
+        // Block is isolated if max neighbor ratio is below intensity
+        float ratio = static_cast<float>(max_neighbor) /
+                      static_cast<float>(total_pixels_in_block);
+        if (ratio <= intensity) {
+          int x = block * block_width;
+          blocks_to_wipe.push_back(cv::Rect(x, top, block_width, block_height));
+          cur_counts[block + 1] = total_pixels_in_block; // Mark as wiped
+        }
+      }
+
+      // Rotate arrays
+      std::swap(prev_counts, cur_counts);
+      std::swap(cur_counts, next_counts);
+    }
+
+    // Wipe collected blocks on GPU
+    for (const auto &block : blocks_to_wipe) {
+      cv::cuda::GpuMat roi = src(block);
+      if (cv_type == CV_8UC1) {
+        roi.setTo(cv::Scalar(255), cv_stream);
+      } else if (cv_type == CV_8UC2) {
+        roi.setTo(cv::Scalar(255, 255), cv_stream);
+      } else {
+        roi.setTo(cv::Scalar(255, 255, 255), cv_stream);
+      }
+    }
+
+    cv_stream.waitForCompletion();
+    return true;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "OpenCV blurfilter failed: %s\n", e.what());
+    return false;
+  }
+#else
+  (void)src_device;
+  (void)width;
+  (void)height;
+  (void)pitch_bytes;
+  (void)format;
+  (void)block_width;
+  (void)block_height;
+  (void)step_x;
+  (void)step_y;
+  (void)white_threshold;
+  (void)intensity;
+  (void)stream;
+  return false;
+#endif
+}
+
+bool unpaper_opencv_blackfilter(uint64_t src_device, int width, int height,
+                                size_t pitch_bytes, int format, int scan_size_w,
+                                int scan_size_h, int scan_depth_h,
+                                int scan_depth_v, int scan_step_h,
+                                int scan_step_v, bool scan_dir_h,
+                                bool scan_dir_v, uint8_t black_threshold,
+                                uint8_t area_threshold, uint64_t intensity,
+                                const int32_t *exclusions, int exclusion_count,
+                                UnpaperCudaStream *stream) {
+  // Blackfilter uses flood-fill which is inherently sequential.
+  // The OpenCV CCL approach doesn't directly map to the original algorithm.
+  // Return false to fall back to custom CUDA implementation.
+  (void)src_device;
+  (void)width;
+  (void)height;
+  (void)pitch_bytes;
+  (void)format;
+  (void)scan_size_w;
+  (void)scan_size_h;
+  (void)scan_depth_h;
+  (void)scan_depth_v;
+  (void)scan_step_h;
+  (void)scan_step_v;
+  (void)scan_dir_h;
+  (void)scan_dir_v;
+  (void)black_threshold;
+  (void)area_threshold;
+  (void)intensity;
+  (void)exclusions;
+  (void)exclusion_count;
+  (void)stream;
+  return false;
+}

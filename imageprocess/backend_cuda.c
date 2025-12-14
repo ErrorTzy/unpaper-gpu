@@ -55,6 +55,7 @@ static void *k_noisefilter_build_labels;
 static void *k_noisefilter_propagate;
 static void *k_noisefilter_count;
 static void *k_noisefilter_apply;
+static void *k_noisefilter_apply_mask;
 static void *k_blackfilter_floodfill_rect;
 static void *k_detect_edge_rotation_peaks;
 static void *k_rotate_bytes;
@@ -111,6 +112,8 @@ static void ensure_kernels_loaded(void) {
       cuda_module, "unpaper_noisefilter_count");
   k_noisefilter_apply = unpaper_cuda_module_get_function(
       cuda_module, "unpaper_noisefilter_apply");
+  k_noisefilter_apply_mask = unpaper_cuda_module_get_function(
+      cuda_module, "unpaper_noisefilter_apply_mask");
   k_blackfilter_floodfill_rect = unpaper_cuda_module_get_function(
       cuda_module, "unpaper_blackfilter_floodfill_rect");
   k_detect_edge_rotation_peaks = unpaper_cuda_module_get_function(
@@ -1420,24 +1423,16 @@ static void blackfilter_cuda(Image image, BlackfilterParameters params) {
   unpaper_cuda_free(stack_dptr);
 }
 
-static void blurfilter_cuda(Image image, BlurfilterParameters params,
-                            uint8_t abs_white_threshold) {
-  if (image.frame == NULL) {
-    return;
-  }
-
-  verboseLog(VERBOSE_NORMAL, "blur-filter...");
-
+static void blurfilter_cuda_fallback(Image image, BlurfilterParameters params,
+                                     uint8_t abs_white_threshold) {
   RectangleSize image_size = size_of_image(image);
   if (params.scan_size.width <= 0 || params.scan_size.height <= 0) {
-    verboseLog(VERBOSE_NORMAL, " deleted 0 pixels.\n");
     return;
   }
 
   const uint32_t blocks_per_row =
       (uint32_t)(image_size.width / params.scan_size.width);
   if (blocks_per_row == 0) {
-    verboseLog(VERBOSE_NORMAL, " deleted 0 pixels.\n");
     return;
   }
 
@@ -1512,6 +1507,53 @@ static void blurfilter_cuda(Image image, BlurfilterParameters params,
 
   av_free(count_buffers);
   verboseLog(VERBOSE_NORMAL, " deleted %" PRIu64 " pixels.\n", count);
+}
+
+static void blurfilter_cuda(Image image, BlurfilterParameters params,
+                            uint8_t abs_white_threshold) {
+  if (image.frame == NULL) {
+    return;
+  }
+
+  verboseLog(VERBOSE_NORMAL, "blur-filter...");
+
+  RectangleSize image_size = size_of_image(image);
+  if (params.scan_size.width <= 0 || params.scan_size.height <= 0) {
+    verboseLog(VERBOSE_NORMAL, " deleted 0 pixels.\n");
+    return;
+  }
+
+  ensure_kernels_loaded();
+  image_ensure_cuda(&image);
+  ImageCudaState *st = image_cuda_state(image);
+  if (st == NULL || st->dptr == 0) {
+    errOutput("CUDA image state missing for blurfilter.");
+  }
+
+  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+  if (fmt == UNPAPER_CUDA_FMT_INVALID) {
+    errOutput("CUDA blurfilter: unsupported pixel format.");
+  }
+
+  // Try OpenCV path for supported formats
+  if (fmt == UNPAPER_CUDA_FMT_GRAY8 || fmt == UNPAPER_CUDA_FMT_Y400A ||
+      fmt == UNPAPER_CUDA_FMT_RGB24) {
+    UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+    if (unpaper_opencv_blurfilter(
+            st->dptr, image.frame->width, image.frame->height,
+            (size_t)st->linesize, (int)fmt, params.scan_size.width,
+            params.scan_size.height, params.scan_step.horizontal,
+            params.scan_step.vertical, abs_white_threshold, params.intensity,
+            stream)) {
+      st->cuda_dirty = true;
+      st->cpu_dirty = false;
+      verboseLog(VERBOSE_NORMAL, " (OpenCV) done.\n");
+      return;
+    }
+  }
+
+  // Fallback to custom CUDA implementation
+  blurfilter_cuda_fallback(image, params, abs_white_threshold);
 }
 
 // Custom CUDA CCL-based noisefilter (fallback)
@@ -1662,89 +1704,24 @@ static bool noisefilter_cuda_opencv(Image image, uint64_t intensity,
     return false;
   }
 
-  // Now we need to apply the mask result back to the image
-  // The mask now has 0 for pixels to remove (small components were zeroed)
-  // We need to set those pixels to white in the original image
+  // Apply mask on GPU: where mask is 0 and pixel is dark, set to white
+  ensure_kernels_loaded();
 
-  // Download mask and apply to image
-  // For GRAY8, we set pixels where mask == 0 but original was dark to white
-  size_t mask_bytes = mask.pitch_bytes * (size_t)mask.height;
-  uint8_t *mask_host = av_malloc(mask_bytes);
-  if (mask_host == NULL) {
-    unpaper_opencv_mask_free(&mask);
-    return false;
-  }
+  const int img_fmt = (int)fmt;
+  const int mask_linesize = (int)mask.pitch_bytes;
+  void *params[] = {
+      &st->dptr,   &st->linesize, &img_fmt,    &w,
+      &h,          &mask.device_ptr, &mask_linesize, &min_white_level,
+  };
 
-  unpaper_cuda_memcpy_d2h(mask_host, mask.device_ptr, mask_bytes);
+  const uint32_t block_x = 16;
+  const uint32_t block_y = 16;
+  const uint32_t grid_x = ((uint32_t)w + block_x - 1) / block_x;
+  const uint32_t grid_y = ((uint32_t)h + block_y - 1) / block_y;
 
-  // Download image
-  size_t img_bytes = (size_t)st->linesize * (size_t)h;
-  uint8_t *img_host = av_malloc(img_bytes);
-  if (img_host == NULL) {
-    av_free(mask_host);
-    unpaper_opencv_mask_free(&mask);
-    return false;
-  }
+  unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_apply_mask, grid_x,
+                                       grid_y, 1, block_x, block_y, 1, params);
 
-  unpaper_cuda_memcpy_d2h(img_host, st->dptr, img_bytes);
-
-  // Apply: where mask was originally 255 (dark) but now is 0 (removed),
-  // set pixel to white
-  for (int y = 0; y < h; y++) {
-    uint8_t *img_row = img_host + (size_t)y * (size_t)st->linesize;
-    const uint8_t *mask_row = mask_host + (size_t)y * mask.pitch_bytes;
-    for (int x = 0; x < w; x++) {
-      if (mask_row[x] != 0) {
-        continue; // Pixel is in a large component, keep as-is
-      }
-      // Check if pixel was originally dark (needs to be whitened)
-      uint8_t lightness;
-      switch (fmt) {
-      case UNPAPER_CUDA_FMT_GRAY8:
-        lightness = img_row[x];
-        break;
-      case UNPAPER_CUDA_FMT_Y400A:
-        lightness = img_row[x * 2];
-        break;
-      case UNPAPER_CUDA_FMT_RGB24: {
-        const uint8_t *p = img_row + x * 3;
-        const uint8_t max_rg = (p[0] > p[1]) ? p[0] : p[1];
-        const uint8_t min_rg = (p[0] < p[1]) ? p[0] : p[1];
-        const uint8_t max_rgb = (max_rg > p[2]) ? max_rg : p[2];
-        const uint8_t min_rgb = (min_rg < p[2]) ? min_rg : p[2];
-        lightness = (uint8_t)((max_rgb + min_rgb) / 2);
-        break;
-      }
-      default:
-        continue;
-      }
-
-      if (lightness < min_white_level) {
-        // Pixel was dark but in a small component (removed), set to white
-        switch (fmt) {
-        case UNPAPER_CUDA_FMT_GRAY8:
-          img_row[x] = 255;
-          break;
-        case UNPAPER_CUDA_FMT_Y400A:
-          img_row[x * 2] = 255; // Set Y to white, keep alpha
-          break;
-        case UNPAPER_CUDA_FMT_RGB24: {
-          uint8_t *p = img_row + x * 3;
-          p[0] = p[1] = p[2] = 255;
-          break;
-        }
-        default:
-          break;
-        }
-      }
-    }
-  }
-
-  // Upload modified image back
-  unpaper_cuda_memcpy_h2d(st->dptr, img_host, img_bytes);
-
-  av_free(img_host);
-  av_free(mask_host);
   unpaper_opencv_mask_free(&mask);
 
   st->cuda_dirty = true;
@@ -1796,15 +1773,9 @@ static void noisefilter_cuda(Image image, uint64_t intensity,
   noisefilter_cuda_custom(image, intensity, min_white_level);
 }
 
-static void grayfilter_cuda(Image image, GrayfilterParameters params) {
-  if (image.frame == NULL) {
-    return;
-  }
-
+static void grayfilter_cuda_fallback(Image image, GrayfilterParameters params) {
   RectangleSize image_size = size_of_image(image);
   Point filter_origin = POINT_ORIGIN;
-
-  verboseLog(VERBOSE_NORMAL, "gray-filter...");
 
   do {
     Rectangle area = rectangle_from_size(filter_origin, params.scan_size);
@@ -1825,7 +1796,46 @@ static void grayfilter_cuda(Image image, GrayfilterParameters params) {
       filter_origin.y += params.scan_step.vertical;
     }
   } while (filter_origin.y <= image_size.height);
+}
 
+static void grayfilter_cuda(Image image, GrayfilterParameters params) {
+  if (image.frame == NULL) {
+    return;
+  }
+
+  verboseLog(VERBOSE_NORMAL, "gray-filter...");
+
+  ensure_kernels_loaded();
+  image_ensure_cuda(&image);
+  ImageCudaState *st = image_cuda_state(image);
+  if (st == NULL || st->dptr == 0) {
+    errOutput("CUDA image state missing for grayfilter.");
+  }
+
+  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+  if (fmt == UNPAPER_CUDA_FMT_INVALID) {
+    errOutput("CUDA grayfilter: unsupported pixel format.");
+  }
+
+  // Try OpenCV path for supported formats
+  if (fmt == UNPAPER_CUDA_FMT_GRAY8 || fmt == UNPAPER_CUDA_FMT_Y400A ||
+      fmt == UNPAPER_CUDA_FMT_RGB24) {
+    UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+    if (unpaper_opencv_grayfilter(
+            st->dptr, image.frame->width, image.frame->height,
+            (size_t)st->linesize, (int)fmt, params.scan_size.width,
+            params.scan_size.height, params.scan_step.horizontal,
+            params.scan_step.vertical, image.abs_black_threshold,
+            params.abs_threshold, stream)) {
+      st->cuda_dirty = true;
+      st->cpu_dirty = false;
+      verboseLog(VERBOSE_NORMAL, " (OpenCV) done.\n");
+      return;
+    }
+  }
+
+  // Fallback to custom CUDA implementation
+  grayfilter_cuda_fallback(image, params);
   verboseLog(VERBOSE_NORMAL, " deleted 0 pixels.\n");
 }
 
