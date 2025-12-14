@@ -97,6 +97,31 @@ To check which backends are active at runtime, use `--perf`:
     unpaper$ ./builddir-cuda/unpaper --perf --device=cuda input.pgm output.pgm
     # Output includes: perf backends: device=cuda opencv=yes ccl=yes
 
+### Recommended Pixel Formats for CUDA
+
+For best CUDA performance, use these pixel formats:
+
+| Image Type | Recommended Format | Notes |
+|------------|-------------------|-------|
+| **Grayscale** | **GRAY8** (8-bit grayscale) | Full OpenCV CUDA acceleration |
+| **Color** | **RGB24** (24-bit RGB) | Full OpenCV CUDA acceleration |
+
+These formats benefit from optimized OpenCV CUDA primitives including
+`cv::cuda::transpose`, `cv::cuda::flip`, and `cv::cuda::warpAffine`.
+
+Other formats like Y400A (grayscale with alpha) and 1-bit mono (MONOWHITE,
+MONOBLACK) are supported but use custom CUDA kernels since OpenCV lacks
+native support for 2-channel and bit-packed images.
+
+FFmpeg automatically selects pixel format based on input. To ensure optimal
+format, you can pre-convert images:
+
+    # Convert to GRAY8 for grayscale scans
+    ffmpeg -i input.tiff -pix_fmt gray output.pgm
+
+    # Convert to RGB24 for color scans
+    ffmpeg -i input.tiff -pix_fmt rgb24 output.ppm
+
 Development Hints
 -----------------
 
