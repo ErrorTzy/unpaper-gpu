@@ -97,6 +97,7 @@ if have_cuda
         'imageprocess/backend_cuda.c',
         'imageprocess/cuda_runtime.c',
         'imageprocess/opencv_bridge.cpp',
+        'imageprocess/opencv_ops.cpp',
     ]
     unpaper_deps += [cc.find_library('dl', required : false)]
 
@@ -217,6 +218,7 @@ if have_cuda
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
             'imageprocess/opencv_bridge.cpp',
+            'imageprocess/opencv_ops.cpp',
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
@@ -246,6 +248,7 @@ if have_cuda
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
             'imageprocess/opencv_bridge.cpp',
+            'imageprocess/opencv_ops.cpp',
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
@@ -275,6 +278,7 @@ if have_cuda
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
             'imageprocess/opencv_bridge.cpp',
+            'imageprocess/opencv_ops.cpp',
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
@@ -304,6 +308,7 @@ if have_cuda
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
             'imageprocess/opencv_bridge.cpp',
+            'imageprocess/opencv_ops.cpp',
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
@@ -333,6 +338,7 @@ if have_cuda
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
             'imageprocess/opencv_bridge.cpp',
+            'imageprocess/opencv_ops.cpp',
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],

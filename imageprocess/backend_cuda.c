@@ -15,6 +15,7 @@
 #include "imageprocess/cuda_kernels_format.h"
 #include "imageprocess/cuda_runtime.h"
 #include "imageprocess/opencv_bridge.h"
+#include "imageprocess/opencv_ops.h"
 #include "lib/logging.h"
 #include "lib/math_util.h"
 
@@ -686,7 +687,6 @@ static void wipe_rectangle_cuda(Image image, Rectangle input_area, Pixel color) 
     return;
   }
 
-  ensure_kernels_loaded();
   image_ensure_cuda(&image);
   ImageCudaState *st = image_cuda_state(image);
   if (st == NULL || st->dptr == 0) {
@@ -702,6 +702,18 @@ static void wipe_rectangle_cuda(Image image, Rectangle input_area, Pixel color) 
   const int y0 = area.vertex[0].y;
   const int x1 = area.vertex[1].x;
   const int y1 = area.vertex[1].y;
+
+  // Try OpenCV path first (for non-mono formats)
+  if (unpaper_opencv_wipe_rect(st->dptr, st->width, st->height, st->linesize,
+                               (int)fmt, x0, y0, x1, y1, color.r, color.g,
+                               color.b, NULL)) {
+    st->cuda_dirty = true;
+    st->cpu_dirty = false;
+    return;
+  }
+
+  // Fall back to custom CUDA kernel for mono formats
+  ensure_kernels_loaded();
 
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
     const uint8_t gray = pixel_grayscale(color);
@@ -721,21 +733,8 @@ static void wipe_rectangle_cuda(Image image, Rectangle input_area, Pixel color) 
     unpaper_cuda_launch_kernel(k_wipe_rect_mono, grid_x, grid_y, 1, block_x,
                                block_y, 1, params);
   } else {
-    const int bpp = bytes_per_pixel_from_av(image.frame->format);
-    const uint8_t gray = pixel_grayscale(color);
-    const uint8_t c0 = (bpp == 3) ? color.r : gray;
-    const uint8_t c1 = (bpp == 3) ? color.g : 0xFFu;
-    const uint8_t c2 = (bpp == 3) ? color.b : 0u;
-
-    void *params[] = {
-        &st->dptr, &st->linesize, &x0, &y0, &x1, &y1, &bpp, &c0, &c1, &c2,
-    };
-    const uint32_t block_x = 16;
-    const uint32_t block_y = 16;
-    const uint32_t grid_x = ((uint32_t)sz.width + block_x - 1) / block_x;
-    const uint32_t grid_y = ((uint32_t)sz.height + block_y - 1) / block_y;
-    unpaper_cuda_launch_kernel(k_wipe_rect_bytes, grid_x, grid_y, 1, block_x,
-                               block_y, 1, params);
+    // This should not happen since OpenCV should handle all byte formats
+    errOutput("CUDA wipe_rectangle: OpenCV failed for byte format.");
   }
 
   st->cuda_dirty = true;
@@ -812,8 +811,6 @@ static void copy_rectangle_cuda(Image source, Image target,
     return;
   }
 
-  ensure_kernels_loaded();
-
   image_ensure_cuda(&source);
   image_ensure_cuda(&target);
 
@@ -829,6 +826,20 @@ static void copy_rectangle_cuda(Image source, Image target,
   if (src_fmt == UNPAPER_CUDA_FMT_INVALID || dst_fmt == UNPAPER_CUDA_FMT_INVALID) {
     errOutput("CUDA copy_rectangle: unsupported pixel format.");
   }
+
+  // Try OpenCV path first (for same non-mono formats)
+  if (unpaper_opencv_copy_rect(src_st->dptr, src_st->width, src_st->height,
+                               src_st->linesize, (int)src_fmt, dst_st->dptr,
+                               dst_st->width, dst_st->height, dst_st->linesize,
+                               (int)dst_fmt, src_x0, src_y0, dst_x0, dst_y0, w,
+                               h, NULL)) {
+    dst_st->cuda_dirty = true;
+    dst_st->cpu_dirty = false;
+    return;
+  }
+
+  // Fall back to custom CUDA kernel for mono formats or format conversion
+  ensure_kernels_loaded();
 
   if (dst_fmt == UNPAPER_CUDA_FMT_MONOWHITE ||
       dst_fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
@@ -901,7 +912,6 @@ static void flip_rotate_90_cuda(Image *pImage, RotationDirection direction) {
     errOutput("invalid rotation direction.");
   }
 
-  ensure_kernels_loaded();
   image_ensure_cuda(pImage);
   ImageCudaState *src_st = image_cuda_state(*pImage);
   if (src_st == NULL || src_st->dptr == 0) {
@@ -923,6 +933,21 @@ static void flip_rotate_90_cuda(Image *pImage, RotationDirection direction) {
     errOutput("CUDA flip_rotate_90: unsupported pixel format.");
   }
 
+  // Try OpenCV path first (for GRAY8 format only, as OpenCV transpose
+  // doesn't support 2 or 3 byte element sizes)
+  bool clockwise = (direction == ROTATE_CLOCKWISE);
+  if (unpaper_opencv_rotate90(src_st->dptr, src_st->width, src_st->height,
+                              src_st->linesize, dst_st->dptr, dst_st->linesize,
+                              (int)fmt, clockwise, NULL)) {
+    dst_st->cuda_dirty = true;
+    dst_st->cpu_dirty = false;
+    replace_image(pImage, &newimage);
+    return;
+  }
+
+  // Fall back to custom CUDA kernel for mono, RGB24, and Y400A formats
+  ensure_kernels_loaded();
+
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
     const int dir = (int)direction;
     void *params[] = {
@@ -939,6 +964,7 @@ static void flip_rotate_90_cuda(Image *pImage, RotationDirection direction) {
     unpaper_cuda_launch_kernel(k_rotate90_mono, grid_x, grid_y, 1, block_x,
                                block_y, 1, params);
   } else {
+    // Use custom kernel for RGB24 and Y400A (OpenCV transpose doesn't support)
     const int dir = (int)direction;
     void *params[] = {
         &src_st->dptr, &src_st->linesize, &dst_st->dptr, &dst_st->linesize,
@@ -963,7 +989,6 @@ static void mirror_cuda(Image image, Direction direction) {
     return;
   }
 
-  ensure_kernels_loaded();
   image_ensure_cuda(&image);
   ImageCudaState *st = image_cuda_state(image);
   if (st == NULL || st->dptr == 0) {
@@ -976,6 +1001,20 @@ static void mirror_cuda(Image image, Direction direction) {
   }
 
   const uint64_t new_dptr = unpaper_cuda_malloc(st->bytes);
+
+  // Try OpenCV path first (for non-mono formats)
+  if (unpaper_opencv_mirror(st->dptr, new_dptr, st->width, st->height,
+                            st->linesize, (int)fmt, direction.horizontal,
+                            direction.vertical, NULL)) {
+    unpaper_cuda_free(st->dptr);
+    st->dptr = new_dptr;
+    st->cuda_dirty = true;
+    st->cpu_dirty = false;
+    return;
+  }
+
+  // Fall back to custom CUDA kernel for mono formats
+  ensure_kernels_loaded();
   unpaper_cuda_memcpy_d2d(new_dptr, st->dptr, st->bytes);
 
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
@@ -993,18 +1032,9 @@ static void mirror_cuda(Image image, Direction direction) {
     unpaper_cuda_launch_kernel(k_mirror_mono, grid_x, grid_y, 1, block_x,
                                block_y, 1, params);
   } else {
-    const int do_h = direction.horizontal ? 1 : 0;
-    const int do_v = direction.vertical ? 1 : 0;
-    void *params[] = {
-        &st->dptr, &st->linesize, &new_dptr, &st->linesize, &fmt, &st->width,
-        &st->height, &do_h, &do_v,
-    };
-    const uint32_t block_x = 16;
-    const uint32_t block_y = 16;
-    const uint32_t grid_x = ((uint32_t)st->width + block_x - 1) / block_x;
-    const uint32_t grid_y = ((uint32_t)st->height + block_y - 1) / block_y;
-    unpaper_cuda_launch_kernel(k_mirror_bytes, grid_x, grid_y, 1, block_x,
-                               block_y, 1, params);
+    // This should not happen since OpenCV should handle all byte formats
+    unpaper_cuda_free(new_dptr);
+    errOutput("CUDA mirror: OpenCV failed for byte format.");
   }
 
   unpaper_cuda_free(st->dptr);

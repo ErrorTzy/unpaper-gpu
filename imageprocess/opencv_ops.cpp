@@ -1,0 +1,330 @@
+// SPDX-FileCopyrightText: 2025 The unpaper authors
+//
+// SPDX-License-Identifier: GPL-2.0-only
+
+#include "imageprocess/opencv_ops.h"
+#include "imageprocess/cuda_kernels_format.h"
+
+#include <cstring>
+#include <exception>
+
+#include <cuda_runtime.h>
+#include <opencv2/core/cuda.hpp>
+#include <opencv2/core/cuda_stream_accessor.hpp>
+
+#if __has_include(<opencv2/cudaarithm.hpp>)
+#include <opencv2/cudaarithm.hpp>
+#endif
+
+static inline int opencv_type_from_format(UnpaperCudaFormat fmt) {
+  switch (fmt) {
+  case UNPAPER_CUDA_FMT_GRAY8:
+    return CV_8UC1;
+  case UNPAPER_CUDA_FMT_Y400A:
+    return CV_8UC2;
+  case UNPAPER_CUDA_FMT_RGB24:
+    return CV_8UC3;
+  default:
+    return -1;
+  }
+}
+
+static inline bool is_mono_format(UnpaperCudaFormat fmt) {
+  return fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK;
+}
+
+static inline cv::cuda::Stream get_cv_stream(UnpaperCudaStream *stream) {
+  cudaStream_t cuda_stream = nullptr;
+  if (stream != nullptr) {
+    cuda_stream =
+        static_cast<cudaStream_t>(unpaper_cuda_stream_get_raw_handle(stream));
+  }
+  return cv::cuda::StreamAccessor::wrapStream(cuda_stream);
+}
+
+bool unpaper_opencv_wipe_rect(uint64_t dst_device, int dst_width, int dst_height,
+                              size_t dst_pitch, int dst_format, int x0, int y0,
+                              int x1, int y1, uint8_t r, uint8_t g, uint8_t b,
+                              UnpaperCudaStream *stream) {
+#ifdef HAVE_OPENCV_CUDAARITHM
+  auto fmt = static_cast<UnpaperCudaFormat>(dst_format);
+  if (is_mono_format(fmt)) {
+    return false; // Mono formats handled by custom kernel
+  }
+
+  int cv_type = opencv_type_from_format(fmt);
+  if (cv_type < 0 || dst_device == 0) {
+    return false;
+  }
+
+  // Validate and clamp rectangle bounds
+  if (x0 > x1 || y0 > y1) {
+    return true; // Empty rectangle, nothing to do
+  }
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 >= dst_width) x1 = dst_width - 1;
+  if (y1 >= dst_height) y1 = dst_height - 1;
+  if (x0 > x1 || y0 > y1) {
+    return true; // Rectangle fully outside image
+  }
+
+  try {
+    cv::cuda::Stream cv_stream = get_cv_stream(stream);
+
+    // Wrap the full image as GpuMat
+    cv::cuda::GpuMat dst(dst_height, dst_width, cv_type,
+                         reinterpret_cast<void *>(dst_device), dst_pitch);
+
+    // Create ROI for the rectangle
+    int rect_w = x1 - x0 + 1;
+    int rect_h = y1 - y0 + 1;
+    cv::cuda::GpuMat roi = dst(cv::Rect(x0, y0, rect_w, rect_h));
+
+    // Set the ROI to the fill color
+    cv::Scalar color;
+    switch (fmt) {
+    case UNPAPER_CUDA_FMT_GRAY8:
+      color = cv::Scalar((r + g + b) / 3);
+      break;
+    case UNPAPER_CUDA_FMT_Y400A:
+      color = cv::Scalar((r + g + b) / 3, 255);
+      break;
+    case UNPAPER_CUDA_FMT_RGB24:
+      color = cv::Scalar(r, g, b);
+      break;
+    default:
+      return false;
+    }
+
+    roi.setTo(color, cv_stream);
+    return true;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "OpenCV wipe_rect failed: %s\n", e.what());
+    return false;
+  }
+#else
+  (void)dst_device;
+  (void)dst_width;
+  (void)dst_height;
+  (void)dst_pitch;
+  (void)dst_format;
+  (void)x0;
+  (void)y0;
+  (void)x1;
+  (void)y1;
+  (void)r;
+  (void)g;
+  (void)b;
+  (void)stream;
+  return false;
+#endif
+}
+
+bool unpaper_opencv_copy_rect(uint64_t src_device, int src_width, int src_height,
+                              size_t src_pitch, int src_format,
+                              uint64_t dst_device, int dst_width, int dst_height,
+                              size_t dst_pitch, int dst_format, int src_x0,
+                              int src_y0, int dst_x0, int dst_y0, int copy_w,
+                              int copy_h, UnpaperCudaStream *stream) {
+#ifdef HAVE_OPENCV_CUDAARITHM
+  auto sfmt = static_cast<UnpaperCudaFormat>(src_format);
+  auto dfmt = static_cast<UnpaperCudaFormat>(dst_format);
+
+  // Mono formats require custom kernel for bit manipulation
+  if (is_mono_format(sfmt) || is_mono_format(dfmt)) {
+    return false;
+  }
+
+  // Format conversion between different byte formats requires custom kernel
+  if (sfmt != dfmt) {
+    return false;
+  }
+
+  int cv_type = opencv_type_from_format(sfmt);
+  if (cv_type < 0 || src_device == 0 || dst_device == 0) {
+    return false;
+  }
+
+  if (copy_w <= 0 || copy_h <= 0) {
+    return true; // Nothing to copy
+  }
+
+  // Validate bounds
+  if (src_x0 < 0 || src_y0 < 0 || src_x0 + copy_w > src_width ||
+      src_y0 + copy_h > src_height) {
+    return false; // Source out of bounds
+  }
+  if (dst_x0 < 0 || dst_y0 < 0 || dst_x0 + copy_w > dst_width ||
+      dst_y0 + copy_h > dst_height) {
+    return false; // Destination out of bounds
+  }
+
+  try {
+    cv::cuda::Stream cv_stream = get_cv_stream(stream);
+
+    // Wrap images as GpuMat
+    cv::cuda::GpuMat src(src_height, src_width, cv_type,
+                         reinterpret_cast<void *>(src_device), src_pitch);
+    cv::cuda::GpuMat dst(dst_height, dst_width, cv_type,
+                         reinterpret_cast<void *>(dst_device), dst_pitch);
+
+    // Create ROIs
+    cv::cuda::GpuMat src_roi = src(cv::Rect(src_x0, src_y0, copy_w, copy_h));
+    cv::cuda::GpuMat dst_roi = dst(cv::Rect(dst_x0, dst_y0, copy_w, copy_h));
+
+    // Copy using OpenCV
+    src_roi.copyTo(dst_roi, cv_stream);
+    return true;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "OpenCV copy_rect failed: %s\n", e.what());
+    return false;
+  }
+#else
+  (void)src_device;
+  (void)src_width;
+  (void)src_height;
+  (void)src_pitch;
+  (void)src_format;
+  (void)dst_device;
+  (void)dst_width;
+  (void)dst_height;
+  (void)dst_pitch;
+  (void)dst_format;
+  (void)src_x0;
+  (void)src_y0;
+  (void)dst_x0;
+  (void)dst_y0;
+  (void)copy_w;
+  (void)copy_h;
+  (void)stream;
+  return false;
+#endif
+}
+
+bool unpaper_opencv_mirror(uint64_t src_device, uint64_t dst_device, int width,
+                           int height, size_t pitch, int format, bool horizontal,
+                           bool vertical, UnpaperCudaStream *stream) {
+#ifdef HAVE_OPENCV_CUDAARITHM
+  auto fmt = static_cast<UnpaperCudaFormat>(format);
+  if (is_mono_format(fmt)) {
+    return false; // Mono formats handled by custom kernel
+  }
+
+  int cv_type = opencv_type_from_format(fmt);
+  if (cv_type < 0 || src_device == 0 || dst_device == 0) {
+    return false;
+  }
+
+  if (!horizontal && !vertical) {
+    // No flip needed, just copy if src != dst
+    if (src_device != dst_device) {
+      cudaMemcpy(reinterpret_cast<void *>(dst_device),
+                 reinterpret_cast<void *>(src_device), pitch * height,
+                 cudaMemcpyDeviceToDevice);
+    }
+    return true;
+  }
+
+  try {
+    cv::cuda::Stream cv_stream = get_cv_stream(stream);
+
+    cv::cuda::GpuMat src(height, width, cv_type,
+                         reinterpret_cast<void *>(src_device), pitch);
+    cv::cuda::GpuMat dst(height, width, cv_type,
+                         reinterpret_cast<void *>(dst_device), pitch);
+
+    // OpenCV flip codes:
+    // 0 = vertical flip (around x-axis)
+    // 1 = horizontal flip (around y-axis)
+    // -1 = both horizontal and vertical flip
+    int flip_code;
+    if (horizontal && vertical) {
+      flip_code = -1;
+    } else if (horizontal) {
+      flip_code = 1;
+    } else {
+      flip_code = 0;
+    }
+
+    cv::cuda::flip(src, dst, flip_code, cv_stream);
+    return true;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "OpenCV mirror failed: %s\n", e.what());
+    return false;
+  }
+#else
+  (void)src_device;
+  (void)dst_device;
+  (void)width;
+  (void)height;
+  (void)pitch;
+  (void)format;
+  (void)horizontal;
+  (void)vertical;
+  (void)stream;
+  return false;
+#endif
+}
+
+bool unpaper_opencv_rotate90(uint64_t src_device, int src_width, int src_height,
+                             size_t src_pitch, uint64_t dst_device,
+                             size_t dst_pitch, int format, bool clockwise,
+                             UnpaperCudaStream *stream) {
+#ifdef HAVE_OPENCV_CUDAARITHM
+  auto fmt = static_cast<UnpaperCudaFormat>(format);
+  if (is_mono_format(fmt)) {
+    return false; // Mono formats handled by custom kernel
+  }
+
+  // OpenCV CUDA transpose only supports elemSize of 1, 4, or 8 bytes.
+  // RGB24 (3 bytes) and Y400A (2 bytes) are not supported.
+  // Only GRAY8 (1 byte) works with transpose.
+  if (fmt != UNPAPER_CUDA_FMT_GRAY8) {
+    return false; // Fall back to custom kernel for RGB24 and Y400A
+  }
+
+  int cv_type = opencv_type_from_format(fmt);
+  if (cv_type < 0 || src_device == 0 || dst_device == 0) {
+    return false;
+  }
+
+  // Destination dimensions are swapped for 90-degree rotation
+  int dst_width = src_height;
+  int dst_height = src_width;
+
+  try {
+    cv::cuda::Stream cv_stream = get_cv_stream(stream);
+
+    cv::cuda::GpuMat src(src_height, src_width, cv_type,
+                         reinterpret_cast<void *>(src_device), src_pitch);
+    cv::cuda::GpuMat dst(dst_height, dst_width, cv_type,
+                         reinterpret_cast<void *>(dst_device), dst_pitch);
+
+    // For 90-degree rotation, use transpose + flip:
+    // - Clockwise: transpose, then flip horizontally (flip_code = 1)
+    // - Counter-clockwise: transpose, then flip vertically (flip_code = 0)
+    cv::cuda::GpuMat transposed;
+    cv::cuda::transpose(src, transposed, cv_stream);
+
+    int flip_code = clockwise ? 1 : 0;
+    cv::cuda::flip(transposed, dst, flip_code, cv_stream);
+
+    return true;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "OpenCV rotate90 failed: %s\n", e.what());
+    return false;
+  }
+#else
+  (void)src_device;
+  (void)src_width;
+  (void)src_height;
+  (void)src_pitch;
+  (void)dst_device;
+  (void)dst_pitch;
+  (void)format;
+  (void)clockwise;
+  (void)stream;
+  return false;
+#endif
+}
