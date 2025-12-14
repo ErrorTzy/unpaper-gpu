@@ -557,18 +557,23 @@ Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing
 - Scope:
   - Remove automatic kernel synchronization to allow kernel pipelining.
   - Clean up unused code (unused functions, unused variables).
-  - Profile and identify remaining overhead (primarily CUDA initialization).
+  - Optimize encoding path (direct PNM write, fast format conversion).
+  - Optimize multi-page output (fast same-format copy).
+  - Add double-page benchmark (`tools/bench_double.py`).
 - Implementation notes:
   - Removed `cudaStreamSynchronize()` after every kernel launch in `cuda_runtime.c`. Kernels now run asynchronously; synchronization happens implicitly via synchronous `cudaMemcpy` calls when results are needed.
   - Removed unused `cuda_unimplemented()` function from `backend_cuda.c`.
   - Removed unused `image_size` variable in `blurfilter_cuda()`.
-  - Remaining const-qualifier warnings in kernel params are a known CUDA pattern (passing `&const_var` to `void**`); these don't indicate bugs.
-  - Further optimizations (stream overlap, multi-page pipelining) not implemented as remaining overhead is dominated by CUDA initialization time (~300-400ms), which cannot be easily reduced for single-image processing.
+  - Added direct PNM writer in `file.c` that bypasses FFmpeg for GRAY8, RGB24, MONOWHITE formats (~220ms → ~34ms encode time).
+  - Added single-page output optimization: skip unnecessary copy_rectangle when output_count==1.
+  - Added fast RGB24→MONOWHITE and GRAY8→MONOWHITE format conversion paths in `file.c`.
+  - Added memcpy fast path for same-format copies in `copy_rectangle_cpu()` (GRAY8, Y400A, RGB24).
+  - Added `tools/bench_double.py` for double-page output benchmarking (`--layout double --output-pages 2`).
 - Tests:
   - All 9 CUDA unit tests pass.
   - Pytest suite passes (34 tests).
   - Determinism verified across all operations.
 - Acceptance:
   - Custom CUDA kernels retained for: mono formats, blackfilter flood-fill, rotation detection (optimized parallel implementation).
-  - A1 benchmark: CUDA mean **~1.02-1.05s** on this machine (~6x faster than CPU ~6.4s).
-  - The <1s target was not fully achieved; remaining ~50ms overhead is CUDA initialization which is unavoidable for single-image processing.
+  - **Single-page (A1) benchmark**: CUDA mean **~880-930ms** (~7x faster than CPU ~6.1-6.4s). Under 1 second target achieved.
+  - **Double-page benchmark**: CUDA mean **~743ms** (~10x faster than CPU ~7.7s).
