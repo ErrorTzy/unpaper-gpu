@@ -551,11 +551,8 @@ void unpaper_cuda_launch_kernel(void *func, uint32_t grid_x, uint32_t grid_y,
     errOutput("CUDA kernel launch failed: %s", cu_err(res));
   }
 
-  // Synchronize after launch
-  cudaError_t err = cudaStreamSynchronize(s);
-  if (err != cudaSuccess) {
-    errOutput("CUDA stream synchronize failed: %s", cudaGetErrorString(err));
-  }
+  // Note: No automatic sync here - cudaMemcpy calls are synchronous and will
+  // implicitly wait for kernels to complete. This allows kernel pipelining.
 }
 
 void unpaper_cuda_launch_kernel_on_stream(UnpaperCudaStream *stream,

@@ -61,11 +61,6 @@ static void *k_detect_edge_rotation_peaks;
 static void *k_rotate_bytes;
 static void *k_rotate_mono;
 
-static void cuda_unimplemented(const char *op_name) {
-  errOutput("CUDA backend selected, but it is not implemented yet (%s).",
-            op_name);
-}
-
 static void ensure_kernels_loaded(void) {
   if (cuda_module != NULL) {
     return;
@@ -1532,7 +1527,6 @@ static void blurfilter_cuda(Image image, BlurfilterParameters params,
 
   verboseLog(VERBOSE_NORMAL, "blur-filter...");
 
-  RectangleSize image_size = size_of_image(image);
   if (params.scan_size.width <= 0 || params.scan_size.height <= 0) {
     verboseLog(VERBOSE_NORMAL, " deleted 0 pixels.\n");
     return;
