@@ -377,69 +377,156 @@ Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing
 - Acceptance:
   - Optional dependency well-documented; behavior predictable when absent.
 
-**PR 13: Rewrite CUDA noisefilter for parallelism (largest single win)**
+### OpenCV-Based GPU Backend Rewrite (PR13-PR18)
 
-- Status: incomplete (2025-12-13; performance target unmet; introducing OpenCV, see PR12.1-PR12.5)
-- Scope:
-  - Replace the current effectively-serial CUDA noisefilter kernel with a GPU-parallel implementation.
-  - Preferred algorithm: connected-components labeling (CCL) on the “dark” mask (`lightness < min_white_level`) and removal of components with size `<= intensity`.
-    - Use NPP if available, otherwise implement deterministic CUDA CCL (label propagation/union-find).
-  - Ensure deterministic results in CUDA mode (run-to-run identical output).
-- Tests:
-  - Extend `tests/cuda_filters_test.c` noisefilter coverage (including determinism checks on non-trivial patterns).
-  - Keep existing `pytest` golden tests passing; update/extend tolerances only if justified and agreed.
-- Acceptance:
-  - `A1` CUDA runtime drops materially (expected step change); use PR11 harness to verify.
+**Strategy pivot**: Make OpenCV with CUDA a mandatory dependency for `--device=cuda` builds. This allows replacing custom CUDA kernels with highly-optimized OpenCV CUDA functions, reducing maintenance burden and improving performance.
 
-**PR 14: Remove CPU-driven tile loops (CUDA grayfilter + blurfilter)**
+**Key technical considerations**:
+1. **CUDA context model**: The current code uses `cuCtxCreate` (Driver API) which is incompatible with OpenCV's Runtime API (`cudaMalloc`). Must switch to Runtime API for OpenCV compatibility.
+2. **Memory management**: Use `cv::cuda::GpuMat` for all GPU-resident images; wrap existing allocations or re-allocate via `cudaMalloc`.
+3. **Mono format handling**: OpenCV doesn't natively support 1-bit packed images. Strategy: convert mono ↔ 8-bit on GPU or keep minimal custom kernels for mono.
+4. **Format mapping**: GRAY8 → CV_8UC1, Y400A → CV_8UC2, RGB24 → CV_8UC3.
 
-- Status: planned
-- Scope:
-  - Replace CPU loops that repeatedly launch scalar reduction kernels (and copy scalars D2H) with bulk GPU passes:
-    - one kernel computes per-tile stats across the full grid
-    - one kernel applies wipes for all tiles in one pass
-  - Eliminate per-tile device malloc/free in hot paths (use PR12 scratch/pool).
-- Tests:
-  - Existing CPU + CUDA suites.
-  - Add regression patterns for edge-case thresholds (small synthetic fixtures).
-- Acceptance:
-  - Primary gate: `A1` CUDA mean **< 2.5s** on this machine.
+**OpenCV CUDA modules required**:
+- `cudaarithm`: arithmetic, comparisons, reductions, threshold
+- `cudaimgproc`: connected components, color conversion, histograms
+- `cudawarping`: resize, warpAffine, rotate
+- `cudafilters`: morphology (optional, for blackfilter optimization)
 
-**PR 15: Fix CUDA blackfilter bottlenecks (remove serial flood-fill + reduce sync)**
+**Custom kernel → OpenCV replacement mapping**:
+| Custom Kernel | OpenCV Replacement | Module |
+|---------------|-------------------|--------|
+| wipe_rect | `GpuMat::setTo()` with ROI | core |
+| copy_rect | `GpuMat::copyTo()` with ROI | core |
+| mirror | `cv::cuda::flip()` | cudaarithm |
+| rotate90 | `cv::cuda::rotate()` or transpose+flip | cudawarping |
+| stretch/resize | `cv::cuda::resize()` | cudawarping |
+| rotate (deskew) | `cv::cuda::warpAffine()` | cudawarping |
+| count_brightness | `cv::cuda::threshold()` + `countNonZero()` | cudaarithm |
+| sum_lightness | `cv::cuda::min()` + `sum()` | cudaarithm |
+| noisefilter CCL | `cv::cuda::connectedComponents()` | cudaimgproc |
+| blackfilter | `cv::cuda::threshold()` + morphology + CCL | cudaimgproc |
 
-- Status: planned
-- Scope:
-  - Replace serial flood-fill behavior with a GPU-parallel approach (prefer CCL-based removal on a near-black mask; optional morphology to emulate “intensity” tolerance).
-  - Batch stripe/area statistics on GPU (avoid per-rectangle reductions with D2H feedback loops).
-- Tests:
-  - Extend `tests/cuda_filters_test.c` blackfilter coverage and determinism.
-- Acceptance:
-  - Worst-case “many dark regions” inputs improve materially without breaking parity tolerances.
-
-**PR 16: Multi-page scheduler (pipeline decode ⇄ GPU ⇄ encode)**
+**PR 13: Make OpenCV mandatory + Fix CUDA context model**
 
 - Status: planned
 - Scope:
-  - Add a multi-stage pipeline for multi-page runs:
-    - decode next page(s) while GPU processes current page
-    - encode previous page while GPU processes next page
-  - Add `--jobs N` (default 1); when `--device=cuda` and multi-page input is used, allow higher parallelism (bounded) for throughput.
-  - Preserve output ordering and keep debug outputs correct.
+  - Make OpenCV (with CUDA modules) a required dependency for `-Dcuda=enabled` builds.
+  - Remove `opencv_bridge_stub.c` and the `-Dopencv=` option; OpenCV is now implicit with CUDA.
+  - Switch CUDA runtime from Driver API (`cuCtxCreate`, `cuMemAlloc`) to Runtime API (`cudaMalloc`, `cudaFree`) for OpenCV compatibility.
+  - Update `cuda_runtime.c` to use `cudaMalloc`/`cudaFree` instead of `cuMemAlloc`/`cuMemFree`.
+  - Update `opencv_bridge.cpp` to work directly with our GpuMat-compatible allocations (no D2H→H2D round-trips).
+  - Update build system: require `opencv4` with `cudaarithm`, `cudaimgproc`, `cudawarping` when `-Dcuda=enabled`.
+  - Update documentation (README.md, man page) to reflect mandatory OpenCV dependency.
 - Tests:
-  - Extend `tests/unpaper_tests.py` to exercise `--jobs` for multi-page cases (skip if CUDA runtime unavailable).
-  - Add a determinism check under CUDA with `--jobs > 1`.
+  - All existing CUDA tests must pass.
+  - Verify noisefilter uses OpenCV CCL directly without fallback.
 - Acceptance:
-  - Multi-page throughput improves significantly (target: ≥2× pages/sec vs `--jobs=1` on GPU-friendly workloads).
+  - `--device=cuda` requires OpenCV at build time; fails clearly if unavailable.
+  - No Driver API usage remains in the codebase.
+  - A1 benchmark performance maintained or improved.
 
-**PR 17: FFmpeg NVIDIA hwaccel (NVDEC) when `--device=cuda`**
+**PR 14: OpenCV primitives (wipe, copy, mirror, rotate90)**
 
 - Status: planned
 - Scope:
-  - Add `--hwaccel=auto|cuda|none` (default `auto`).
-  - When `--device=cuda` and hwaccel is enabled, create an FFmpeg CUDA hw device context and decode into hardware frames when supported by the input codec.
-  - Avoid CPU staging for decoded frames: import CUDA frames into the `Image` GPU residency and convert formats on-GPU as needed.
-  - Fall back cleanly to software decode when unsupported, without silent “CUDA disabled” behavior for processing.
+  - Create `opencv_ops.cpp` with C API wrappers for OpenCV CUDA primitives.
+  - Replace `wipe_rectangle_cuda` with `cv::cuda::GpuMat::setTo()` via ROI.
+  - Replace `copy_rectangle_cuda` with `cv::cuda::GpuMat::copyTo()` via ROI.
+  - Replace `mirror_cuda` with `cv::cuda::flip()`.
+  - Replace `flip_rotate_90_cuda` with `cv::cuda::rotate()` or transpose+flip combination.
+  - For mono formats: convert to 8-bit, process, convert back (or keep minimal custom kernels if performance-critical).
+  - Remove corresponding custom CUDA kernels from `cuda_kernels.cu`.
 - Tests:
-  - Add runtime-probed tests verifying hwaccel selection and fallback (skip when hwaccel is unavailable).
+  - Extend `cuda_primitives_test.c` to verify parity with CPU for all replaced operations.
+  - Ensure determinism across repeated runs.
 - Acceptance:
-  - For hw-decodable inputs, decode+upload overhead drops materially (target: >2× faster decode stage vs software on this machine).
+  - All primitive operations work correctly for GRAY8, Y400A, RGB24, and mono formats.
+  - Custom kernels `wipe_rect_*`, `copy_rect_*`, `mirror_*`, `rotate90_*` removed.
+
+**PR 15: OpenCV resize and deskew (cudawarping)**
+
+- Status: planned
+- Scope:
+  - Replace `stretch_and_replace_cuda` and `resize_and_replace_cuda` with `cv::cuda::resize()`.
+  - Map interpolation modes: NEAREST → INTER_NEAREST, LINEAR → INTER_LINEAR, CUBIC → INTER_CUBIC.
+  - Replace `deskew_cuda` rotation with `cv::cuda::warpAffine()`.
+  - Handle coordinate mapping to match CPU behavior exactly (center-based rotation).
+  - For mono: convert to 8-bit, resize/rotate, threshold back to mono.
+  - Remove custom kernels `stretch_*`, `rotate_*` from `cuda_kernels.cu`.
+- Tests:
+  - Extend `cuda_resize_test.c` and `cuda_deskew_test.c` for all interpolation modes.
+  - Verify sub-pixel accuracy matches CPU within tolerance.
+- Acceptance:
+  - Resize and deskew produce identical output to CPU within existing tolerances.
+  - Custom stretch/rotate kernels removed.
+  - A1 benchmark: deskew stage time reduced by ≥50%.
+
+**PR 16: OpenCV-based filters (noisefilter, grayfilter, blurfilter, blackfilter)**
+
+- Status: planned
+- Scope:
+  - **noisefilter**: Already uses `cv::cuda::connectedComponents()`; optimize to eliminate any CPU loops and D2H transfers. Use `cv::cuda::countNonZero()` for component size counting if possible, or GPU histogram.
+  - **grayfilter**: Replace tile-based CPU loop with:
+    - `cv::cuda::threshold()` to create dark-pixel mask
+    - Use integral images or tiled `cv::cuda::sum()` for per-tile statistics
+    - Single-pass wipe kernel for tiles below threshold
+  - **blurfilter**: Similar to grayfilter:
+    - `cv::cuda::threshold()` for brightness mask
+    - Integral images for efficient window sums
+    - Batch wipe for isolated clusters
+  - **blackfilter**: Replace flood-fill with:
+    - `cv::cuda::threshold()` to create near-black mask
+    - `cv::cuda::connectedComponents()` for region detection
+    - Optionally use morphological operations (`cv::cuda::dilate`) for intensity tolerance
+    - Batch wipe of detected black regions
+  - Remove custom kernels: `noisefilter_*`, `count_brightness_range`, `sum_lightness_rect`, `sum_grayscale_rect`, `blackfilter_floodfill_rect`.
+- Tests:
+  - Extend `cuda_filters_test.c` with comprehensive coverage.
+  - Verify determinism and parity with CPU.
+- Acceptance:
+  - All filters work without CPU-driven inner loops.
+  - A1 benchmark: filters stage time reduced by ≥70%.
+  - Primary gate: `A1` CUDA mean **< 1.0s** on this machine.
+
+**PR 17: OpenCV-based detection (masks, borders, deskew angle)**
+
+- Status: planned
+- Scope:
+  - **detect_masks_cuda**: Replace custom reduction with:
+    - `cv::cuda::threshold()` for dark-pixel mask
+    - `cv::cuda::sum()` or `cv::cuda::countNonZero()` with ROI for bar scanning
+    - Keep control logic on CPU for determinism
+  - **detect_border_cuda**: Similar approach using OpenCV reductions.
+  - **detect_rotation_cuda**: Replace `detect_edge_rotation_peaks` kernel with:
+    - `cv::cuda::threshold()` for edge mask
+    - Pre-computed rotation matrices for angle sampling
+    - Parallel `cv::cuda::sum()` calls for each angle
+    - CPU-side angle selection for determinism
+  - Remove custom kernel `detect_edge_rotation_peaks`.
+- Tests:
+  - Verify mask/border detection matches CPU exactly.
+  - Verify deskew angle detection produces identical angles.
+- Acceptance:
+  - Detection operations have no custom CUDA kernels.
+  - Deskew angle detection time reduced by ≥50%.
+
+**PR 18: Cleanup, optimization, and final benchmarking**
+
+- Status: planned
+- Scope:
+  - Remove all unused custom CUDA kernels from `cuda_kernels.cu`.
+  - Remove PTX compilation if no custom kernels remain (or keep minimal set for mono format handling).
+  - Add CUDA stream overlap: decode next page while processing current, encode previous while processing next.
+  - Implement memory pooling: reuse `cv::cuda::GpuMat` buffers across operations to reduce allocation overhead.
+  - Add `cv::cuda::Stream` integration for async operations.
+  - Final performance tuning and profiling.
+  - Update documentation with final architecture and performance characteristics.
+- Tests:
+  - Full test suite passes.
+  - Determinism verified across all operations.
+  - Memory leak check with valgrind/cuda-memcheck.
+- Acceptance:
+  - Minimal or no custom CUDA kernels remain.
+  - A1 benchmark: CUDA mean **< 0.5s** on this machine (target: 3-4× faster than current ~1.4s).
+  - Multi-page throughput ≥2× compared to single-threaded CPU.
