@@ -13,6 +13,10 @@ from pathlib import Path
 
 
 def run_once(binary: Path, device: str, input_path: Path, output_path: Path) -> float:
+    # Remove output file if it exists (unpaper refuses to overwrite)
+    if output_path.exists():
+        output_path.unlink()
+
     start = time.perf_counter()
     proc = subprocess.run(
         [
