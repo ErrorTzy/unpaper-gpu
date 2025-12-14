@@ -40,6 +40,15 @@ static void test_stream_raw_handle(void) {
   }
 }
 
+// Forward declaration of cudart functions to avoid including cuda_runtime.h in C
+// These will be resolved at link time since we link cudart
+typedef int cudaError_t;
+extern cudaError_t cudaMalloc(void **devPtr, size_t size);
+extern cudaError_t cudaFree(void *devPtr);
+extern cudaError_t cudaMemcpy(void *dst, const void *src, size_t count, int kind);
+#define cudaMemcpyHostToDevice 1
+#define cudaMemcpyDeviceToHost 2
+
 static void test_mask_extraction_gray8(void) {
   const int width = 16;
   const int height = 16;
@@ -61,17 +70,20 @@ static void test_mask_extraction_gray8(void) {
     }
   }
 
-  uint64_t src_dptr = unpaper_cuda_malloc(bytes);
-  assert(src_dptr != 0);
-  unpaper_cuda_memcpy_h2d(src_dptr, host_buf, bytes);
+  // Use cudaMalloc (runtime API) for compatibility with OpenCV CUDA
+  void *cuda_ptr = NULL;
+  cudaError_t err = cudaMalloc(&cuda_ptr, bytes);
+  assert(err == 0 && cuda_ptr != NULL);
+  uint64_t src_dptr = (uint64_t)cuda_ptr;
+  err = cudaMemcpy(cuda_ptr, host_buf, bytes, cudaMemcpyHostToDevice);
+  assert(err == 0);
 
-  UnpaperCudaStream *stream = unpaper_cuda_stream_get_default();
   UnpaperOpencvMask mask = {0};
   const uint8_t min_white_level = 128;
 
   bool ok = unpaper_opencv_extract_dark_mask(
       src_dptr, width, height, pitch, (int)UNPAPER_CUDA_FMT_GRAY8,
-      min_white_level, stream, &mask);
+      min_white_level, NULL, &mask);
 
 #ifdef UNPAPER_WITH_OPENCV
   if (!unpaper_opencv_cuda_supported()) {
@@ -89,8 +101,10 @@ static void test_mask_extraction_gray8(void) {
 
   uint8_t *mask_host = malloc(mask.pitch_bytes * mask.height);
   assert(mask_host != NULL);
-  unpaper_cuda_memcpy_d2h(mask_host, mask.device_ptr,
-                          mask.pitch_bytes * mask.height);
+  // Use cudaMemcpy (runtime API) for compatibility
+  err = cudaMemcpy(mask_host, (void *)mask.device_ptr,
+                   mask.pitch_bytes * mask.height, cudaMemcpyDeviceToHost);
+  assert(err == 0);
 
   int dark_count = 0;
   int bright_count = 0;
@@ -117,7 +131,7 @@ static void test_mask_extraction_gray8(void) {
   printf("  Mask extraction skipped (OpenCV not enabled)\n");
 #endif
 
-  unpaper_cuda_free(src_dptr);
+  cudaFree((void *)src_dptr);
   free(host_buf);
 }
 
@@ -134,17 +148,20 @@ static void test_mask_round_trip_determinism(void) {
     host_buf[i] = (uint8_t)((i * 37 + 17) % 256);
   }
 
-  uint64_t src_dptr = unpaper_cuda_malloc(bytes);
-  assert(src_dptr != 0);
-  unpaper_cuda_memcpy_h2d(src_dptr, host_buf, bytes);
+  // Use cudaMalloc (runtime API) for compatibility with OpenCV CUDA
+  void *cuda_ptr = NULL;
+  cudaError_t err = cudaMalloc(&cuda_ptr, bytes);
+  assert(err == 0 && cuda_ptr != NULL);
+  uint64_t src_dptr = (uint64_t)cuda_ptr;
+  err = cudaMemcpy(cuda_ptr, host_buf, bytes, cudaMemcpyHostToDevice);
+  assert(err == 0);
 
-  UnpaperCudaStream *stream = unpaper_cuda_stream_get_default();
   const uint8_t min_white_level = 128;
 
 #ifdef UNPAPER_WITH_OPENCV
   if (!unpaper_opencv_cuda_supported()) {
     printf("  OpenCV CUDA not supported, skipping determinism test\n");
-    unpaper_cuda_free(src_dptr);
+    cudaFree((void *)src_dptr);
     free(host_buf);
     return;
   }
@@ -156,13 +173,14 @@ static void test_mask_round_trip_determinism(void) {
     UnpaperOpencvMask mask = {0};
     bool ok = unpaper_opencv_extract_dark_mask(
         src_dptr, width, height, pitch, (int)UNPAPER_CUDA_FMT_GRAY8,
-        min_white_level, stream, &mask);
+        min_white_level, NULL, &mask);
     assert(ok);
 
     uint8_t *mask_host = malloc(mask.pitch_bytes * mask.height);
     assert(mask_host != NULL);
-    unpaper_cuda_memcpy_d2h(mask_host, mask.device_ptr,
-                            mask.pitch_bytes * mask.height);
+    err = cudaMemcpy(mask_host, (void *)mask.device_ptr,
+                     mask.pitch_bytes * mask.height, cudaMemcpyDeviceToHost);
+    assert(err == 0);
 
     if (run == 0) {
       first_run = mask_host;
@@ -186,7 +204,7 @@ static void test_mask_round_trip_determinism(void) {
   printf("  Determinism test skipped (OpenCV not enabled)\n");
 #endif
 
-  unpaper_cuda_free(src_dptr);
+  cudaFree((void *)src_dptr);
   free(host_buf);
 }
 
@@ -194,6 +212,13 @@ int main(void) {
   printf("Test: OpenCV bridge availability\n");
   test_opencv_availability();
 
+#ifdef UNPAPER_WITH_OPENCV
+  // When OpenCV CUDA is enabled, we use CUDA Runtime API (cudaMalloc, etc.)
+  // instead of unpaper's Driver API to avoid context conflicts.
+  // Skip the stream test as it requires unpaper's Driver API context.
+  printf("Test: stream raw handle\n");
+  printf("  (skipped - using CUDA Runtime API for OpenCV compatibility)\n");
+#else
   UnpaperCudaInitStatus st = unpaper_cuda_try_init();
   if (st != UNPAPER_CUDA_INIT_OK) {
     printf("CUDA not available: %s\n", unpaper_cuda_init_status_string(st));
@@ -203,6 +228,7 @@ int main(void) {
 
   printf("Test: stream raw handle\n");
   test_stream_raw_handle();
+#endif
 
   printf("Test: mask extraction GRAY8\n");
   test_mask_extraction_gray8();

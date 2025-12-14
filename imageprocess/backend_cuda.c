@@ -14,6 +14,7 @@
 
 #include "imageprocess/cuda_kernels_format.h"
 #include "imageprocess/cuda_runtime.h"
+#include "imageprocess/opencv_bridge.h"
 #include "lib/logging.h"
 #include "lib/math_util.h"
 
@@ -49,8 +50,9 @@ static void *k_sum_grayscale_rect;
 static void *k_sum_darkness_inverse_rect;
 static void *k_apply_masks_bytes;
 static void *k_apply_masks_mono;
-static void *k_noisefilter_build_labels;
-static void *k_noisefilter_propagate;
+static void *k_noisefilter_init;
+static void *k_noisefilter_union;
+static void *k_noisefilter_compress;
 static void *k_noisefilter_count;
 static void *k_noisefilter_apply;
 static void *k_blackfilter_floodfill_rect;
@@ -101,10 +103,12 @@ static void ensure_kernels_loaded(void) {
       unpaper_cuda_module_get_function(cuda_module, "unpaper_apply_masks_bytes");
   k_apply_masks_mono =
       unpaper_cuda_module_get_function(cuda_module, "unpaper_apply_masks_mono");
-  k_noisefilter_build_labels = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_noisefilter_build_labels");
-  k_noisefilter_propagate = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_noisefilter_propagate");
+  k_noisefilter_init = unpaper_cuda_module_get_function(
+      cuda_module, "unpaper_noisefilter_init");
+  k_noisefilter_union = unpaper_cuda_module_get_function(
+      cuda_module, "unpaper_noisefilter_union");
+  k_noisefilter_compress = unpaper_cuda_module_get_function(
+      cuda_module, "unpaper_noisefilter_compress");
   k_noisefilter_count = unpaper_cuda_module_get_function(
       cuda_module, "unpaper_noisefilter_count");
   k_noisefilter_apply = unpaper_cuda_module_get_function(
@@ -1483,6 +1487,175 @@ static void blurfilter_cuda(Image image, BlurfilterParameters params,
   verboseLog(VERBOSE_NORMAL, " deleted %" PRIu64 " pixels.\n", count);
 }
 
+// Custom CUDA CCL-based noisefilter (fallback)
+static void noisefilter_cuda_custom(Image image, uint64_t intensity,
+                                    uint8_t min_white_level) {
+  ImageCudaState *st = image_cuda_state(image);
+  if (st == NULL || st->dptr == 0) {
+    errOutput("CUDA image state missing for noisefilter.");
+  }
+
+  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+  const int img_fmt = (int)fmt;
+  const int w = image.frame->width;
+  const int h = image.frame->height;
+  const size_t num_pixels = (size_t)w * (size_t)h;
+
+  UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+  const uint32_t block2d_x = 16u;
+  const uint32_t block2d_y = 16u;
+  const uint32_t grid2d_x =
+      (uint32_t)((w + (int)block2d_x - 1) / (int)block2d_x);
+  const uint32_t grid2d_y =
+      (uint32_t)((h + (int)block2d_y - 1) / (int)block2d_y);
+
+  const size_t parent_bytes = num_pixels * sizeof(uint32_t);
+  const size_t counts_bytes = num_pixels * sizeof(uint32_t);
+  const size_t total_bytes = parent_bytes + counts_bytes;
+  size_t scratch_capacity = 0;
+  const uint64_t scratch =
+      unpaper_cuda_scratch_reserve(total_bytes, &scratch_capacity);
+  if (scratch_capacity < total_bytes) {
+    errOutput("CUDA noisefilter: unable to reserve scratch buffer.");
+  }
+
+  const uint64_t parent = scratch;
+  const uint64_t counts = parent + parent_bytes;
+
+  void *params_init[] = {&st->dptr, &st->linesize, &img_fmt, &w, &h,
+                         &min_white_level, &parent};
+  unpaper_cuda_launch_kernel_on_stream(
+      stream, k_noisefilter_init, grid2d_x, grid2d_y, 1, block2d_x, block2d_y,
+      1, params_init);
+
+  void *params_union[] = {&parent, &w, &h};
+  unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_union, grid2d_x,
+                                       grid2d_y, 1, block2d_x, block2d_y, 1,
+                                       params_union);
+
+  const uint32_t block1d = 256u;
+  const uint32_t grid1d =
+      (uint32_t)(((num_pixels + block1d - 1) / block1d));
+  const int num_pixels_i = (int)num_pixels;
+
+  void *params_compress[] = {&parent, &num_pixels_i};
+  unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_compress, grid1d,
+                                       1, 1, block1d, 1, 1, params_compress);
+
+  unpaper_cuda_memset_d8(counts, 0, counts_bytes);
+  void *params_count[] = {&parent, &num_pixels_i, &counts};
+  unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_count, grid1d, 1,
+                                       1, block1d, 1, 1, params_count);
+
+  void *params_apply[] = {&st->dptr, &st->linesize, &img_fmt, &w, &h,
+                          &parent, &counts, &intensity};
+  unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_apply, grid2d_x,
+                                       grid2d_y, 1, block2d_x, block2d_y, 1,
+                                       params_apply);
+
+  unpaper_cuda_stream_synchronize_on(stream);
+
+  st->cuda_dirty = true;
+  st->cpu_dirty = false;
+}
+
+// OpenCV CUDA CCL-based noisefilter for GRAY8 images
+static bool noisefilter_cuda_opencv(Image image, uint64_t intensity,
+                                    uint8_t min_white_level) {
+  if (!unpaper_opencv_ccl_supported()) {
+    return false;
+  }
+
+  ImageCudaState *st = image_cuda_state(image);
+  if (st == NULL || st->dptr == 0) {
+    return false;
+  }
+
+  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+  if (fmt != UNPAPER_CUDA_FMT_GRAY8) {
+    // Only GRAY8 supported for now
+    return false;
+  }
+
+  const int w = image.frame->width;
+  const int h = image.frame->height;
+
+  UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+
+  // Extract dark mask using OpenCV
+  UnpaperOpencvMask mask = {0};
+  if (!unpaper_opencv_extract_dark_mask(st->dptr, w, h, (size_t)st->linesize,
+                                        (int)fmt, min_white_level, stream,
+                                        &mask)) {
+    return false;
+  }
+
+  // Run CCL and remove small components
+  UnpaperOpencvCclStats stats = {0};
+  bool ok = unpaper_opencv_cuda_ccl(mask.device_ptr, mask.width, mask.height,
+                                    mask.pitch_bytes, 255,
+                                    (uint32_t)intensity, stream, &stats);
+
+  if (!ok) {
+    unpaper_opencv_mask_free(&mask);
+    return false;
+  }
+
+  // Now we need to apply the mask result back to the image
+  // The mask now has 0 for pixels to remove (small components were zeroed)
+  // We need to set those pixels to white in the original image
+
+  // Download mask and apply to image
+  // For GRAY8, we set pixels where mask == 0 but original was dark to white
+  size_t mask_bytes = mask.pitch_bytes * (size_t)mask.height;
+  uint8_t *mask_host = av_malloc(mask_bytes);
+  if (mask_host == NULL) {
+    unpaper_opencv_mask_free(&mask);
+    return false;
+  }
+
+  unpaper_cuda_memcpy_d2h(mask_host, mask.device_ptr, mask_bytes);
+
+  // Download image
+  size_t img_bytes = (size_t)st->linesize * (size_t)h;
+  uint8_t *img_host = av_malloc(img_bytes);
+  if (img_host == NULL) {
+    av_free(mask_host);
+    unpaper_opencv_mask_free(&mask);
+    return false;
+  }
+
+  unpaper_cuda_memcpy_d2h(img_host, st->dptr, img_bytes);
+
+  // Apply: where mask was originally 255 (dark) but now is 0 (removed),
+  // set pixel to white
+  for (int y = 0; y < h; y++) {
+    uint8_t *img_row = img_host + (size_t)y * (size_t)st->linesize;
+    const uint8_t *mask_row = mask_host + (size_t)y * mask.pitch_bytes;
+    for (int x = 0; x < w; x++) {
+      // If pixel is dark (< min_white_level) but mask is 0 (removed component)
+      if (img_row[x] < min_white_level && mask_row[x] == 0) {
+        img_row[x] = 255; // Set to white
+      }
+    }
+  }
+
+  // Upload modified image back
+  unpaper_cuda_memcpy_h2d(st->dptr, img_host, img_bytes);
+
+  av_free(img_host);
+  av_free(mask_host);
+  unpaper_opencv_mask_free(&mask);
+
+  st->cuda_dirty = true;
+  st->cpu_dirty = false;
+
+  verboseLog(VERBOSE_MORE, " (OpenCV CCL: %d components, %d removed)",
+             stats.label_count, stats.removed_components);
+
+  return true;
+}
+
 static void noisefilter_cuda(Image image, uint64_t intensity,
                              uint8_t min_white_level) {
   if (image.frame == NULL) {
@@ -1501,7 +1674,6 @@ static void noisefilter_cuda(Image image, uint64_t intensity,
     errOutput("CUDA noisefilter: unsupported pixel format.");
   }
 
-  const int img_fmt = (int)fmt;
   const int w = image.frame->width;
   const int h = image.frame->height;
   if (w <= 0 || h <= 0) {
@@ -1513,95 +1685,14 @@ static void noisefilter_cuda(Image image, uint64_t intensity,
     return;
   }
 
-  UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
-  const uint32_t block2d_x = 16u;
-  const uint32_t block2d_y = 16u;
-  const uint32_t grid2d_x =
-      (uint32_t)((w + (int)block2d_x - 1) / (int)block2d_x);
-  const uint32_t grid2d_y =
-      (uint32_t)((h + (int)block2d_y - 1) / (int)block2d_y);
-
-  const size_t labels_bytes = num_pixels * sizeof(uint32_t);
-  const size_t counts_bytes = (num_pixels + 1) * sizeof(uint32_t);
-  const size_t total_bytes =
-      labels_bytes * 2 + counts_bytes + sizeof(uint32_t);
-  size_t scratch_capacity = 0;
-  const uint64_t scratch =
-      unpaper_cuda_scratch_reserve(total_bytes, &scratch_capacity);
-  if (scratch_capacity < total_bytes) {
-    errOutput("CUDA noisefilter: unable to reserve scratch buffer.");
+  // Try OpenCV path for GRAY8 images
+  if (fmt == UNPAPER_CUDA_FMT_GRAY8 && noisefilter_cuda_opencv(image, intensity,
+                                                               min_white_level)) {
+    return;
   }
 
-  const uint64_t labels_a = scratch;
-  const uint64_t labels_b = labels_a + labels_bytes;
-  const uint64_t counts = labels_b + labels_bytes;
-  const uint64_t changed = counts + counts_bytes;
-
-  void *params_build[] = {&st->dptr, &st->linesize, &img_fmt, &w, &h,
-                          &min_white_level, &labels_a};
-  unpaper_cuda_launch_kernel_on_stream(
-      stream, k_noisefilter_build_labels, grid2d_x, grid2d_y, 1, block2d_x,
-      block2d_y, 1, params_build);
-
-  size_t pinned_capacity = 0;
-  int *changed_host = (int *)unpaper_cuda_stream_pinned_reserve(
-      stream, sizeof(int), &pinned_capacity);
-  int changed_fallback = 0;
-  if (changed_host == NULL) {
-    changed_host = &changed_fallback;
-  }
-
-  uint64_t labels_in = labels_a;
-  uint64_t labels_out = labels_b;
-  const int max_iters = (w + h > 0) ? (w + h) : 1;
-
-  for (int iter = 0; iter < max_iters; iter++) {
-    unpaper_cuda_memset_d8(changed, 0, sizeof(int));
-    void *params_prop[] = {&labels_in, &labels_out, &w, &h, &changed};
-    unpaper_cuda_launch_kernel_on_stream(
-        stream, k_noisefilter_propagate, grid2d_x, grid2d_y, 1, block2d_x,
-        block2d_y, 1, params_prop);
-
-    *changed_host = 0;
-    if (changed_host == &changed_fallback) {
-      unpaper_cuda_memcpy_d2h(changed_host, changed, sizeof(int));
-    } else {
-      unpaper_cuda_memcpy_d2h_async(stream, changed_host, changed,
-                                    sizeof(int));
-      unpaper_cuda_stream_synchronize_on(stream);
-    }
-
-    if (*changed_host == 0) {
-      labels_in = labels_out;
-      break;
-    }
-
-    uint64_t tmp = labels_in;
-    labels_in = labels_out;
-    labels_out = tmp;
-  }
-
-  const uint64_t final_labels = labels_in;
-
-  unpaper_cuda_memset_d8(counts, 0, counts_bytes);
-  const uint32_t block1d = 256u;
-  const uint32_t grid1d =
-      (uint32_t)(((num_pixels + block1d - 1) / block1d));
-  const int num_pixels_i = (int)num_pixels;
-  void *params_count[] = {&final_labels, &num_pixels_i, &counts};
-  unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_count, grid1d, 1,
-                                       1, block1d, 1, 1, params_count);
-
-  void *params_apply[] = {&st->dptr, &st->linesize, &img_fmt, &w, &h,
-                          &final_labels, &counts, &intensity};
-  unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_apply, grid2d_x,
-                                       grid2d_y, 1, block2d_x, block2d_y, 1,
-                                       params_apply);
-
-  unpaper_cuda_stream_synchronize_on(stream);
-
-  st->cuda_dirty = true;
-  st->cpu_dirty = false;
+  // Fallback to custom CUDA CCL
+  noisefilter_cuda_custom(image, intensity, min_white_level);
 }
 
 static void grayfilter_cuda(Image image, GrayfilterParameters params) {

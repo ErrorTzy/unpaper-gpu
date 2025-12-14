@@ -24,10 +24,12 @@ typedef struct {
   int width;
   int height;
   size_t pitch_bytes;
+  bool opencv_allocated; // true if allocated via OpenCV/cudart, false via unpaper
 } UnpaperOpencvMask;
 
 bool unpaper_opencv_enabled(void);
 bool unpaper_opencv_cuda_supported(void);
+bool unpaper_opencv_ccl_supported(void);
 
 bool unpaper_opencv_cuda_ccl(uint64_t mask_device, int width, int height,
                              size_t pitch_bytes, uint8_t foreground_value,

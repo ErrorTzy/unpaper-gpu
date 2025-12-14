@@ -117,6 +117,16 @@ endif
 
 if have_cuda and have_opencv
     unpaper_cpp_args += ['-I' + cuda_include_dir]
+    # Link cudart for OpenCV CUDA bridge (uses runtime API for context compatibility)
+    # Try standard CUDA lib locations
+    cudart_dep = cc.find_library('cudart', dirs : [
+        '/usr/local/cuda-13.0/lib64',
+        '/usr/local/cuda/lib64',
+        '/usr/lib/x86_64-linux-gnu'
+    ], required : false)
+    if cudart_dep.found()
+        unpaper_deps += [cudart_dep]
+    endif
 endif
 
 if have_cuda
@@ -226,11 +236,13 @@ if have_cuda
             'imageprocess/pixel.c',
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
+            opencv_bridge_source,
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
         c_args : unpaper_c_args,
-        dependencies : unpaper_deps,
+        cpp_args : cpp_enabled ? unpaper_cpp_args : [],
+        dependencies : unpaper_all_deps,
         install : false,
     )
 
@@ -253,11 +265,13 @@ if have_cuda
             'imageprocess/pixel.c',
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
+            opencv_bridge_source,
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
         c_args : unpaper_c_args,
-        dependencies : unpaper_deps,
+        cpp_args : cpp_enabled ? unpaper_cpp_args : [],
+        dependencies : unpaper_all_deps,
         install : false,
     )
 
@@ -280,11 +294,13 @@ if have_cuda
             'imageprocess/pixel.c',
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
+            opencv_bridge_source,
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
         c_args : unpaper_c_args,
-        dependencies : unpaper_deps,
+        cpp_args : cpp_enabled ? unpaper_cpp_args : [],
+        dependencies : unpaper_all_deps,
         install : false,
     )
 
@@ -307,11 +323,13 @@ if have_cuda
             'imageprocess/pixel.c',
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
+            opencv_bridge_source,
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
         c_args : unpaper_c_args,
-        dependencies : unpaper_deps,
+        cpp_args : cpp_enabled ? unpaper_cpp_args : [],
+        dependencies : unpaper_all_deps,
         install : false,
     )
 
@@ -334,11 +352,13 @@ if have_cuda
             'imageprocess/pixel.c',
             'imageprocess/primitives.c',
             'imageprocess/cuda_runtime.c',
+            opencv_bridge_source,
             cuda_kernels_ptx_c,
             'lib/logging.c',
         ],
         c_args : unpaper_c_args,
-        dependencies : unpaper_deps,
+        cpp_args : cpp_enabled ? unpaper_cpp_args : [],
+        dependencies : unpaper_all_deps,
         install : false,
     )
 
