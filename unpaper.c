@@ -25,6 +25,7 @@
 #include "imageprocess/image.h"
 #include "imageprocess/interpolate.h"
 #include "imageprocess/masks.h"
+#include "imageprocess/opencv_bridge.h"
 #include "imageprocess/pixel.h"
 #include "lib/options.h"
 #include "lib/perf.h"
@@ -1065,6 +1066,14 @@ int main(int argc, char *argv[]) {
         options.multiple_sheets && (strchr(argv[optind], '%') != NULL);
     perf_recorder_init(&perf, options.perf,
                        options.device == UNPAPER_DEVICE_CUDA);
+
+    if (options.perf) {
+      printf("perf backends: device=%s opencv=%s ccl=%s\n",
+             options.device == UNPAPER_DEVICE_CUDA ? "cuda" : "cpu",
+             unpaper_opencv_enabled() ? "yes" : "no",
+             unpaper_opencv_ccl_supported() ? "yes" : "no");
+    }
+
     bool outputWildcard = false;
 
     for (int i = 0; i < options.input_count; i++) {

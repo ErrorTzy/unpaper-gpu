@@ -340,11 +340,19 @@ Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing
 
 **PR 12.4: Format coverage + perf gate**
 
-- Status: planned
+- Status: completed (2025-12-14)
 - Scope:
   - Support RGB24 and Y400A by generating masks on GPU, reusing OpenCV CCL.
   - Add A1 benchmark run with `--device=cuda` + OpenCV path; target <3.0s on this machine.
   - Add a build/CLI capability flag showing which path is active.
+- Implementation notes:
+  - Extended `noisefilter_cuda_opencv()` to support GRAY8, Y400A, and RGB24 formats.
+  - OpenCV path extracts dark mask and runs CCL; fallback to custom CUDA CCL when Driver API context used.
+  - Mask application loop handles all three formats with proper lightness calculations.
+  - Added Y400A noisefilter test to `cuda_filters_test.c`.
+  - Added `--perf` capability flag output: `perf backends: device=<device> opencv=<yes|no> ccl=<yes|no>`.
+  - Fixed critical kernel name mismatch bug (init/union/compress → build_labels/propagate) from prior commit.
+  - A1 benchmark: ~1.40s average, well under 3.0s target.
 - Tests:
   - New regression for RGB24 noisefilter parity; re-run benchmark harness.
 - Acceptance:

@@ -204,6 +204,48 @@ static void test_noisefilter_rgb24(void) {
   free_image(&gpu);
 }
 
+static void fill_noisefilter_y400a_pattern(Image image) {
+  wipe_rectangle(image, full_image(image), PIXEL_WHITE);
+
+  // Small cluster of dark pixels (gray with full alpha)
+  set_pixel(image, (Point){3, 3}, (Pixel){20, 20, 20});
+  set_pixel(image, (Point){4, 3}, (Pixel){25, 25, 25});
+
+  // Larger cluster that should remain
+  for (int y = 9; y < 12; y++) {
+    for (int x = 12; x < 15; x++) {
+      set_pixel(image, (Point){x, y}, (Pixel){30, 30, 30});
+    }
+  }
+}
+
+static void test_noisefilter_y400a(void) {
+  const RectangleSize sz = {.width = 20, .height = 16};
+  const uint8_t abs_black_threshold = 64;
+  const uint64_t intensity = 3;
+  const uint8_t min_white_level = 180;
+
+  image_backend_select(UNPAPER_DEVICE_CPU);
+  Image cpu = create_image(sz, AV_PIX_FMT_Y400A, true, PIXEL_WHITE,
+                           abs_black_threshold);
+  Image gpu = create_image(sz, AV_PIX_FMT_Y400A, true, PIXEL_WHITE,
+                           abs_black_threshold);
+  fill_noisefilter_y400a_pattern(cpu);
+  fill_noisefilter_y400a_pattern(gpu);
+
+  image_backend_select(UNPAPER_DEVICE_CPU);
+  noisefilter(cpu, intensity, min_white_level);
+
+  image_backend_select(UNPAPER_DEVICE_CUDA);
+  noisefilter(gpu, intensity, min_white_level);
+  image_ensure_cpu(&gpu);
+
+  assert_images_equal("noisefilter_y400a", cpu, gpu);
+
+  free_image(&cpu);
+  free_image(&gpu);
+}
+
 static void fill_blackfilter_pattern(Image image) {
   wipe_rectangle(image, full_image(image), PIXEL_WHITE);
 
@@ -353,6 +395,7 @@ int main(void) {
   test_noisefilter_gray8();
   test_noisefilter_diagonal();
   test_noisefilter_rgb24();
+  test_noisefilter_y400a();
   test_blackfilter_gray8();
   test_grayfilter_gray8();
   test_blurfilter_gray8();
