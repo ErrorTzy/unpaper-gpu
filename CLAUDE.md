@@ -466,21 +466,26 @@ Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing
 
 **PR 15: OpenCV resize and deskew (cudawarping)**
 
-- Status: planned
+- Status: investigated, keeping custom kernels (2025-12-14)
 - Scope:
-  - Replace `stretch_and_replace_cuda` and `resize_and_replace_cuda` with `cv::cuda::resize()`.
-  - Map interpolation modes: NEAREST → INTER_NEAREST, LINEAR → INTER_LINEAR, CUBIC → INTER_CUBIC.
-  - Replace `deskew_cuda` rotation with `cv::cuda::warpAffine()`.
-  - Handle coordinate mapping to match CPU behavior exactly (center-based rotation).
-  - For mono: convert to 8-bit, resize/rotate, threshold back to mono.
-  - Remove custom kernels `stretch_*`, `rotate_*` from `cuda_kernels.cu`.
+  - Investigated replacing `stretch_and_replace_cuda` and `resize_and_replace_cuda` with `cv::cuda::resize()`.
+  - Investigated replacing `deskew_cuda` rotation with `cv::cuda::warpAffine()`.
+- Investigation findings:
+  - OpenCV's `cv::cuda::resize()` and `cv::cuda::warpAffine()` use different pixel center conventions than the CPU implementation.
+  - CPU/custom CUDA coordinate mapping: `sx = x * hratio` (pixel corner at 0,0)
+  - OpenCV coordinate mapping: pixel center at (0.5, 0.5), affecting sub-pixel sampling
+  - This fundamental difference causes pixel-level mismatches that break the project's parity requirements.
+  - Unit tests (`cuda_resize_test`, `cuda_deskew_test`) require exact pixel-by-pixel parity with CPU.
+- Decision:
+  - Keep custom CUDA kernels for resize (`stretch_bytes`, `stretch_mono`) and deskew (`rotate_bytes`, `rotate_mono`).
+  - Custom kernels maintain exact parity with CPU implementation.
+  - OpenCV primitives (wipe, copy, mirror, rotate90) from PR14 are retained as they have matching coordinate semantics.
 - Tests:
-  - Extend `cuda_resize_test.c` and `cuda_deskew_test.c` for all interpolation modes.
-  - Verify sub-pixel accuracy matches CPU within tolerance.
+  - All 9 CUDA tests pass, including `cuda_resize_test` and `cuda_deskew_test`.
+  - All 34 pytest tests pass.
 - Acceptance:
-  - Resize and deskew produce identical output to CPU within existing tolerances.
-  - Custom stretch/rotate kernels removed.
-  - A1 benchmark: deskew stage time reduced by ≥50%.
+  - Resize and deskew produce identical output to CPU (pixel-perfect parity).
+  - Custom stretch/rotate kernels retained for parity.
 
 **PR 16: OpenCV-based filters (noisefilter, grayfilter, blurfilter, blackfilter)**
 
