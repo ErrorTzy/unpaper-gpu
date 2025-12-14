@@ -8,6 +8,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct UnpaperCudaStream UnpaperCudaStream;
 
 typedef enum {
@@ -80,3 +84,9 @@ bool unpaper_cuda_event_pair_start_on(UnpaperCudaStream *stream, void **start,
                                       void **stop);
 double unpaper_cuda_event_pair_stop_ms_on(UnpaperCudaStream *stream,
                                           void **start, void **stop);
+
+void *unpaper_cuda_stream_get_raw_handle(UnpaperCudaStream *stream);
+
+#ifdef __cplusplus
+}
+#endif

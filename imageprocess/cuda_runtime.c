@@ -811,3 +811,8 @@ double unpaper_cuda_event_pair_stop_ms_on(UnpaperCudaStream *stream,
   *stop = NULL;
   return ms;
 }
+
+void *unpaper_cuda_stream_get_raw_handle(UnpaperCudaStream *stream) {
+  CUstream s = stream_handle(stream);
+  return (void *)s;
+}

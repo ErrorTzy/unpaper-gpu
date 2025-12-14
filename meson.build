@@ -77,6 +77,8 @@ if opencv_opt.enabled() or opencv_opt.auto()
     endif
 endif
 
+cuda_include_dir = ''
+
 unpaper_sources += [opencv_bridge_source]
 
 if cuda_opt.enabled()
@@ -89,6 +91,11 @@ if cuda_opt.enabled()
         'imageprocess/cuda_runtime.c',
     ]
     unpaper_deps += [cc.find_library('dl', required : false)]
+    if nvcc_compat.found()
+        cuda_include_dir = '/usr/local/cuda-13.0/include'
+    else
+        cuda_include_dir = '/usr/local/cuda/include'
+    endif
 elif cuda_opt.auto()
     nvcc_compat = find_program('/usr/local/cuda-13.0/bin/nvcc', required: false)
     nvcc = nvcc_compat.found() ? nvcc_compat : find_program('nvcc', required: false)
@@ -100,7 +107,16 @@ elif cuda_opt.auto()
             'imageprocess/cuda_runtime.c',
         ]
         unpaper_deps += [cc.find_library('dl', required : false)]
+        if nvcc_compat.found()
+            cuda_include_dir = '/usr/local/cuda-13.0/include'
+        else
+            cuda_include_dir = '/usr/local/cuda/include'
+        endif
     endif
+endif
+
+if have_cuda and have_opencv
+    unpaper_cpp_args += ['-I' + cuda_include_dir]
 endif
 
 if have_cuda
@@ -341,4 +357,20 @@ if have_cuda
     )
 
     test('cuda stream', cuda_stream_test)
+
+    opencv_bridge_test = executable(
+        'opencv_bridge_test',
+        [
+            'tests/opencv_bridge_test.c',
+            'imageprocess/cuda_runtime.c',
+            opencv_bridge_source,
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        cpp_args : cpp_enabled ? unpaper_cpp_args : [],
+        dependencies : unpaper_all_deps,
+        install : false,
+    )
+
+    test('opencv bridge', opencv_bridge_test)
 endif

@@ -19,6 +19,13 @@ typedef struct {
   int removed_components;
 } UnpaperOpencvCclStats;
 
+typedef struct {
+  uint64_t device_ptr;
+  int width;
+  int height;
+  size_t pitch_bytes;
+} UnpaperOpencvMask;
+
 bool unpaper_opencv_enabled(void);
 bool unpaper_opencv_cuda_supported(void);
 
@@ -27,6 +34,14 @@ bool unpaper_opencv_cuda_ccl(uint64_t mask_device, int width, int height,
                              uint32_t max_component_size,
                              UnpaperCudaStream *stream,
                              UnpaperOpencvCclStats *stats_out);
+
+bool unpaper_opencv_extract_dark_mask(uint64_t src_device, int src_width,
+                                      int src_height, size_t src_pitch_bytes,
+                                      int src_format, uint8_t min_white_level,
+                                      UnpaperCudaStream *stream,
+                                      UnpaperOpencvMask *mask_out);
+
+void unpaper_opencv_mask_free(UnpaperOpencvMask *mask);
 
 #ifdef __cplusplus
 }
