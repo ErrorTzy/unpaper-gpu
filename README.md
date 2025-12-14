@@ -46,6 +46,14 @@ Dependencies
 The only hard dependency of `unpaper` is [ffmpeg][4], which is used for
 file input and output.
 
+### Optional Dependencies
+
+- **CUDA Toolkit**: Required for GPU-accelerated processing via
+  `--device=cuda`. Tested with CUDA 12.x and 13.x.
+- **OpenCV 4.x with CUDA support**: Optional acceleration for certain
+  operations when CUDA is enabled. Provides GPU-accelerated connected
+  component labeling for the noisefilter.
+
 Building instructions
 ---------------------
 
@@ -53,7 +61,7 @@ Building instructions
 can be installed using Python's package manage (`pip3` or `pip`):
 
     unpaper$ pip3 install --user 'meson >= 0.57' 'sphinx >= 3.4'
-    unpaper$ CFLAGS="-march=native" meson --buildtype=debugoptimized builddir
+    unpaper$ CFLAGS="-march=native" meson setup --buildtype=debugoptimized builddir
     unpaper$ meson compile -C builddir
 
 You can pass required optimization flags when creating the meson build
@@ -67,6 +75,36 @@ mileage may vary.
 
 Tests depend on `pytest` and `pillow`, which will be auto-detected by
 Meson.
+
+### Building with CUDA Support
+
+To enable GPU-accelerated processing, configure with `-Dcuda=enabled`:
+
+    unpaper$ meson setup builddir-cuda -Dcuda=enabled --buildtype=debugoptimized
+    unpaper$ meson compile -C builddir-cuda
+
+The CUDA backend requires the NVIDIA CUDA Toolkit (nvcc compiler).
+Use `--device=cuda` at runtime to select GPU processing.
+
+### Building with OpenCV Acceleration
+
+For additional performance, enable OpenCV with CUDA support:
+
+    unpaper$ meson setup builddir-cuda-opencv -Dcuda=enabled -Dopencv=enabled --buildtype=debugoptimized
+    unpaper$ meson compile -C builddir-cuda-opencv
+
+This requires OpenCV 4.x built with CUDA support (cudaarithm and
+cudaimgproc modules). OpenCV acceleration is optional and provides
+faster connected component labeling for the noisefilter.
+
+To check which backends are active at runtime, use `--perf`:
+
+    unpaper$ ./builddir-cuda-opencv/unpaper --perf --device=cuda input.pgm output.pgm
+    # Output includes: perf backends: device=cuda opencv=yes ccl=yes
+
+When OpenCV is not available or encounters runtime errors, unpaper
+automatically falls back to the built-in CUDA implementation with
+no user intervention required.
 
 Development Hints
 -----------------

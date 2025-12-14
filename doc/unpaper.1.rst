@@ -108,15 +108,24 @@ Options
 
    Select the processing backend. The default is ``cpu``.
 
-   ``cuda`` requires unpaper to be built with CUDA support. If CUDA
-   support is not compiled in, selecting ``--device=cuda`` is a fatal
-   error (no silent fallback). Even in CUDA-capable builds, unpaper will
-   fail if no compatible CUDA runtime/device is available.
+   ``cuda`` requires unpaper to be built with CUDA support
+   (``-Dcuda=enabled``). If CUDA support is not compiled in, selecting
+   ``--device=cuda`` is a fatal error (no silent fallback). Even in
+   CUDA-capable builds, unpaper will fail if no compatible CUDA
+   runtime/device is available.
+
+   When built with optional OpenCV support (``-Dopencv=enabled``), certain
+   CUDA operations benefit from additional GPU acceleration. OpenCV
+   provides faster connected component labeling for the noisefilter. If
+   OpenCV is unavailable or encounters errors, unpaper automatically
+   falls back to its built-in CUDA implementation.
 
 .. option:: --perf
 
    Print per-sheet stage timings (decode, upload, filters,
    masks/borders, deskew, download, encode) after processing finishes.
+   Also prints backend capability information at startup, including
+   which device is selected and whether OpenCV acceleration is available.
    Disabled by default so normal output remains unchanged.
 
 .. option:: --pre-rotate { -90 | 90 }

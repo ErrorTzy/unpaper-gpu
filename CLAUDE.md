@@ -360,11 +360,18 @@ Goal: significantly accelerate `--device=cuda` end-to-end throughput by removing
 
 **PR 12.5: Packaging + fallback polish**
 
-- Status: planned
+- Status: completed (2025-12-14)
 - Scope:
   - Document the optional OpenCV dependency and how to enable it.
   - Ensure clean fallbacks (clear error when `--device=cuda` + OpenCV path requested but unavailable).
   - Trim extra allocations; prefer stream reuse; add perf logging guardable by `--perf`.
+- Implementation notes:
+  - Updated README.md with build instructions for CUDA (`-Dcuda=enabled`) and OpenCV (`-Dopencv=enabled`).
+  - Updated doc/unpaper.1.rst to document OpenCV acceleration under `--device` option and capability output under `--perf`.
+  - Fallback behavior already implemented: when OpenCV is unavailable or CCL fails, noisefilter falls back to built-in CUDA CCL automatically.
+  - Stub file (`opencv_bridge_stub.c`) returns `false` for all capability queries when OpenCV disabled.
+  - Capability flags visible via `--perf`: `perf backends: device=<device> opencv=<yes|no> ccl=<yes|no>`.
+  - All files have proper SPDX headers (no new files created).
 - Tests:
   - CPU + CUDA suites with and without OpenCV; `reuse lint` still passes.
 - Acceptance:
