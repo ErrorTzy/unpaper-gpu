@@ -20,6 +20,7 @@
 
 #include "imageprocess/blit.h"
 #include "imageprocess/backend.h"
+#include "imageprocess/cuda_mempool.h"
 #include "imageprocess/deskew.h"
 #include "imageprocess/filters.h"
 #include "imageprocess/image.h"
@@ -1197,6 +1198,29 @@ int main(int argc, char *argv[]) {
 
     // Parallel batch processing when parallelism > 1
     if (batch_queue.parallelism > 1) {
+      // Initialize GPU memory pool for CUDA batch processing
+      // Pool eliminates per-image cudaMalloc overhead for homogeneous batches
+#ifdef UNPAPER_WITH_CUDA
+      bool pool_active = false;
+      if (options.device == UNPAPER_DEVICE_CUDA) {
+        // Estimate buffer size: A1 image is ~26MB (2500x3500 RGB24)
+        // Use 8 buffers for triple-buffered 4-stream operation
+        const size_t buffer_count = 8;
+        const size_t buffer_size = 32 * 1024 * 1024;  // 32MB covers A1 and larger
+
+        if (cuda_mempool_global_init(buffer_count, buffer_size)) {
+          pool_active = true;
+          verboseLog(VERBOSE_NORMAL,
+                     "GPU memory pool: %zu buffers x %zu bytes (%.1f MB)\n",
+                     buffer_count, buffer_size,
+                     (double)(buffer_count * buffer_size) / (1024.0 * 1024.0));
+        } else {
+          verboseLog(VERBOSE_NORMAL,
+                     "GPU memory pool initialization failed, using direct allocation\n");
+        }
+      }
+#endif
+
       // Set up sheet processing configuration
       SheetProcessConfig config;
       sheet_process_config_init(&config, &options, preMasks, preMaskCount, points,
@@ -1222,6 +1246,17 @@ int main(int argc, char *argv[]) {
       // Cleanup
       batch_worker_cleanup(&worker_ctx);
       threadpool_destroy(pool);
+
+#ifdef UNPAPER_WITH_CUDA
+      // Print GPU memory pool statistics and cleanup
+      if (pool_active) {
+        if (options.perf) {
+          cuda_mempool_global_print_stats();
+        }
+        cuda_mempool_global_cleanup();
+      }
+#endif
+
       batch_progress_finish(&batch_queue);
       batch_queue_free(&batch_queue);
 

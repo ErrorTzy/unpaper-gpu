@@ -11,6 +11,7 @@
 #include "lib/logging.h"
 
 #if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+#include "imageprocess/cuda_mempool.h"
 #include "imageprocess/cuda_runtime.h"
 #endif
 
@@ -33,7 +34,8 @@ static void image_cuda_state_free(void *opaque, uint8_t *data) {
   }
   ImageCudaState *st = (ImageCudaState *)data;
   if (st->dptr != 0) {
-    unpaper_cuda_free(st->dptr);
+    // Use pool release (falls back to cudaFree if no pool active)
+    cuda_mempool_global_release(st->dptr);
     st->dptr = 0;
   }
   av_free(st);
@@ -153,10 +155,12 @@ void image_ensure_cuda(Image *image) {
       (st->linesize != image->frame->linesize[0]);
   if (need_alloc) {
     if (st->dptr != 0) {
-      unpaper_cuda_free(st->dptr);
+      // Use pool release (falls back to cudaFree if no pool active)
+      cuda_mempool_global_release(st->dptr);
       st->dptr = 0;
     }
-    st->dptr = unpaper_cuda_malloc(bytes);
+    // Use pool acquire (falls back to cudaMalloc if no pool active)
+    st->dptr = cuda_mempool_global_acquire(bytes);
     st->bytes = bytes;
     st->format = image->frame->format;
     st->width = image->frame->width;
@@ -217,10 +221,12 @@ void image_ensure_cuda_alloc(Image *image) {
       (st->linesize != image->frame->linesize[0]);
   if (need_alloc) {
     if (st->dptr != 0) {
-      unpaper_cuda_free(st->dptr);
+      // Use pool release (falls back to cudaFree if no pool active)
+      cuda_mempool_global_release(st->dptr);
       st->dptr = 0;
     }
-    st->dptr = unpaper_cuda_malloc(bytes);
+    // Use pool acquire (falls back to cudaMalloc if no pool active)
+    st->dptr = cuda_mempool_global_acquire(bytes);
     st->bytes = bytes;
     st->format = image->frame->format;
     st->width = image->frame->width;

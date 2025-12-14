@@ -220,11 +220,19 @@ Files use SPDX headers. Add SPDX headers to new files and validate with `reuse l
 
 **PR 21: GPU batch - persistent context + memory pool**
 
-- Status: not started
+- Status: complete
 - Scope:
-  - Implement GPU memory pool (`imageprocess/cuda_mempool.c`)
+  - Implement GPU memory pool (`imageprocess/cuda_mempool.c`, `imageprocess/cuda_mempool.h`)
   - Pre-allocate N image-sized buffers; return to pool instead of `cudaFree()`
   - Pool statistics logging (allocations, reuses, peak usage)
+  - Integration with `image_cuda.c` for transparent pool usage
+  - Global pool management with thread-safe acquire/release
+- Results:
+  - Pool pre-allocates 8 buffers x 32MB = 256MB for A1 images
+  - 100% pool hit rate for homogeneous batches (same image size)
+  - Pool statistics output with `--perf` flag
+  - Atomic operations for lock-free fast path acquire
+  - All CPU and CUDA tests pass
 - Acceptance:
   - Per-image CUDA malloc overhead eliminated for homogeneous batches
   - Flat GPU memory usage during batch processing
