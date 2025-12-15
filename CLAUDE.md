@@ -419,6 +419,224 @@ Files use SPDX headers. Add SPDX headers to new files and validate with `reuse l
 
 ---
 
+### Stream Concurrency Optimization (PR29-PR34)
+
+**Problem**: Despite having 28 CUDA streams on high-end GPUs (RTX 5090), batch processing only achieves ~15x speedup vs CPU baseline, far below the theoretical ~50x with near-linear stream scaling.
+
+**Root Cause Analysis**: The `opencv_bridge.cpp` file contains `waitForCompletion()` sync points that serialize all streams on CPU-bound operations:
+
+| Filter | Sync Point | CPU Operation | Impact |
+|--------|-----------|---------------|--------|
+| blurfilter | Line 514 | Download + integral + scan | **Critical** - 4 syncs per call |
+| grayfilter | Line 389 | Download + 2× integral + scan | **Critical** - 1 sync per call |
+| noisefilter | Lines 93, 124, 139 | CCL stats + mask modification | Moderate |
+| sum_rect | Line 715 | cuda::sum() setup | Minor |
+
+The critical bottleneck is the **integral image computation + scan loop** in blurfilter and grayfilter. Each stream must:
+1. Download entire mask to CPU (~5-10ms)
+2. Compute CPU integral (~10-20ms)
+3. Run CPU scan loop (~20-50ms)
+
+With 28 streams, each waiting for its CPU section, massive serialization occurs.
+
+**Solution**: NPP GPU Integral + Custom GPU Scan Kernels
+
+Move all computation to GPU using:
+1. **NPP integral**: `nppiIntegral_8u32s_C1R_Ctx` computes integral on GPU with stream support
+2. **Custom scan kernel**: Find threshold regions on GPU, output coordinate list
+3. **Minimal transfer**: Only download coordinate list (<1KB) vs full image (~35MB)
+
+**Performance Targets**:
+- Single image (A1 bench): <1.5s (currently ~880ms, 2× regression acceptable)
+- Batch scaling: ≥50x vs CPU baseline with 28 streams (currently ~15x)
+- Expected single image: ~800-850ms (likely improvement, not regression)
+
+#### PR-by-PR Roadmap
+
+**PR 29: NPP Build Integration + Infrastructure**
+
+- Status: complete
+- Scope:
+  - Add NPP library detection to `meson.build`:
+    - Link `libnppc` (core), `libnppist` (statistics - contains integral)
+    - Library path: `/usr/local/cuda-*/lib64/`
+    - Header: `<nppi_statistics_functions.h>`
+  - Create `imageprocess/npp_wrapper.c/.h`:
+    - `NppStreamContext` initialization helper from CUDA stream
+    - Device property caching (one-time init)
+    - Error checking macros (`NPP_CHECK`, `NPP_CHECK_CTX`)
+  - Create `imageprocess/npp_integral.c/.h`:
+    - `npp_integral_create_context()` - initialize NppStreamContext
+    - `npp_integral_8u32s()` - wrapper around `nppiIntegral_8u32s_C1R_Ctx`
+    - Buffer management helpers for integral output
+  - No functional changes to image processing yet
+- Results:
+  - NPP libraries detected and linked (libnppc, libnppist)
+  - `UnpaperNppContext` wraps NppStreamContext with device property caching
+  - `unpaper_npp_integral_8u32s()` computes integral on GPU with stream support
+  - NPP format differs from OpenCV: first row/column zeros, output is width×height
+  - Unit tests verify GPU integral matches CPU reference
+  - All 10 CUDA tests + 34 pytest pass
+- Files:
+  - `meson.build` - add NPP dependency
+  - `imageprocess/npp_wrapper.c/.h` - NPP infrastructure
+  - `imageprocess/npp_integral.c/.h` - integral wrapper
+  - `tests/npp_integral_test.c` - unit tests
+- Acceptance:
+  - Build succeeds with NPP libraries linked [DONE]
+  - NPP functions callable from C code [DONE]
+  - Unit test verifies NPP integral matches CPU integral [DONE]
+
+**PR 30: Integral Buffer Pool + GPU Integral Implementation**
+
+- Status: planned
+- Scope:
+  - Extend `cuda_mempool` to support integral buffers:
+    - Integral output size: (width+1) × (height+1) × 4 bytes (int32)
+    - For A1 (2500×3500): 2501×3501×4 = ~35MB per buffer
+    - Pool 2× stream count buffers for double-buffering
+  - Implement full GPU integral pipeline:
+    - Allocate output buffer from pool
+    - Call NPP integral with stream context
+    - Return buffer to pool after use
+  - Add integral buffer statistics to `--perf` output
+- Files:
+  - `imageprocess/cuda_mempool.c/.h` - extend for integral buffers
+  - `imageprocess/npp_integral.c/.h` - complete implementation
+- Acceptance:
+  - GPU integral produces identical results to CPU `cv::integral()`
+  - Integral buffers pooled (no per-call allocation)
+  - Statistics show integral buffer hits/misses
+
+**PR 31: Blurfilter GPU Scan Kernel**
+
+- Status: planned
+- Scope:
+  - Design GPU scan kernel for blurfilter block isolation detection:
+    ```cuda
+    __global__ void unpaper_blurfilter_scan(
+        const int32_t *integral,     // GPU integral image
+        int integral_step,           // Bytes per row
+        int width, int height,       // Image dimensions
+        int block_w, int block_h,    // Block size
+        int64_t total_pixels,        // block_w × block_h
+        float intensity_threshold,   // Isolation threshold
+        int2 *out_blocks,            // Output: block coordinates
+        int *out_count               // Output: number of blocks found
+    );
+    ```
+  - Algorithm:
+    - Each thread processes one potential block position
+    - Compute sum from integral using standard formula
+    - Check neighbor sums for isolation criterion
+    - Use atomic counter to collect matching blocks
+  - Kernel launch parameters:
+    - Grid: `(width / block_w, height / block_h)`
+    - Block: `(16, 16)` or tuned for occupancy
+- Files:
+  - `imageprocess/cuda_kernels.cu` - add `unpaper_blurfilter_scan` kernel
+  - `imageprocess/cuda_kernels_format.h` - declare kernel
+- Acceptance:
+  - Kernel produces same block list as CPU scan
+  - Kernel runs asynchronously on stream (no sync required)
+  - Output coordinate list small (<10KB for typical images)
+
+**PR 32: Blurfilter Integration + Single Image Validation**
+
+- Status: planned
+- Scope:
+  - Modify `unpaper_opencv_blurfilter()` in `opencv_bridge.cpp`:
+    - Replace CPU integral with `npp_integral_8u32s()`
+    - Replace CPU scan with `unpaper_blurfilter_scan` kernel
+    - Download only coordinate list (not full image)
+    - Keep final wipe operation on GPU
+  - Sync point reduction:
+    - Before: 2 syncs (download for integral, final wipe)
+    - After: 1 sync (download coordinate list ~1KB)
+  - Single image benchmark validation:
+    - A1 bench target: <1.5s
+    - Golden image tests must pass
+- Files:
+  - `imageprocess/opencv_bridge.cpp` - blurfilter modification
+  - May need `imageprocess/cuda_runtime.c` for coordinate download
+- Acceptance:
+  - Single image: A1 bench <1.5s (target: ~850ms)
+  - All pytest golden image tests pass
+  - Blurfilter output identical to CPU reference
+
+**PR 33: Grayfilter GPU Optimization**
+
+- Status: planned
+- Scope:
+  - Similar optimization pattern for grayfilter:
+    - GPU integral for both gray and dark_mask images
+    - Custom scan kernel for tile detection
+  - Grayfilter scan kernel differences from blurfilter:
+    - Tile-based (not block-based)
+    - Uses two integrals (gray sum + dark pixel count)
+    - Different threshold logic (no dark pixels + low gray level)
+  - Sync point reduction:
+    - Before: 2 syncs (download for integrals, final wipe)
+    - After: 1 sync (download coordinate list)
+- Files:
+  - `imageprocess/cuda_kernels.cu` - add `unpaper_grayfilter_scan` kernel
+  - `imageprocess/opencv_bridge.cpp` - grayfilter modification
+- Acceptance:
+  - All grayfilter tests pass
+  - Single image regression still <1.5s
+  - Combined blurfilter + grayfilter optimization shows improvement
+
+**PR 34: Batch Pipeline Optimization + Performance Validation**
+
+- Status: planned
+- Scope:
+  - Comprehensive batch benchmarking with stream scaling:
+    - Test: 4, 8, 16, 28 streams
+    - Measure: actual concurrent GPU utilization
+    - Target: near-linear scaling up to GPU compute saturation
+  - NVIDIA Nsight profiling to verify:
+    - Streams run concurrently (not serialized)
+    - Kernel overlap visible in timeline
+    - Reduced CPU activity during batch
+  - Performance validation targets:
+    - 28 streams: ≥50x vs sequential CPU baseline
+    - Minimum: ≥40x (acknowledging some overhead)
+  - Documentation update with final results
+- Files:
+  - `tools/bench_batch.py` - add stream scaling measurement
+  - `CLAUDE.md` - document final performance numbers
+- Acceptance:
+  - **Primary gate**: 28 streams batch CUDA ≥50× sequential CPU
+  - Stream utilization visible in Nsight timeline
+  - All tests pass (no regressions)
+
+#### Technical Details
+
+**NPP Integral Image Notes**:
+- NPP output dimensions: (width) × (height), NOT (width+1) × (height+1) like OpenCV
+- First row/column implicitly zero in integral formula
+- Use `nVal = 0` parameter for standard integral
+- Stream context required for async execution
+
+**Memory Budget** (additional for integral buffers):
+- Per integral buffer: ~35MB for A1 images
+- Double-buffering: 2× stream_count buffers
+- 28 streams: 56 buffers × 35MB = ~2GB additional
+- Total with 24GB VRAM: 1.8GB (images) + 2GB (integrals) = ~3.8GB used
+
+**Kernel Design Considerations**:
+- Integral sum formula: `sum = I[y1+1][x1+1] - I[y0][x1+1] - I[y1+1][x0] + I[y0][x0]`
+- Coordinate clamping required for boundary blocks
+- Atomic counter for output list (contention acceptable for small output)
+- Consider warp-level primitives for neighbor checks
+
+**Risk Mitigation**:
+1. **Single image regression**: If NPP overhead exceeds benefit, add fast path for single-image mode
+2. **NPP unavailable**: Graceful fallback to CPU integral (existing code)
+3. **Kernel correctness**: Extensive golden image testing before merge
+
+---
+
 ## Historical Documentation
 
 For the completed CUDA backend implementation history (PR1-PR18), see [doc/CUDA_BACKEND_HISTORY.md](doc/CUDA_BACKEND_HISTORY.md).

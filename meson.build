@@ -105,6 +105,8 @@ if have_cuda
     unpaper_sources += [
         'imageprocess/backend_cuda.c',
         'imageprocess/cuda_runtime.c',
+        'imageprocess/npp_wrapper.c',
+        'imageprocess/npp_integral.c',
         'imageprocess/opencv_bridge.cpp',
         'imageprocess/opencv_ops.cpp',
     ]
@@ -117,6 +119,19 @@ if have_cuda
         '/usr/lib/x86_64-linux-gnu'
     ], required : true)
     unpaper_deps += [cudart_dep]
+
+    # Link NPP libraries for GPU integral image computation
+    nppc_dep = cc.find_library('nppc', dirs : [
+        '/usr/local/cuda-13.0/lib64',
+        '/usr/local/cuda/lib64',
+        '/usr/lib/x86_64-linux-gnu'
+    ], required : true)
+    nppist_dep = cc.find_library('nppist', dirs : [
+        '/usr/local/cuda-13.0/lib64',
+        '/usr/local/cuda/lib64',
+        '/usr/lib/x86_64-linux-gnu'
+    ], required : true)
+    unpaper_deps += [nppc_dep, nppist_dep]
 endif
 
 if have_cuda
@@ -394,4 +409,20 @@ if have_cuda
     )
 
     test('opencv bridge', opencv_bridge_test)
+
+    npp_integral_test = executable(
+        'npp_integral_test',
+        [
+            'tests/npp_integral_test.c',
+            'imageprocess/cuda_runtime.c',
+            'imageprocess/npp_wrapper.c',
+            'imageprocess/npp_integral.c',
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('npp integral', npp_integral_test)
 endif
