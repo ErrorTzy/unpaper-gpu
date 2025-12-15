@@ -124,7 +124,61 @@ Options
    masks/borders, deskew, download, encode) after processing finishes.
    Also prints backend capability information at startup, including
    which device is selected and whether OpenCV CUDA CCL is available.
-   Disabled by default so normal output remains unchanged.
+   In batch mode, additionally prints batch performance summary with
+   total time, throughput (images/second), and GPU pool/stream
+   statistics. Disabled by default so normal output remains unchanged.
+
+.. option:: -B ; --batch
+
+   Enable batch processing mode for efficient multi-image processing.
+   Instead of processing images sequentially, batch mode pre-enumerates
+   all input/output files and processes them using a parallel pipeline.
+
+   Batch mode provides significant performance improvements, especially
+   when combined with ``--device=cuda``:
+
+   - Amortizes CUDA initialization cost across the entire batch
+   - Uses a GPU memory pool to eliminate per-image allocation overhead
+   - Enables concurrent processing via multiple CUDA streams
+   - Pipelines decode/upload/process/download/encode stages
+
+   Batch mode requires input and output file patterns with ``%d``
+   placeholders (e.g., ``input%04d.png output%04d.pbm``).
+
+   If any image fails processing, the batch continues with remaining
+   images. Failed images are logged to stderr and counted in the batch
+   summary.
+
+.. option:: -j N ; --jobs=N
+
+   Set the number of parallel worker threads for batch processing.
+   Only effective when ``--batch`` is enabled.
+
+   ``0``
+      Auto-detect based on CPU cores (default). For CPU backend, uses
+      all available cores. For CUDA backend, uses a balanced value
+      that provides good GPU utilization without excessive overhead.
+
+   ``1``
+      Single-threaded batch mode. Useful for debugging or when
+      processing must be strictly sequential.
+
+   ``N``
+      Use exactly N worker threads. Higher values increase parallelism
+      but also memory usage (approximately N × image-size for both
+      CPU and GPU memory).
+
+   Example: ``unpaper --batch --jobs=4 --device=cuda input%04d.png output%04d.pbm``
+
+.. option:: --progress
+
+   Show batch processing progress output. When enabled, prints a
+   status line for each image as it completes:
+
+   ``[42/100] sheet 42 completed``
+
+   The progress output is printed to stdout. This option is only
+   effective when ``--batch`` is enabled.
 
 .. option:: --pre-rotate { -90 | 90 }
 
@@ -681,3 +735,50 @@ A-series size names (e.g. `A4`), or the values `letter` and `legal`.
 If not otherwise specified, these represent the size in portrait orientation.
 To choose the landscape orientation, append `-landscape` to the chosen size
 (e.g. `A5-landscape`, `letter-landscape`).
+
+Batch Processing Considerations
+-------------------------------
+
+When using ``--batch`` mode, especially with ``--device=cuda``, there are
+several factors to consider for optimal performance:
+
+**Homogeneous Image Sizes**
+
+For best GPU performance, all images in a batch should have similar
+dimensions. The GPU memory pool pre-allocates buffers sized for typical
+images (32MB, suitable for A1-sized scans). When images exceed this size,
+unpaper falls back to direct GPU memory allocation, which is slower.
+
+If ``--perf`` output shows "size mismatch" warnings, consider:
+
+- Using ``--size`` to normalize image dimensions
+- Processing different-sized images in separate batches
+- Increasing the pool buffer size if most images are larger
+
+**GPU Memory Requirements**
+
+CUDA batch mode requires significant GPU memory:
+
+- Memory pool: 256MB (8 buffers x 32MB)
+- Per-image working memory: ~2x image size during processing
+- Concurrent images: controlled by ``--jobs`` (default: auto)
+
+If you encounter GPU out-of-memory errors:
+
+- Reduce ``--jobs`` to process fewer images concurrently
+- Use ``--device=cpu`` for very large images
+- Close other GPU-using applications
+
+The ``--perf`` option displays GPU memory usage statistics to help
+diagnose memory issues.
+
+**Error Handling**
+
+In batch mode, if processing fails for an individual image:
+
+- The error is logged to stderr with input/output file details
+- Batch processing continues with remaining images
+- The exit code is non-zero if any images failed
+- The batch summary shows completed vs failed counts
+
+This allows large batches to complete even if some images are problematic.

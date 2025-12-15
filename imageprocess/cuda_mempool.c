@@ -44,6 +44,8 @@ struct CudaMemPool {
   atomic_size_t total_allocations;
   atomic_size_t pool_hits;
   atomic_size_t pool_misses;
+  atomic_size_t size_mismatches;   // Misses due to image size > pool buffer
+  atomic_size_t pool_exhaustion;   // Misses due to all slots in use
   atomic_size_t current_in_use;
   atomic_size_t peak_in_use;
 };
@@ -76,6 +78,8 @@ CudaMemPool *cuda_mempool_create(size_t buffer_count, size_t buffer_size) {
   atomic_init(&pool->total_allocations, 0);
   atomic_init(&pool->pool_hits, 0);
   atomic_init(&pool->pool_misses, 0);
+  atomic_init(&pool->size_mismatches, 0);
+  atomic_init(&pool->pool_exhaustion, 0);
   atomic_init(&pool->current_in_use, 0);
   atomic_init(&pool->peak_in_use, 0);
 
@@ -136,7 +140,8 @@ uint64_t cuda_mempool_acquire(CudaMemPool *pool, size_t bytes) {
   atomic_fetch_add(&pool->total_allocations, 1);
 
   // Check if size matches pool buffer size
-  if (bytes <= pool->buffer_size) {
+  bool size_mismatch = (bytes > pool->buffer_size);
+  if (!size_mismatch) {
     // Try to acquire a free slot (lock-free)
     for (size_t i = 0; i < pool->slot_count; i++) {
       int expected = SLOT_FREE;
@@ -161,6 +166,11 @@ uint64_t cuda_mempool_acquire(CudaMemPool *pool, size_t bytes) {
 
   // Pool exhausted or size mismatch - fallback to direct allocation
   atomic_fetch_add(&pool->pool_misses, 1);
+  if (size_mismatch) {
+    atomic_fetch_add(&pool->size_mismatches, 1);
+  } else {
+    atomic_fetch_add(&pool->pool_exhaustion, 1);
+  }
 
   uint64_t dptr = unpaper_cuda_malloc(bytes);
   if (dptr == 0) {
@@ -236,6 +246,8 @@ CudaMemPoolStats cuda_mempool_get_stats(const CudaMemPool *pool) {
   stats.total_allocations = atomic_load(&pool->total_allocations);
   stats.pool_hits = atomic_load(&pool->pool_hits);
   stats.pool_misses = atomic_load(&pool->pool_misses);
+  stats.size_mismatches = atomic_load(&pool->size_mismatches);
+  stats.pool_exhaustion = atomic_load(&pool->pool_exhaustion);
   stats.current_in_use = atomic_load(&pool->current_in_use);
   stats.peak_in_use = atomic_load(&pool->peak_in_use);
   stats.buffer_count = pool->slot_count;
@@ -268,6 +280,21 @@ void cuda_mempool_print_stats(const CudaMemPool *pool) {
           (double)stats.total_bytes_pooled / (1024.0 * 1024.0),
           stats.total_allocations, stats.pool_hits, hit_rate,
           stats.pool_misses, stats.peak_in_use);
+
+  // Show breakdown of miss reasons
+  if (stats.pool_misses > 0) {
+    if (stats.size_mismatches > 0) {
+      fprintf(stderr,
+              "  WARNING: %zu allocations required larger buffers (mixed image sizes)\n"
+              "           Consider increasing pool buffer size for optimal performance\n",
+              stats.size_mismatches);
+    }
+    if (stats.pool_exhaustion > 0) {
+      fprintf(stderr,
+              "  Pool exhaustion: %zu (all buffers in use, needed direct allocation)\n",
+              stats.pool_exhaustion);
+    }
+  }
 }
 
 // Global pool implementation

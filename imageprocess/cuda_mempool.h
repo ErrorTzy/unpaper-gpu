@@ -23,6 +23,8 @@ typedef struct {
   size_t total_allocations;    // Number of acquire calls
   size_t pool_hits;            // Reuses from pool (no cudaMalloc)
   size_t pool_misses;          // Required new allocation
+  size_t size_mismatches;      // Misses due to image size > pool buffer (mixed sizes)
+  size_t pool_exhaustion;      // Misses due to all pool slots in use
   size_t current_in_use;       // Currently checked-out buffers
   size_t peak_in_use;          // High water mark
   size_t total_bytes_pooled;   // Total GPU memory in pool

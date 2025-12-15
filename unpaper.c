@@ -1216,10 +1216,28 @@ int main(int argc, char *argv[]) {
       bool mempool_active = false;
       bool streampool_active = false;
       if (options.device == UNPAPER_DEVICE_CUDA) {
+        // Check available GPU memory before starting batch
+        GpuMemoryInfo mem_info;
+        if (gpu_monitor_get_memory_info(&mem_info)) {
+          verboseLog(VERBOSE_NORMAL, "GPU memory: %.1f MB free of %.1f MB total\n",
+                     (double)mem_info.free_bytes / (1024.0 * 1024.0),
+                     (double)mem_info.total_bytes / (1024.0 * 1024.0));
+        }
+
         // Estimate buffer size: A1 image is ~26MB (2500x3500 RGB24)
         // Use 8 buffers for triple-buffered 4-stream operation
         const size_t buffer_count = 8;
         const size_t buffer_size = 32 * 1024 * 1024;  // 32MB covers A1 and larger
+        const size_t total_pool_size = buffer_count * buffer_size;
+
+        // Warn if GPU memory seems low for the batch
+        if (mem_info.free_bytes > 0 && mem_info.free_bytes < total_pool_size * 2) {
+          fprintf(stderr, "WARNING: Low GPU memory available (%.1f MB free).\n"
+                          "         Pool requires %.1f MB. Batch processing may fail.\n"
+                          "         Consider reducing --jobs or using smaller images.\n",
+                  (double)mem_info.free_bytes / (1024.0 * 1024.0),
+                  (double)total_pool_size / (1024.0 * 1024.0));
+        }
 
         if (cuda_mempool_global_init(buffer_count, buffer_size)) {
           mempool_active = true;

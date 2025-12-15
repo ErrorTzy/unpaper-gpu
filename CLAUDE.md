@@ -347,14 +347,25 @@ Files use SPDX headers. Add SPDX headers to new files and validate with `reuse l
 
 **PR 27: Documentation + edge cases**
 
-- Status: not started
+- Status: complete
 - Scope:
   - Document batch processing in `doc/unpaper.1.rst`
   - Handle edge cases: mixed image sizes, GPU memory exhaustion
   - Graceful degradation when GPU memory exhausted
+- Results:
+  - Full documentation for `--batch`, `--jobs`, `--progress` options
+  - New "Batch Processing Considerations" section covering:
+    - Homogeneous image sizes for optimal GPU performance
+    - GPU memory requirements and troubleshooting
+    - Error handling behavior (failed jobs don't stop batch)
+  - Memory pool statistics now show breakdown of miss reasons:
+    - Size mismatches (images larger than pool buffer)
+    - Pool exhaustion (all buffers in use)
+  - GPU memory check at batch start with warning for low memory
+  - All CPU (24 tests) and CUDA (9 tests + 34 pytest) pass
 - Acceptance:
-  - Documentation complete
-  - Robust handling of edge cases
+  - Documentation complete [DONE]
+  - Robust handling of edge cases [DONE]
 
 #### Implementation Notes
 
