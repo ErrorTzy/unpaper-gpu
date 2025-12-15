@@ -1368,3 +1368,172 @@ extern "C" __global__ void unpaper_blackfilter_floodfill_rect(
     }
   }
 }
+
+// Blurfilter GPU scan kernel
+// Scans blocks in the dark mask integral image and identifies isolated blocks
+// to wipe. Uses NPP integral format where I[y,x] = sum from (0,0) to (x-1,y-1).
+//
+// Each thread processes one potential block position. A block is considered
+// isolated if all 4 diagonal neighbors have dark pixel ratio <= intensity.
+// Output is a list of block coordinates to wipe.
+
+// Helper: compute sum from NPP integral image for rectangle (x0,y0) to (x1,y1)
+// NPP format: I[y,x] = sum of pixels from (0,0) to (x-1,y-1)
+// Sum of rect (x0,y0)-(x1,y1) = I[y1+1,x1+1] - I[y0,x1+1] - I[y1+1,x0] + I[y0,x0]
+static __device__ __forceinline__ int64_t npp_integral_rect_sum(
+    const int32_t *integral, int integral_step_i32, int img_w, int img_h,
+    int x0, int y0, int x1, int y1) {
+  // Clamp coordinates
+  if (x0 < 0) x0 = 0;
+  if (y0 < 0) y0 = 0;
+  if (x1 >= img_w) x1 = img_w - 1;
+  if (y1 >= img_h) y1 = img_h - 1;
+  if (x0 > x1 || y0 > y1) {
+    return 0;
+  }
+
+  // Get corner values, handling boundary cases
+  // Bottom-right: I[y1+1, x1+1]
+  int64_t br = 0;
+  if (y1 + 1 < img_h && x1 + 1 < img_w) {
+    br = integral[(y1 + 1) * integral_step_i32 + (x1 + 1)];
+  }
+
+  // Top-right: I[y0, x1+1]
+  int64_t tr = 0;
+  if (x1 + 1 < img_w) {
+    tr = integral[y0 * integral_step_i32 + (x1 + 1)];
+  }
+
+  // Bottom-left: I[y1+1, x0]
+  int64_t bl = 0;
+  if (y1 + 1 < img_h) {
+    bl = integral[(y1 + 1) * integral_step_i32 + x0];
+  }
+
+  // Top-left: I[y0, x0]
+  int64_t tl = integral[y0 * integral_step_i32 + x0];
+
+  return br - tr - bl + tl;
+}
+
+// Output structure for block coordinates (x, y as pixel coordinates)
+typedef struct {
+  int x;
+  int y;
+} UnpaperBlurfilterBlock;
+
+extern "C" __global__ void unpaper_blurfilter_scan(
+    const int32_t *integral,     // GPU integral image (NPP format)
+    int integral_step,           // Bytes per row of integral image
+    int img_w, int img_h,        // Original image dimensions
+    int block_w, int block_h,    // Block size
+    float intensity,             // Isolation threshold (ratio)
+    UnpaperBlurfilterBlock *out_blocks, // Output: block coordinates
+    int *out_count,              // Output: number of blocks found (atomic)
+    int max_blocks) {            // Maximum blocks to output
+  // Calculate which block this thread processes
+  const int bx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int by = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+
+  // Calculate number of blocks in each dimension
+  const int blocks_per_row = img_w / block_w;
+  const int blocks_per_col = img_h / block_h;
+
+  if (bx >= blocks_per_row || by >= blocks_per_col) {
+    return;
+  }
+
+  const int integral_step_i32 = integral_step / (int)sizeof(int32_t);
+  const int64_t total_pixels = (int64_t)block_w * (int64_t)block_h;
+
+  // Get dark pixel count for this block
+  const int x0 = bx * block_w;
+  const int y0 = by * block_h;
+  const int x1 = x0 + block_w - 1;
+  const int y1 = y0 + block_h - 1;
+
+  // In the dark mask integral, each dark pixel contributes 255
+  // So dark_count = sum / 255
+  int64_t dark_sum = npp_integral_rect_sum(integral, integral_step_i32, img_w,
+                                           img_h, x0, y0, x1, y1);
+  int64_t dark_count = dark_sum / 255;
+
+  // If this block has no dark pixels, skip (nothing to wipe)
+  if (dark_count == 0) {
+    return;
+  }
+
+  // Check all 4 diagonal neighbors for isolation
+  // A block is isolated if ALL neighbors have ratio <= intensity
+  // Missing boundary neighbors are treated as having max density (100%)
+  // to prevent wiping edge blocks where we can't determine isolation
+  int64_t max_neighbor = 0;
+
+  // Upper-left diagonal (bx-1, by-1)
+  if (bx > 0 && by > 0) {
+    int nx0 = (bx - 1) * block_w;
+    int ny0 = (by - 1) * block_h;
+    int64_t n_sum = npp_integral_rect_sum(integral, integral_step_i32, img_w,
+                                          img_h, nx0, ny0,
+                                          nx0 + block_w - 1, ny0 + block_h - 1);
+    int64_t n_count = n_sum / 255;
+    if (n_count > max_neighbor) max_neighbor = n_count;
+  } else {
+    // Boundary: treat as max density
+    max_neighbor = total_pixels;
+  }
+
+  // Upper-right diagonal (bx+1, by-1)
+  if (bx < blocks_per_row - 1 && by > 0) {
+    int nx0 = (bx + 1) * block_w;
+    int ny0 = (by - 1) * block_h;
+    int64_t n_sum = npp_integral_rect_sum(integral, integral_step_i32, img_w,
+                                          img_h, nx0, ny0,
+                                          nx0 + block_w - 1, ny0 + block_h - 1);
+    int64_t n_count = n_sum / 255;
+    if (n_count > max_neighbor) max_neighbor = n_count;
+  } else {
+    // Boundary: treat as max density
+    max_neighbor = total_pixels;
+  }
+
+  // Lower-left diagonal (bx-1, by+1)
+  if (bx > 0 && by < blocks_per_col - 1) {
+    int nx0 = (bx - 1) * block_w;
+    int ny0 = (by + 1) * block_h;
+    int64_t n_sum = npp_integral_rect_sum(integral, integral_step_i32, img_w,
+                                          img_h, nx0, ny0,
+                                          nx0 + block_w - 1, ny0 + block_h - 1);
+    int64_t n_count = n_sum / 255;
+    if (n_count > max_neighbor) max_neighbor = n_count;
+  } else {
+    // Boundary: treat as max density
+    max_neighbor = total_pixels;
+  }
+
+  // Lower-right diagonal (bx+1, by+1)
+  if (bx < blocks_per_row - 1 && by < blocks_per_col - 1) {
+    int nx0 = (bx + 1) * block_w;
+    int ny0 = (by + 1) * block_h;
+    int64_t n_sum = npp_integral_rect_sum(integral, integral_step_i32, img_w,
+                                          img_h, nx0, ny0,
+                                          nx0 + block_w - 1, ny0 + block_h - 1);
+    int64_t n_count = n_sum / 255;
+    if (n_count > max_neighbor) max_neighbor = n_count;
+  } else {
+    // Boundary: treat as max density
+    max_neighbor = total_pixels;
+  }
+
+  // Check isolation criterion: max neighbor ratio <= intensity
+  float ratio = (float)max_neighbor / (float)total_pixels;
+  if (ratio <= intensity) {
+    // This block should be wiped - add to output list atomically
+    int idx = atomicAdd(out_count, 1);
+    if (idx < max_blocks) {
+      out_blocks[idx].x = x0;
+      out_blocks[idx].y = y0;
+    }
+  }
+}

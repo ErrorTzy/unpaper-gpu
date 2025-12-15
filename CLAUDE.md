@@ -524,36 +524,49 @@ Move all computation to GPU using:
 
 **PR 31: Blurfilter GPU Scan Kernel**
 
-- Status: planned
+- Status: complete
 - Scope:
   - Design GPU scan kernel for blurfilter block isolation detection:
     ```cuda
     __global__ void unpaper_blurfilter_scan(
-        const int32_t *integral,     // GPU integral image
+        const int32_t *integral,     // GPU integral image (NPP format)
         int integral_step,           // Bytes per row
-        int width, int height,       // Image dimensions
+        int img_w, int img_h,        // Image dimensions
         int block_w, int block_h,    // Block size
-        int64_t total_pixels,        // block_w × block_h
-        float intensity_threshold,   // Isolation threshold
-        int2 *out_blocks,            // Output: block coordinates
-        int *out_count               // Output: number of blocks found
+        float intensity,             // Isolation threshold (ratio)
+        UnpaperBlurfilterBlock *out_blocks, // Output: block coordinates
+        int *out_count,              // Output: number of blocks found (atomic)
+        int max_blocks               // Maximum blocks to output
     );
     ```
   - Algorithm:
     - Each thread processes one potential block position
-    - Compute sum from integral using standard formula
-    - Check neighbor sums for isolation criterion
+    - Compute sum from NPP integral using standard formula
+    - Check 4 diagonal neighbor sums for isolation criterion
+    - Missing boundary neighbors treated as 100% density (prevents edge artifacts)
     - Use atomic counter to collect matching blocks
   - Kernel launch parameters:
-    - Grid: `(width / block_w, height / block_h)`
-    - Block: `(16, 16)` or tuned for occupancy
+    - Grid: `((blocks_per_row + 15) / 16, (blocks_per_col + 15) / 16)`
+    - Block: `(16, 16)` for good occupancy
+- Results:
+  - `unpaper_blurfilter_scan` kernel implemented in `cuda_kernels.cu`
+  - Helper device function `npp_integral_rect_sum()` for NPP integral format
+  - Output structure `UnpaperBlurfilterBlock` with (x, y) pixel coordinates
+  - Boundary handling: missing diagonal neighbors treated as max density
+  - Unit tests verify GPU scan matches CPU reference:
+    - Isolated blocks correctly identified
+    - Non-isolated blocks (with dark diagonal neighbors) correctly skipped
+    - Empty mask produces no blocks
+    - All-dark mask produces no isolated blocks
+  - All 11 CUDA tests + 34 pytest pass
 - Files:
   - `imageprocess/cuda_kernels.cu` - add `unpaper_blurfilter_scan` kernel
-  - `imageprocess/cuda_kernels_format.h` - declare kernel
+  - `tests/cuda_blurfilter_scan_test.c` - unit tests
+  - `meson.build` - add test executable
 - Acceptance:
-  - Kernel produces same block list as CPU scan
-  - Kernel runs asynchronously on stream (no sync required)
-  - Output coordinate list small (<10KB for typical images)
+  - Kernel produces same block list as CPU scan [DONE]
+  - Kernel runs asynchronously on stream (no sync required) [DONE]
+  - Output coordinate list small (<10KB for typical images) [DONE]
 
 **PR 32: Blurfilter Integration + Single Image Validation**
 

@@ -426,4 +426,22 @@ if have_cuda
     )
 
     test('npp integral', npp_integral_test)
+
+    cuda_blurfilter_scan_test = executable(
+        'cuda_blurfilter_scan_test',
+        [
+            'tests/cuda_blurfilter_scan_test.c',
+            'imageprocess/cuda_runtime.c',
+            'imageprocess/cuda_mempool.c',
+            'imageprocess/npp_wrapper.c',
+            'imageprocess/npp_integral.c',
+            cuda_kernels_ptx_c,
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('cuda blurfilter scan', cuda_blurfilter_scan_test)
 endif
