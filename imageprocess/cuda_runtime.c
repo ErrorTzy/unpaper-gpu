@@ -54,9 +54,7 @@ typedef struct UnpaperCudaStream {
 } UnpaperCudaStream;
 
 static UnpaperCudaStream default_stream = {0};
-// Thread-local stream for multi-threaded batch processing
-// Each worker thread sets its own current stream
-static _Thread_local UnpaperCudaStream *current_stream = NULL;
+static UnpaperCudaStream *current_stream = NULL;
 static void *scratch_dptr = NULL;
 static size_t scratch_capacity = 0;
 
@@ -201,8 +199,8 @@ void unpaper_cuda_memcpy_h2d(uint64_t dst, const void *src, size_t bytes) {
     errOutput("%s", unpaper_cuda_init_status_string(st));
   }
 
-  cudaError_t err =
-      cudaMemcpy((void *)(uintptr_t)dst, src, bytes, cudaMemcpyHostToDevice);
+  cudaError_t err = cudaMemcpy((void *)(uintptr_t)dst, src, bytes,
+                               cudaMemcpyHostToDevice);
   if (err != cudaSuccess) {
     errOutput("CUDA memcpy HtoD failed: %s", cudaGetErrorString(err));
   }
@@ -545,9 +543,10 @@ void unpaper_cuda_launch_kernel(void *func, uint32_t grid_x, uint32_t grid_y,
   }
 
   cudaStream_t s = stream_handle(NULL);
-  CUresult res = driver_syms.cuLaunchKernel((CUfunction)func, grid_x, grid_y,
-                                            grid_z, block_x, block_y, block_z,
-                                            0, s, kernel_params, NULL);
+  CUresult res =
+      driver_syms.cuLaunchKernel((CUfunction)func, grid_x, grid_y, grid_z,
+                                 block_x, block_y, block_z, 0, s,
+                                 kernel_params, NULL);
   if (res != CUDA_SUCCESS) {
     errOutput("CUDA kernel launch failed: %s", cu_err(res));
   }
@@ -556,10 +555,11 @@ void unpaper_cuda_launch_kernel(void *func, uint32_t grid_x, uint32_t grid_y,
   // implicitly wait for kernels to complete. This allows kernel pipelining.
 }
 
-void unpaper_cuda_launch_kernel_on_stream(UnpaperCudaStream *stream, void *func,
-                                          uint32_t grid_x, uint32_t grid_y,
-                                          uint32_t grid_z, uint32_t block_x,
-                                          uint32_t block_y, uint32_t block_z,
+void unpaper_cuda_launch_kernel_on_stream(UnpaperCudaStream *stream,
+                                          void *func, uint32_t grid_x,
+                                          uint32_t grid_y, uint32_t grid_z,
+                                          uint32_t block_x, uint32_t block_y,
+                                          uint32_t block_z,
                                           void **kernel_params) {
   UnpaperCudaInitStatus st = unpaper_cuda_try_init();
   if (st != UNPAPER_CUDA_INIT_OK) {
@@ -672,69 +672,4 @@ double unpaper_cuda_event_pair_stop_ms_on(UnpaperCudaStream *stream,
 void *unpaper_cuda_stream_get_raw_handle(UnpaperCudaStream *stream) {
   cudaStream_t s = stream_handle(stream);
   return (void *)s;
-}
-
-// ============================================================================
-// Deferred Sync API using CUDA Events
-// ============================================================================
-
-typedef struct UnpaperCudaEvent {
-  cudaEvent_t event;
-} UnpaperCudaEvent;
-
-UnpaperCudaEvent *unpaper_cuda_event_create(void) {
-  UnpaperCudaInitStatus st = unpaper_cuda_try_init();
-  if (st != UNPAPER_CUDA_INIT_OK) {
-    return NULL;
-  }
-
-  UnpaperCudaEvent *ev = calloc(1, sizeof(*ev));
-  if (ev == NULL) {
-    return NULL;
-  }
-
-  // Use cudaEventDisableTiming for better performance (we don't need timing)
-  cudaError_t err = cudaEventCreateWithFlags(&ev->event, cudaEventDisableTiming);
-  if (err != cudaSuccess || ev->event == NULL) {
-    free(ev);
-    return NULL;
-  }
-
-  return ev;
-}
-
-void unpaper_cuda_event_destroy(UnpaperCudaEvent *event) {
-  if (event == NULL) {
-    return;
-  }
-  if (event->event != NULL) {
-    (void)cudaEventDestroy(event->event);
-  }
-  free(event);
-}
-
-bool unpaper_cuda_event_record(UnpaperCudaEvent *event,
-                               UnpaperCudaStream *stream) {
-  if (event == NULL || event->event == NULL) {
-    return false;
-  }
-  cudaStream_t s = stream_handle(stream);
-  cudaError_t err = cudaEventRecord(event->event, s);
-  return (err == cudaSuccess);
-}
-
-bool unpaper_cuda_event_sync(UnpaperCudaEvent *event) {
-  if (event == NULL || event->event == NULL) {
-    return false;
-  }
-  cudaError_t err = cudaEventSynchronize(event->event);
-  return (err == cudaSuccess);
-}
-
-bool unpaper_cuda_event_query(UnpaperCudaEvent *event) {
-  if (event == NULL || event->event == NULL) {
-    return false;
-  }
-  cudaError_t err = cudaEventQuery(event->event);
-  return (err == cudaSuccess);
 }

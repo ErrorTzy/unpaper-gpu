@@ -68,10 +68,11 @@ void unpaper_cuda_launch_kernel(void *func, uint32_t grid_x, uint32_t grid_y,
                                 uint32_t grid_z, uint32_t block_x,
                                 uint32_t block_y, uint32_t block_z,
                                 void **kernel_params);
-void unpaper_cuda_launch_kernel_on_stream(UnpaperCudaStream *stream, void *func,
-                                          uint32_t grid_x, uint32_t grid_y,
-                                          uint32_t grid_z, uint32_t block_x,
-                                          uint32_t block_y, uint32_t block_z,
+void unpaper_cuda_launch_kernel_on_stream(UnpaperCudaStream *stream,
+                                          void *func, uint32_t grid_x,
+                                          uint32_t grid_y, uint32_t grid_z,
+                                          uint32_t block_x, uint32_t block_y,
+                                          uint32_t block_z,
                                           void **kernel_params);
 
 bool unpaper_cuda_events_supported(void);
@@ -85,29 +86,6 @@ double unpaper_cuda_event_pair_stop_ms_on(UnpaperCudaStream *stream,
                                           void **start, void **stop);
 
 void *unpaper_cuda_stream_get_raw_handle(UnpaperCudaStream *stream);
-
-// Deferred sync API using CUDA events
-// These functions allow tracking operation completion without full stream syncs,
-// enabling better parallelism in multi-stream batch processing.
-typedef struct UnpaperCudaEvent UnpaperCudaEvent;
-
-// Create a CUDA event. Returns NULL on failure.
-UnpaperCudaEvent *unpaper_cuda_event_create(void);
-
-// Destroy a CUDA event. Safe to call with NULL.
-void unpaper_cuda_event_destroy(UnpaperCudaEvent *event);
-
-// Record an event on a stream. The event will be signaled when all prior
-// operations on the stream complete. Returns true on success.
-bool unpaper_cuda_event_record(UnpaperCudaEvent *event,
-                               UnpaperCudaStream *stream);
-
-// Wait for an event to complete (blocking). Returns true on success.
-bool unpaper_cuda_event_sync(UnpaperCudaEvent *event);
-
-// Query if an event has completed (non-blocking).
-// Returns true if completed, false if not yet completed or error.
-bool unpaper_cuda_event_query(UnpaperCudaEvent *event);
 
 #ifdef __cplusplus
 }
