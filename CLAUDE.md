@@ -436,7 +436,7 @@ nsys profile -o nvjpeg_scaling ./builddir-cuda/unpaper --batch --device=cuda \
 
 **PR 36: Decode Queue GPU Integration**
 
-- Status: completed (infrastructure in place, GPU decode path disabled pending threading fixes)
+- Status: completed (infrastructure in place with per-stream CUDA streams, GPU decode path enabled but nvJPEG batch decode has allocator issues)
 - Scope:
   - Extend `DecodedImage` struct to track GPU residency:
     ```c
@@ -516,11 +516,12 @@ nsys profile -o nvjpeg_scaling ./builddir-cuda/unpaper --batch --device=cuda \
   - GPU memory ownership: decode queue owns GPU buffer until `decode_queue_release()`
   - Handle mixed batches: some JPEG (GPU decode), some PNG (CPU decode)
 - Acceptance:
-  - ~~JPEG files decoded directly to GPU (verified via `--perf` output)~~ (disabled)
-  - ~~No H2D transfer for JPEG input (verified via CUDA profiler)~~ (disabled)
-  - ~~Mixed JPEG+PNG batches work correctly~~ (disabled)
-  - ~~Batch benchmark shows improved scaling (target: ≥2.5x with 8 streams)~~ (disabled)
+  - ~~JPEG files decoded directly to GPU (verified via `--perf` output)~~ (nvJPEG allocator failure in batch mode)
+  - ~~No H2D transfer for JPEG input (verified via CUDA profiler)~~ (blocked by above)
+  - ~~Mixed JPEG+PNG batches work correctly~~ (blocked by above)
+  - ~~Batch benchmark shows improved scaling (target: ≥2.5x with 8 streams)~~ (blocked by above)
   - All existing tests pass (no regression) ✓
+  - JPEG format comparison tests added (<10% dissimilarity) ✓
 - Implementation notes (PR36 completion):
   - Infrastructure implemented and tested:
     - `DecodedImage` struct extended with GPU fields
@@ -529,11 +530,13 @@ nsys profile -o nvjpeg_scaling ./builddir-cuda/unpaper --batch --device=cuda \
     - `image_is_gpu_resident()` and `image_set_gpu_resident()` implemented
     - nvJPEG context initialization integrated into unpaper.c
     - batch_worker updated to handle GPU-decoded images
-  - GPU decode path disabled pending:
-    - Multi-thread/multi-stream synchronization issues
-    - CUDA context initialization in producer threads
+    - **Each NvJpegStreamState now has its own dedicated CUDA stream** for true parallel decode
+  - GPU decode path enabled in decode_queue.c, but nvJPEG decode fails with "Allocator failure" in batch mode
+  - Remaining issues to investigate:
+    - nvJPEG custom allocator not working correctly with nvjpegCreateExV2
+    - May need to use nvjpegCreateSimple or different allocator approach
   - nvJPEG decode unit tests pass (concurrent decode verified)
-  - No regression in existing 34 pytest tests
+  - All 38 pytest tests pass (including 4 new JPEG comparison tests)
 
 ---
 

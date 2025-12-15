@@ -25,21 +25,23 @@
 #define NVJPEG_MEM_PADDING (1024 * 1024)
 
 // Per-stream state for nvJPEG decode operations
+// When using nvjpegCreateExV2 with custom allocators, nvJPEG manages internal
+// buffers automatically via the custom allocators. We only need the state,
+// stream, and parser.
 struct NvJpegStreamState {
-  nvjpegJpegState_t state;          // Decoder state (per-stream)
-  nvjpegBufferDevice_t dev_buffer;  // GPU output buffer (per-stream)
-  nvjpegBufferPinned_t pin_buffer[2];  // Pinned staging (double-buffer)
-  nvjpegJpegStream_t jpeg_stream;   // Bitstream parser (per-stream)
-  int current_pin_buffer;           // Toggle for double-buffering
-  atomic_int in_use;                // SLOT_FREE or SLOT_IN_USE
+  nvjpegJpegState_t state;        // Decoder state (per-stream)
+  nvjpegJpegStream_t jpeg_stream; // Bitstream parser (per-stream)
+  cudaStream_t decode_stream; // Dedicated CUDA stream for this state (CRITICAL
+                              // for parallelism)
+  atomic_int in_use;          // SLOT_FREE or SLOT_IN_USE
 };
 
 // Global nvJPEG context (singleton)
 typedef struct {
-  nvjpegHandle_t handle;              // Global handle (one per process)
-  NvJpegStreamState *stream_states;   // Array[num_streams]
-  int num_streams;                    // Number of stream states
-  bool initialized;                   // Initialization flag
+  nvjpegHandle_t handle;            // Global handle (one per process)
+  NvJpegStreamState *stream_states; // Array[num_streams]
+  int num_streams;                  // Number of stream states
+  bool initialized;                 // Initialization flag
 
   // Statistics (atomic for thread safety)
   atomic_size_t total_decodes;
@@ -146,9 +148,9 @@ static nvjpegOutputFormat_t to_nvjpeg_format(NvJpegOutputFormat fmt) {
   case NVJPEG_FMT_GRAY8:
     return NVJPEG_OUTPUT_Y;
   case NVJPEG_FMT_RGB:
-    return NVJPEG_OUTPUT_RGBI;  // Interleaved RGB
+    return NVJPEG_OUTPUT_RGBI; // Interleaved RGB
   case NVJPEG_FMT_BGR:
-    return NVJPEG_OUTPUT_BGRI;  // Interleaved BGR
+    return NVJPEG_OUTPUT_BGRI; // Interleaved BGR
   default:
     return NVJPEG_OUTPUT_RGBI;
   }
@@ -185,67 +187,41 @@ static void update_peak_usage(void) {
 static bool init_stream_state(NvJpegStreamState *state) {
   nvjpegStatus_t status;
 
+  // Create dedicated CUDA stream for this nvJPEG state
+  // CRITICAL: Each nvJPEG state MUST have its own stream for true parallelism.
+  // Without dedicated streams, all decodes serialize on the default stream,
+  // defeating multi-stream scaling.
+  cudaError_t cuda_err = cudaStreamCreate(&state->decode_stream);
+  if (cuda_err != cudaSuccess) {
+    verboseLog(VERBOSE_DEBUG, "nvjpeg: failed to create CUDA stream: %s\n",
+               cudaGetErrorString(cuda_err));
+    return false;
+  }
+
   // Create decoder state
+  // When nvjpegCreateExV2 was used with custom allocators, nvJPEG will use
+  // those allocators for internal device and pinned buffers automatically.
   status = nvjpegJpegStateCreate(g_nvjpeg_ctx.handle, &state->state);
   if (status != NVJPEG_STATUS_SUCCESS) {
+    cudaStreamDestroy(state->decode_stream);
+    state->decode_stream = NULL;
     verboseLog(VERBOSE_DEBUG, "nvjpeg: failed to create state: %s\n",
                nvjpeg_status_string(status));
     return false;
   }
 
-  // Create device buffer
-  status = nvjpegBufferDeviceCreate(g_nvjpeg_ctx.handle, NULL,
-                                    &state->dev_buffer);
-  if (status != NVJPEG_STATUS_SUCCESS) {
-    nvjpegJpegStateDestroy(state->state);
-    verboseLog(VERBOSE_DEBUG, "nvjpeg: failed to create device buffer: %s\n",
-               nvjpeg_status_string(status));
-    return false;
-  }
-
-  // Create pinned buffers (double-buffer for async)
-  for (int i = 0; i < 2; i++) {
-    status = nvjpegBufferPinnedCreate(g_nvjpeg_ctx.handle, NULL,
-                                      &state->pin_buffer[i]);
-    if (status != NVJPEG_STATUS_SUCCESS) {
-      nvjpegBufferDeviceDestroy(state->dev_buffer);
-      nvjpegJpegStateDestroy(state->state);
-      for (int j = 0; j < i; j++) {
-        nvjpegBufferPinnedDestroy(state->pin_buffer[j]);
-      }
-      verboseLog(VERBOSE_DEBUG, "nvjpeg: failed to create pinned buffer: %s\n",
-                 nvjpeg_status_string(status));
-      return false;
-    }
-  }
-
-  // Create JPEG stream parser
+  // Create JPEG stream parser (used for phased decoding, optional for simple
+  // API)
   status = nvjpegJpegStreamCreate(g_nvjpeg_ctx.handle, &state->jpeg_stream);
   if (status != NVJPEG_STATUS_SUCCESS) {
-    nvjpegBufferDeviceDestroy(state->dev_buffer);
-    for (int i = 0; i < 2; i++) {
-      nvjpegBufferPinnedDestroy(state->pin_buffer[i]);
-    }
     nvjpegJpegStateDestroy(state->state);
+    cudaStreamDestroy(state->decode_stream);
+    state->decode_stream = NULL;
     verboseLog(VERBOSE_DEBUG, "nvjpeg: failed to create JPEG stream: %s\n",
                nvjpeg_status_string(status));
     return false;
   }
 
-  // Attach buffers to state
-  status = nvjpegStateAttachDeviceBuffer(state->state, state->dev_buffer);
-  if (status != NVJPEG_STATUS_SUCCESS) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg: failed to attach device buffer: %s\n",
-               nvjpeg_status_string(status));
-  }
-
-  status = nvjpegStateAttachPinnedBuffer(state->state, state->pin_buffer[0]);
-  if (status != NVJPEG_STATUS_SUCCESS) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg: failed to attach pinned buffer: %s\n",
-               nvjpeg_status_string(status));
-  }
-
-  state->current_pin_buffer = 0;
   atomic_init(&state->in_use, SLOT_FREE);
 
   return true;
@@ -256,19 +232,14 @@ static void cleanup_stream_state(NvJpegStreamState *state) {
     nvjpegJpegStreamDestroy(state->jpeg_stream);
     state->jpeg_stream = NULL;
   }
-  for (int i = 0; i < 2; i++) {
-    if (state->pin_buffer[i] != NULL) {
-      nvjpegBufferPinnedDestroy(state->pin_buffer[i]);
-      state->pin_buffer[i] = NULL;
-    }
-  }
-  if (state->dev_buffer != NULL) {
-    nvjpegBufferDeviceDestroy(state->dev_buffer);
-    state->dev_buffer = NULL;
-  }
   if (state->state != NULL) {
     nvjpegJpegStateDestroy(state->state);
     state->state = NULL;
+  }
+  // Destroy dedicated CUDA stream
+  if (state->decode_stream != NULL) {
+    cudaStreamDestroy(state->decode_stream);
+    state->decode_stream = NULL;
   }
 }
 
@@ -322,14 +293,18 @@ bool nvjpeg_context_init(int num_streams) {
   }
 
   // Set memory padding to reduce reallocations
-  status = nvjpegSetDeviceMemoryPadding(NVJPEG_MEM_PADDING, g_nvjpeg_ctx.handle);
+  status =
+      nvjpegSetDeviceMemoryPadding(NVJPEG_MEM_PADDING, g_nvjpeg_ctx.handle);
   if (status != NVJPEG_STATUS_SUCCESS) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg: warning - failed to set device padding\n");
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg: warning - failed to set device padding\n");
   }
 
-  status = nvjpegSetPinnedMemoryPadding(NVJPEG_MEM_PADDING, g_nvjpeg_ctx.handle);
+  status =
+      nvjpegSetPinnedMemoryPadding(NVJPEG_MEM_PADDING, g_nvjpeg_ctx.handle);
   if (status != NVJPEG_STATUS_SUCCESS) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg: warning - failed to set pinned padding\n");
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg: warning - failed to set pinned padding\n");
   }
 
   // Allocate stream state pool
@@ -477,11 +452,8 @@ void nvjpeg_release_stream_state(NvJpegStreamState *state) {
     return;
   }
 
-  // Toggle pinned buffer for next decode
-  state->current_pin_buffer = 1 - state->current_pin_buffer;
-  nvjpegStateAttachPinnedBuffer(state->state,
-                                state->pin_buffer[state->current_pin_buffer]);
-
+  // nvJPEG manages internal buffers via custom allocators, no manual buffer
+  // management needed here.
   atomic_store(&state->in_use, SLOT_FREE);
   atomic_fetch_sub(&g_nvjpeg_ctx.current_in_use, 1);
 }
@@ -532,9 +504,13 @@ bool nvjpeg_decode_to_gpu(const uint8_t *jpeg_data, size_t jpeg_size,
 
   atomic_fetch_add(&g_nvjpeg_ctx.total_decodes, 1);
 
-  // Get CUDA stream handle
-  cudaStream_t cuda_stream =
-      (cudaStream_t)unpaper_cuda_stream_get_raw_handle(stream);
+  // CRITICAL: Use the state's dedicated stream, NOT the passed-in stream.
+  // Each nvJPEG stream state has its own CUDA stream to enable true
+  // parallelism. Using a shared stream would serialize all decodes, defeating
+  // multi-stream scaling. The passed-in stream parameter is kept for API
+  // compatibility but ignored.
+  (void)stream; // Unused - using state->decode_stream instead
+  cudaStream_t cuda_stream = state->decode_stream;
 
   nvjpegStatus_t status;
 
@@ -597,8 +573,9 @@ bool nvjpeg_decode_to_gpu(const uint8_t *jpeg_data, size_t jpeg_size,
     return false;
   }
 
-  // Synchronize to ensure decode is complete before another thread uses the data
-  // This is necessary since the producer thread and worker threads are different
+  // Synchronize to ensure decode is complete before another thread uses the
+  // data This is necessary since the producer thread and worker threads are
+  // different
   cudaError_t sync_err = cudaStreamSynchronize(cuda_stream);
   if (sync_err != cudaSuccess) {
     verboseLog(VERBOSE_DEBUG, "nvjpeg: stream sync failed\n");
@@ -639,7 +616,7 @@ bool nvjpeg_decode_file_to_gpu(const char *filename, UnpaperCudaStream *stream,
   long file_size = ftell(f);
   fseek(f, 0, SEEK_SET);
 
-  if (file_size <= 0 || file_size > (long)(1024 * 1024 * 100)) {  // Max 100MB
+  if (file_size <= 0 || file_size > (long)(1024 * 1024 * 100)) { // Max 100MB
     fclose(f);
     verboseLog(VERBOSE_DEBUG, "nvjpeg: invalid file size: %s\n", filename);
     return false;
@@ -679,7 +656,7 @@ bool nvjpeg_decode_file_to_gpu(const char *filename, UnpaperCudaStream *stream,
   return result;
 }
 
-#else  // !UNPAPER_WITH_CUDA
+#else // !UNPAPER_WITH_CUDA
 
 // Stub implementations for non-CUDA builds
 
@@ -736,4 +713,4 @@ bool nvjpeg_decode_file_to_gpu(const char *filename, UnpaperCudaStream *stream,
   return false;
 }
 
-#endif  // UNPAPER_WITH_CUDA
+#endif // UNPAPER_WITH_CUDA

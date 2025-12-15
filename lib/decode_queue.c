@@ -16,20 +16,20 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>  // For strcasecmp
+#include <strings.h> // For strcasecmp
 
 #ifdef UNPAPER_WITH_CUDA
-#include <cuda_runtime_api.h>
 #include "imageprocess/cuda_runtime.h"
 #include "imageprocess/nvjpeg_decode.h"
+#include <cuda_runtime_api.h>
 #endif
 
 // Slot states
 typedef enum {
-  SLOT_EMPTY = 0,     // Available for producer
-  SLOT_DECODING,      // Producer is decoding into this slot
-  SLOT_READY,         // Decoded and ready for consumer
-  SLOT_IN_USE,        // Consumer is using this slot
+  SLOT_EMPTY = 0, // Available for producer
+  SLOT_DECODING,  // Producer is decoding into this slot
+  SLOT_READY,     // Decoded and ready for consumer
+  SLOT_IN_USE,    // Consumer is using this slot
 } SlotState;
 
 // Check if filename has JPEG extension
@@ -66,7 +66,7 @@ static bool decode_jpeg_to_gpu(const char *filename, DecodedImage *out) {
   long file_size = ftell(f);
   fseek(f, 0, SEEK_SET);
 
-  if (file_size <= 0 || file_size > (long)(100 * 1024 * 1024)) {  // Max 100MB
+  if (file_size <= 0 || file_size > (long)(100 * 1024 * 1024)) { // Max 100MB
     fclose(f);
     return false;
   }
@@ -103,8 +103,8 @@ static bool decode_jpeg_to_gpu(const char *filename, DecodedImage *out) {
   // Use grayscale for 1-channel, RGB for multi-channel
   NvJpegOutputFormat fmt = (channels == 1) ? NVJPEG_FMT_GRAY8 : NVJPEG_FMT_RGB;
 
-  bool result = nvjpeg_decode_to_gpu(jpeg_data, (size_t)file_size, state,
-                                      NULL, fmt, &nvout);
+  bool result = nvjpeg_decode_to_gpu(jpeg_data, (size_t)file_size, state, NULL,
+                                     fmt, &nvout);
 
   nvjpeg_release_stream_state(state);
   free(jpeg_data);
@@ -122,11 +122,11 @@ static bool decode_jpeg_to_gpu(const char *filename, DecodedImage *out) {
   out->gpu_channels = nvout.channels;
   // Map nvJPEG format to AVPixelFormat
   out->gpu_format = (nvout.channels == 1) ? AV_PIX_FMT_GRAY8 : AV_PIX_FMT_RGB24;
-  out->frame = NULL;  // No CPU frame needed
+  out->frame = NULL; // No CPU frame needed
 
   return true;
 }
-#endif  // UNPAPER_WITH_CUDA
+#endif // UNPAPER_WITH_CUDA
 
 // A slot in the decode queue
 typedef struct {
@@ -148,7 +148,7 @@ struct DecodeQueue {
   int num_producers;
   bool producer_started;
   atomic_bool producer_running;
-  atomic_int producers_done;  // Counter of completed producers
+  atomic_int producers_done; // Counter of completed producers
 
   // Shared job counter for work distribution among producers
   atomic_size_t next_job_index;
@@ -159,12 +159,12 @@ struct DecodeQueue {
 
   // Configuration
   bool use_pinned_memory;
-  bool use_gpu_decode;        // Enable nvJPEG GPU decode for JPEG files
+  bool use_gpu_decode; // Enable nvJPEG GPU decode for JPEG files
 
   // Synchronization
   pthread_mutex_t mutex;
-  pthread_cond_t not_full;   // Signal when slot becomes empty
-  pthread_cond_t not_empty;  // Signal when slot becomes ready
+  pthread_cond_t not_full;  // Signal when slot becomes empty
+  pthread_cond_t not_empty; // Signal when slot becomes ready
 
   // Statistics (atomic for thread safety)
   atomic_size_t images_decoded;
@@ -328,16 +328,15 @@ static AVFrame *copy_to_pinned_frame(AVFrame *src, bool *is_pinned) {
     return NULL;
   }
 
-  AVFrame *dst = alloc_frame_pinned(src->width, src->height, src->format,
-                                    true, is_pinned);
+  AVFrame *dst =
+      alloc_frame_pinned(src->width, src->height, src->format, true, is_pinned);
   if (!dst) {
     return NULL;
   }
 
   // Copy image data
-  av_image_copy(dst->data, dst->linesize,
-                (const uint8_t **)src->data, src->linesize,
-                src->format, src->width, src->height);
+  av_image_copy(dst->data, dst->linesize, (const uint8_t **)src->data,
+                src->linesize, src->format, src->width, src->height);
 
   return dst;
 }
@@ -390,7 +389,7 @@ static void *producer_thread_fn(void *arg) {
     // Atomically get next job index
     size_t job_idx = atomic_fetch_add(&queue->next_job_index, 1);
     if (job_idx >= batch->count) {
-      break;  // No more jobs
+      break; // No more jobs
     }
 
     BatchJob *job = batch_queue_get(batch, job_idx);
@@ -406,7 +405,7 @@ static void *producer_thread_fn(void *arg) {
 
       const char *filename = job->input_files[input_idx];
       if (!filename) {
-        continue;  // Skip blank pages
+        continue; // Skip blank pages
       }
 
       // Wait for an empty slot
@@ -442,13 +441,10 @@ static void *producer_thread_fn(void *arg) {
       slot->image.gpu_format = 0;
 
 #ifdef UNPAPER_WITH_CUDA
-      // Try GPU decode for JPEG files
-      // NOTE: GPU decode path (nvJPEG) is disabled pending resolution of:
-      // 1. Threading synchronization issues with multi-stream decode
-      // 2. Need for pixel format conversion (FFmpeg JPEG→YUV vs nvJPEG→RGB)
-      // The infrastructure (nvJPEG context, stream state pool, Image GPU helpers)
-      // is in place and tested; re-enable when threading issues are resolved.
-      if (false && queue->use_gpu_decode && is_jpeg_file(filename)) {
+      // Try GPU decode for JPEG files using nvJPEG
+      // Each nvJPEG stream state has its own dedicated CUDA stream for true
+      // parallelism. This avoids the threading issues with shared streams.
+      if (queue->use_gpu_decode && is_jpeg_file(filename)) {
         decode_success = decode_jpeg_to_gpu(filename, &slot->image);
         if (decode_success) {
           slot->image.job_index = (int)job_idx;
@@ -538,8 +534,8 @@ static void *producer_thread_fn(void *arg) {
 
 // Internal create function with producer count
 static DecodeQueue *decode_queue_create_internal(size_t queue_depth,
-                                                  bool use_pinned_memory,
-                                                  int num_producers) {
+                                                 bool use_pinned_memory,
+                                                 int num_producers) {
   if (queue_depth == 0 || num_producers < 1) {
     return NULL;
   }
@@ -560,7 +556,7 @@ static DecodeQueue *decode_queue_create_internal(size_t queue_depth,
 
   queue->queue_depth = queue_depth;
   queue->use_pinned_memory = use_pinned_memory;
-  queue->use_gpu_decode = false;  // Disabled by default
+  queue->use_gpu_decode = false; // Disabled by default
   queue->num_producers = num_producers;
   queue->producer_started = false;
   atomic_init(&queue->producer_running, false);
@@ -599,9 +595,11 @@ DecodeQueue *decode_queue_create(size_t queue_depth, bool use_pinned_memory) {
   return decode_queue_create_internal(queue_depth, use_pinned_memory, 1);
 }
 
-DecodeQueue *decode_queue_create_parallel(size_t queue_depth, bool use_pinned_memory,
+DecodeQueue *decode_queue_create_parallel(size_t queue_depth,
+                                          bool use_pinned_memory,
                                           int num_producers) {
-  return decode_queue_create_internal(queue_depth, use_pinned_memory, num_producers);
+  return decode_queue_create_internal(queue_depth, use_pinned_memory,
+                                      num_producers);
 }
 
 void decode_queue_enable_gpu_decode(DecodeQueue *queue, bool enable) {
@@ -638,11 +636,9 @@ void decode_queue_destroy(DecodeQueue *queue) {
 #ifdef UNPAPER_WITH_CUDA
       if (slot->image.uses_pinned_memory && slot->image.frame->data[0]) {
         // Free pinned buffer
-        UnpaperCudaPinnedBuffer buf = {
-          .ptr = slot->image.frame->data[0],
-          .bytes = 0,  // Size not needed for free
-          .is_pinned = true
-        };
+        UnpaperCudaPinnedBuffer buf = {.ptr = slot->image.frame->data[0],
+                                       .bytes = 0, // Size not needed for free
+                                       .is_pinned = true};
         // Clear frame data pointers before free
         slot->image.frame->data[0] = NULL;
         unpaper_cuda_pinned_free(&buf);
@@ -675,7 +671,8 @@ bool decode_queue_start_producer(DecodeQueue *queue, BatchQueue *batch_queue,
   // Start all producer threads
   int started = 0;
   for (int i = 0; i < queue->num_producers; i++) {
-    if (pthread_create(&queue->producer_threads[i], NULL, producer_thread_fn, queue) != 0) {
+    if (pthread_create(&queue->producer_threads[i], NULL, producer_thread_fn,
+                       queue) != 0) {
       // Failed to create thread - continue with fewer
       break;
     }
@@ -733,7 +730,7 @@ DecodedImage *decode_queue_get(DecodeQueue *queue, int job_index,
       if (slot_idx >= 0) {
         return &queue->slots[slot_idx].image;
       }
-      return NULL;  // Image not available and won't be
+      return NULL; // Image not available and won't be
     }
 
     // Wait for producer
@@ -768,10 +765,7 @@ void decode_queue_release(DecodeQueue *queue, DecodedImage *image) {
 #ifdef UNPAPER_WITH_CUDA
         if (slot->image.uses_pinned_memory && slot->image.frame->data[0]) {
           UnpaperCudaPinnedBuffer buf = {
-            .ptr = slot->image.frame->data[0],
-            .bytes = 0,
-            .is_pinned = true
-          };
+              .ptr = slot->image.frame->data[0], .bytes = 0, .is_pinned = true};
           slot->image.frame->data[0] = NULL;
           unpaper_cuda_pinned_free(&buf);
         }
@@ -840,10 +834,12 @@ void decode_queue_print_stats(const DecodeQueue *queue) {
   double producer_wait_rate = 0.0;
   double consumer_wait_rate = 0.0;
   if (stats.images_decoded > 0) {
-    producer_wait_rate = 100.0 * (double)stats.producer_waits / (double)stats.images_decoded;
+    producer_wait_rate =
+        100.0 * (double)stats.producer_waits / (double)stats.images_decoded;
   }
   if (stats.images_consumed > 0) {
-    consumer_wait_rate = 100.0 * (double)stats.consumer_waits / (double)stats.images_consumed;
+    consumer_wait_rate =
+        100.0 * (double)stats.consumer_waits / (double)stats.images_consumed;
   }
 
   fprintf(stderr,
@@ -856,9 +852,8 @@ void decode_queue_print_stats(const DecodeQueue *queue) {
           "  Peak queue occupancy: %zu\n"
           "  Pinned memory allocations: %zu\n",
           queue->queue_depth, stats.images_decoded, stats.images_consumed,
-          stats.producer_waits, producer_wait_rate,
-          stats.consumer_waits, consumer_wait_rate,
-          stats.peak_queue_depth, stats.pinned_allocations);
+          stats.producer_waits, producer_wait_rate, stats.consumer_waits,
+          consumer_wait_rate, stats.peak_queue_depth, stats.pinned_allocations);
 
   // Print GPU decode stats if any GPU decodes occurred
   if (stats.gpu_decodes > 0 || stats.gpu_decode_failures > 0) {
@@ -872,7 +867,7 @@ void decode_queue_print_stats(const DecodeQueue *queue) {
             "    GPU decodes (nvJPEG): %zu (%.1f%%)\n"
             "    CPU decodes (FFmpeg): %zu\n"
             "    GPU decode failures: %zu\n",
-            stats.gpu_decodes, gpu_decode_rate,
-            stats.cpu_decodes, stats.gpu_decode_failures);
+            stats.gpu_decodes, gpu_decode_rate, stats.cpu_decodes,
+            stats.gpu_decode_failures);
   }
 }

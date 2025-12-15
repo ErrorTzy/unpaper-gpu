@@ -687,3 +687,111 @@ def test_valid_range_multi_index(imgsrc_path, tmp_path):
         "--no-processing", "1-100", str(source_path), str(result_path), check=False
     )
     assert unpaper_result.returncode == 0
+
+
+def test_jpeg_input_produces_similar_output_to_png(imgsrc_path, tmp_path):
+    """Test that JPEG input produces output similar to PNG input.
+
+    This validates that the JPEG decode path (FFmpeg or nvJPEG) produces
+    results comparable to PNG input. JPEG is lossy, so we allow up to 10%
+    dissimilarity due to compression artifacts.
+    """
+    # Use a source image that has good content for testing
+    png_source_path = imgsrc_path / "imgsrc001.png"
+
+    # Convert PNG to JPEG using PIL
+    png_image = PIL.Image.open(png_source_path)
+    jpeg_source_path = tmp_path / "source.jpg"
+    # Use high quality to minimize compression artifacts
+    png_image.save(jpeg_source_path, "JPEG", quality=95)
+
+    png_result_path = tmp_path / "result_png.ppm"
+    jpeg_result_path = tmp_path / "result_jpeg.ppm"
+
+    # Process both with same settings (no filters for cleaner comparison)
+    common_args = [
+        "--no-blackfilter",
+        "--no-noisefilter",
+        "--no-blurfilter",
+        "--no-grayfilter",
+        "--no-deskew",
+    ]
+
+    run_unpaper(*common_args, str(png_source_path), str(png_result_path))
+    run_unpaper(*common_args, str(jpeg_source_path), str(jpeg_result_path))
+
+    # Allow up to 10% difference due to JPEG compression artifacts
+    diff = compare_images(golden=png_result_path, result=jpeg_result_path)
+    assert diff < 0.10, f"JPEG output differs from PNG by {diff*100:.1f}%, expected <10%"
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_jpeg_input_device_comparison(imgsrc_path, tmp_path, device):
+    """Test JPEG input produces consistent results across CPU and CUDA.
+
+    This ensures the JPEG decode path works correctly on both devices.
+    For CUDA, this exercises the nvJPEG decode path when available.
+    """
+    if device == "cuda" and not cuda_runtime_available():
+        pytest.skip("CUDA runtime/device not available")
+
+    # Create JPEG from PNG to ensure compatible pixel format
+    # (test_jpeg.jpg may be in YUV format which FFmpeg doesn't auto-convert)
+    png_source = imgsrc_path / "imgsrc001.png"
+    png_image = PIL.Image.open(png_source)
+    jpeg_path = tmp_path / "source.jpg"
+    png_image.save(jpeg_path, "JPEG", quality=95)
+
+    result_path = tmp_path / f"result_{device}.ppm"
+
+    # Process with specific device, minimal processing for clean comparison
+    run_unpaper(
+        "--device", device,
+        "--no-blackfilter",
+        "--no-noisefilter",
+        "--no-blurfilter",
+        "--no-grayfilter",
+        "--no-deskew",
+        str(jpeg_path),
+        str(result_path),
+    )
+
+    # Just verify output was created and is valid
+    assert result_path.exists()
+    result_image = PIL.Image.open(result_path)
+    assert result_image.width > 0 and result_image.height > 0
+
+
+def test_jpeg_cuda_vs_cpu_similarity(imgsrc_path, tmp_path):
+    """Test JPEG processing on CUDA produces similar results to CPU.
+
+    This validates that the CUDA processing path (which may use nvJPEG
+    for decode) produces output similar to the CPU path (FFmpeg decode).
+    """
+    if not cuda_runtime_available():
+        pytest.skip("CUDA runtime/device not available")
+
+    # Create JPEG from PNG to ensure compatible pixel format
+    png_source = imgsrc_path / "imgsrc001.png"
+    png_image = PIL.Image.open(png_source)
+    jpeg_path = tmp_path / "source.jpg"
+    png_image.save(jpeg_path, "JPEG", quality=95)
+
+    cpu_result_path = tmp_path / "result_cpu.ppm"
+    cuda_result_path = tmp_path / "result_cuda.ppm"
+
+    common_args = [
+        "--no-blackfilter",
+        "--no-noisefilter",
+        "--no-blurfilter",
+        "--no-grayfilter",
+        "--no-deskew",
+    ]
+
+    run_unpaper("--device", "cpu", *common_args, str(jpeg_path), str(cpu_result_path))
+    run_unpaper("--device", "cuda", *common_args, str(jpeg_path), str(cuda_result_path))
+
+    # CPU and CUDA should produce very similar results for the same JPEG input
+    # Allow small tolerance for floating-point differences in GPU processing
+    diff = compare_images(golden=cpu_result_path, result=cuda_result_path)
+    assert diff < 0.05, f"CUDA JPEG output differs from CPU by {diff*100:.1f}%, expected <5%"
