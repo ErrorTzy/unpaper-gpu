@@ -1084,6 +1084,10 @@ int main(int argc, char *argv[]) {
   batch_queue.parallelism =
       options.batch_jobs > 0 ? options.batch_jobs : batch_detect_parallelism();
 
+  // Initialize batch-level performance tracking (used in both batch modes)
+  BatchPerfRecorder batch_perf;
+  batch_perf_init(&batch_perf, options.perf && options.batch_mode);
+
   // In batch mode, enumerate all jobs upfront
   if (options.batch_mode) {
     verboseLog(VERBOSE_NORMAL, "Batch mode enabled, enumerating jobs...\n");
@@ -1199,6 +1203,9 @@ int main(int argc, char *argv[]) {
     }
 
     batch_progress_start(&batch_queue);
+
+    // Start batch-level performance timing
+    batch_perf_start(&batch_perf);
 
     // Parallel batch processing when parallelism > 1
     if (batch_queue.parallelism > 1) {
@@ -1372,6 +1379,11 @@ int main(int argc, char *argv[]) {
         }
       }
 #endif
+
+      // End batch performance timing and print summary
+      batch_perf_end(&batch_perf, batch_queue.completed, batch_queue.failed);
+      batch_perf_print(&batch_perf,
+                       options.device == UNPAPER_DEVICE_CUDA ? "cuda" : "cpu");
 
       batch_progress_finish(&batch_queue);
       batch_queue_free(&batch_queue);
@@ -2400,6 +2412,10 @@ int main(int argc, char *argv[]) {
 
   // Finish batch progress reporting and cleanup
   if (options.batch_mode) {
+    // End batch performance timing for sequential mode and print summary
+    batch_perf_end(&batch_perf, batch_queue.completed, batch_queue.failed);
+    batch_perf_print(&batch_perf,
+                     options.device == UNPAPER_DEVICE_CUDA ? "cuda" : "cpu");
     batch_progress_finish(&batch_queue);
   }
   batch_queue_free(&batch_queue);

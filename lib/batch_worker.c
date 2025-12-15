@@ -140,6 +140,22 @@ static void batch_worker_fn(void *arg, int thread_id) {
   // Process the job
   bool success = batch_process_job(ctx, job_ctx->job_index);
 
+  // Log error details if job failed
+  if (!success) {
+    BatchJob *job = batch_queue_get(ctx->queue, job_ctx->job_index);
+    if (job) {
+      fprintf(stderr, "ERROR: Job %zu (sheet %d) failed", job_ctx->job_index,
+              job->sheet_nr);
+      if (job->input_files[0]) {
+        fprintf(stderr, " - input: %s", job->input_files[0]);
+      }
+      if (job->output_files[0]) {
+        fprintf(stderr, " - output: %s", job->output_files[0]);
+      }
+      fprintf(stderr, "\n");
+    }
+  }
+
 #ifdef UNPAPER_WITH_CUDA
   // Release the stream back to the pool
   if (stream != NULL) {

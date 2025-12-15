@@ -45,3 +45,18 @@ void perf_recorder_print(const PerfRecorder *recorder, int sheet_nr,
                          const char *device_name);
 const char *perf_stage_name(PerfStage stage);
 
+// Batch-level timing for overall performance metrics
+typedef struct {
+  bool enabled;
+  struct timespec start;
+  struct timespec end;
+  size_t total_jobs;
+  size_t completed_jobs;
+  size_t failed_jobs;
+} BatchPerfRecorder;
+
+void batch_perf_init(BatchPerfRecorder *recorder, bool enabled);
+void batch_perf_start(BatchPerfRecorder *recorder);
+void batch_perf_end(BatchPerfRecorder *recorder, size_t completed, size_t failed);
+void batch_perf_print(const BatchPerfRecorder *recorder, const char *device_name);
+

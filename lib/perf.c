@@ -134,3 +134,60 @@ void perf_recorder_print(const PerfRecorder *recorder, int sheet_nr,
   printf("\n");
 }
 
+// Batch-level performance tracking
+
+void batch_perf_init(BatchPerfRecorder *recorder, bool enabled) {
+  if (recorder == NULL) {
+    return;
+  }
+  recorder->enabled = enabled;
+  recorder->total_jobs = 0;
+  recorder->completed_jobs = 0;
+  recorder->failed_jobs = 0;
+  recorder->start.tv_sec = 0;
+  recorder->start.tv_nsec = 0;
+  recorder->end.tv_sec = 0;
+  recorder->end.tv_nsec = 0;
+}
+
+void batch_perf_start(BatchPerfRecorder *recorder) {
+  if (recorder == NULL || !recorder->enabled) {
+    return;
+  }
+  clock_gettime(CLOCK_MONOTONIC, &recorder->start);
+}
+
+void batch_perf_end(BatchPerfRecorder *recorder, size_t completed,
+                    size_t failed) {
+  if (recorder == NULL || !recorder->enabled) {
+    return;
+  }
+  clock_gettime(CLOCK_MONOTONIC, &recorder->end);
+  recorder->completed_jobs = completed;
+  recorder->failed_jobs = failed;
+  recorder->total_jobs = completed + failed;
+}
+
+void batch_perf_print(const BatchPerfRecorder *recorder,
+                      const char *device_name) {
+  if (recorder == NULL || !recorder->enabled) {
+    return;
+  }
+
+  double elapsed_ms = timespec_diff_ms(recorder->start, recorder->end);
+  double elapsed_sec = elapsed_ms / 1000.0;
+  double images_per_sec =
+      elapsed_sec > 0.0 ? (double)recorder->total_jobs / elapsed_sec : 0.0;
+  double ms_per_image =
+      recorder->total_jobs > 0 ? elapsed_ms / (double)recorder->total_jobs : 0.0;
+
+  printf("\n");
+  printf("Batch Performance Summary [%s]:\n",
+         device_name == NULL ? "unknown" : device_name);
+  printf("  Total time:     %.2f ms (%.2f sec)\n", elapsed_ms, elapsed_sec);
+  printf("  Images:         %zu total, %zu completed, %zu failed\n",
+         recorder->total_jobs, recorder->completed_jobs, recorder->failed_jobs);
+  printf("  Throughput:     %.2f images/sec\n", images_per_sec);
+  printf("  Avg per image:  %.2f ms\n", ms_per_image);
+}
+

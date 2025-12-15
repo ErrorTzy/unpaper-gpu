@@ -7,14 +7,16 @@
 Batch processing benchmark for unpaper.
 
 This script measures the performance of unpaper's batch processing mode
-with different parallelism settings. It compares:
+with different parallelism settings and devices. It compares:
 - Sequential processing (baseline)
 - Single-threaded batch mode (--jobs=1)
 - Multi-threaded batch mode (--jobs=N)
+- CUDA-accelerated batch mode (if available)
 
 Usage:
     python tools/bench_batch.py --images 10
-    python tools/bench_batch.py --images 50 --threads 1,2,4,8
+    python tools/bench_batch.py --images 100 --threads 1,4,8 --devices cpu,cuda
+    python tools/bench_batch.py --images 50,100 --devices cuda --verify-10x
 """
 
 import argparse
@@ -38,8 +40,28 @@ def create_test_images(source_image: Path, output_dir: Path, count: int) -> list
     return images
 
 
+def check_cuda_available(binary: Path) -> bool:
+    """Check if the binary supports CUDA and CUDA runtime is available."""
+    proc = subprocess.run(
+        [str(binary), "--help"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    if b"--device=cpu|cuda" not in proc.stdout:
+        return False
+    # Try a quick CUDA run to verify runtime
+    proc = subprocess.run(
+        [str(binary), "--device=cuda", "--help"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
 def run_sequential(binary: Path, input_pattern: str, output_pattern: str,
-                   count: int) -> float:
+                   count: int, device: str = "cpu") -> float:
     """Run unpaper sequentially (no batch mode)."""
     start = time.perf_counter()
 
@@ -51,8 +73,13 @@ def run_sequential(binary: Path, input_pattern: str, output_pattern: str,
         if os.path.exists(output_file):
             os.unlink(output_file)
 
+        cmd = [str(binary)]
+        if device != "cpu":
+            cmd.extend([f"--device={device}"])
+        cmd.extend([input_file, output_file])
+
         proc = subprocess.run(
-            [str(binary), input_file, output_file],
+            cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             check=False,
@@ -66,7 +93,7 @@ def run_sequential(binary: Path, input_pattern: str, output_pattern: str,
 
 
 def run_batch(binary: Path, input_pattern: str, output_pattern: str,
-              jobs: int) -> float:
+              jobs: int, device: str = "cpu") -> float:
     """Run unpaper in batch mode with specified parallelism."""
     # Remove existing output files
     output_dir = Path(output_pattern).parent
@@ -79,6 +106,7 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
         str(binary),
         "--batch",
         f"--jobs={jobs}",
+        f"--device={device}",
         "--overwrite",
         input_pattern,
         output_pattern,
@@ -95,7 +123,7 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
 
     if proc.returncode != 0:
         raise RuntimeError(
-            f"Batch unpaper (jobs={jobs}) failed: {proc.stderr.decode().strip()}"
+            f"Batch unpaper (jobs={jobs}, device={device}) failed: {proc.stderr.decode().strip()}"
         )
 
     return elapsed
@@ -103,16 +131,16 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
 
 def bench_configuration(binary: Path, input_pattern: str, output_pattern: str,
                         count: int, jobs: int | None, warmup: int,
-                        iterations: int) -> tuple[float, float]:
+                        iterations: int, device: str = "cpu") -> tuple[float, float]:
     """Benchmark a specific configuration and return mean/stdev."""
     samples = []
 
     for i in range(warmup + iterations):
         try:
             if jobs is None:
-                elapsed = run_sequential(binary, input_pattern, output_pattern, count)
+                elapsed = run_sequential(binary, input_pattern, output_pattern, count, device)
             else:
-                elapsed = run_batch(binary, input_pattern, output_pattern, jobs)
+                elapsed = run_batch(binary, input_pattern, output_pattern, jobs, device)
 
             if i >= warmup:
                 samples.append(elapsed)
@@ -134,9 +162,9 @@ def main() -> int:
     )
     parser.add_argument(
         "--builddir",
-        default=repo_root / "builddir",
+        default=repo_root / "builddir-cuda",
         type=Path,
-        help="Meson builddir containing unpaper binary",
+        help="Meson builddir containing unpaper binary (default: builddir-cuda for CUDA support)",
     )
     parser.add_argument(
         "--source",
@@ -146,14 +174,18 @@ def main() -> int:
     )
     parser.add_argument(
         "--images",
-        default=10,
-        type=int,
-        help="Number of images to process in batch",
+        default="10",
+        help="Comma-separated list of image counts to test (e.g., '10,50,100')",
     )
     parser.add_argument(
         "--threads",
-        default="1,2,4",
+        default="1,4,8",
         help="Comma-separated list of thread counts to test",
+    )
+    parser.add_argument(
+        "--devices",
+        default="cpu",
+        help="Comma-separated list of devices to test (cpu, cuda)",
     )
     parser.add_argument(
         "--warmup",
@@ -170,72 +202,182 @@ def main() -> int:
     parser.add_argument(
         "--sequential",
         action="store_true",
-        help="Include sequential (non-batch) baseline",
+        help="Include sequential (non-batch) CPU baseline for speedup comparison",
+    )
+    parser.add_argument(
+        "--verify-10x",
+        action="store_true",
+        help="Verify that CUDA batch achieves 10x speedup over sequential CPU",
     )
 
     args = parser.parse_args()
 
     binary = args.builddir / "unpaper"
     if not binary.exists():
-        print(f"Binary not found: {binary}", file=sys.stderr)
-        return 1
+        # Try fallback to builddir
+        binary = repo_root / "builddir" / "unpaper"
+        if not binary.exists():
+            print(f"Binary not found: {args.builddir / 'unpaper'}", file=sys.stderr)
+            return 1
 
     if not args.source.exists():
         print(f"Source image not found: {args.source}", file=sys.stderr)
         return 1
 
     thread_counts = [int(t.strip()) for t in args.threads.split(",") if t.strip()]
+    devices = [d.strip() for d in args.devices.split(",") if d.strip()]
+    image_counts = [int(c.strip()) for c in args.images.split(",") if c.strip()]
+
+    # Check CUDA availability
+    cuda_available = check_cuda_available(binary)
+    if "cuda" in devices and not cuda_available:
+        print("WARNING: CUDA requested but not available, skipping CUDA tests", file=sys.stderr)
+        devices = [d for d in devices if d != "cuda"]
+
+    if not devices:
+        print("No valid devices to test", file=sys.stderr)
+        return 1
 
     # Use tmpfs if available for better I/O performance
     tmpdir_base = Path("/dev/shm") if Path("/dev/shm").is_dir() else Path(tempfile.gettempdir())
 
+    all_results = {}  # (image_count, config_name) -> (mean, stdev)
+    sequential_cpu_baseline = {}  # image_count -> mean_time
+
     with tempfile.TemporaryDirectory(dir=tmpdir_base) as tmpdir:
         tmpdir = Path(tmpdir)
 
-        print(f"Creating {args.images} test images...")
-        create_test_images(args.source, tmpdir, args.images)
+        for image_count in image_counts:
+            print(f"\n{'='*70}")
+            print(f"Benchmarking with {image_count} images")
+            print(f"{'='*70}")
+            print(f"  Binary: {binary}")
+            print(f"  Devices: {', '.join(devices)}")
+            print(f"  Threads: {', '.join(map(str, thread_counts))}")
+            print(f"  Warmup: {args.warmup}, Iterations: {args.iterations}")
+            print()
 
-        input_pattern = str(tmpdir / "input%04d.png")
-        output_pattern = str(tmpdir / "output%04d.pbm")
+            # Create test images (reuse if same count)
+            print(f"Creating {image_count} test images...", end=" ", flush=True)
+            for f in tmpdir.glob("input*.png"):
+                f.unlink()
+            create_test_images(args.source, tmpdir, image_count)
+            print("done")
 
-        print(f"\nBenchmarking with {args.images} images:")
-        print(f"  Binary: {binary}")
-        print(f"  Warmup: {args.warmup}, Iterations: {args.iterations}")
+            input_pattern = str(tmpdir / "input%04d.png")
+            output_pattern = str(tmpdir / "output%04d.pbm")
+
+            results = []
+
+            # Sequential CPU baseline (always run for --verify-10x or --sequential)
+            if args.sequential or args.verify_10x:
+                print("Sequential CPU (no batch)...", end=" ", flush=True)
+                mean, stdev = bench_configuration(
+                    binary, input_pattern, output_pattern, image_count,
+                    None, args.warmup, args.iterations, "cpu"
+                )
+                print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
+                results.append(("sequential-cpu", mean, stdev, "cpu"))
+                sequential_cpu_baseline[image_count] = mean
+                all_results[(image_count, "sequential-cpu")] = (mean, stdev)
+
+            # Test each device
+            for device in devices:
+                device_label = device.upper()
+
+                # Batch with different thread counts
+                for threads in thread_counts:
+                    config_name = f"batch-{device}-j{threads}"
+                    print(f"Batch {device_label} (jobs={threads})...", end=" ", flush=True)
+                    mean, stdev = bench_configuration(
+                        binary, input_pattern, output_pattern, image_count,
+                        threads, args.warmup, args.iterations, device
+                    )
+                    print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
+                    results.append((config_name, mean, stdev, device))
+                    all_results[(image_count, config_name)] = (mean, stdev)
+
+            # Summary for this image count
+            print(f"\n{'-'*60}")
+            print(f"Summary for {image_count} images:")
+            print(f"{'-'*60}")
+
+            baseline = sequential_cpu_baseline.get(image_count, results[0][1]) if results else 1.0
+            for name, mean, stdev, device in results:
+                if mean > 0 and not (mean != mean):  # Check for NaN
+                    speedup = baseline / mean
+                    per_image = mean / image_count
+                    throughput = (image_count / mean) * 1000.0  # images/sec
+                    print(f"  {name:<20} {mean:>8.0f}ms  "
+                          f"({per_image:>5.1f}ms/img, {throughput:>5.1f} img/s, {speedup:>5.2f}x)")
+                else:
+                    print(f"  {name:<20}      FAILED")
+
+    # Final summary across all image counts
+    if len(image_counts) > 1:
+        print(f"\n{'='*70}")
+        print("Overall Summary (speedup vs sequential CPU)")
+        print(f"{'='*70}")
+        print(f"{'Config':<25}", end="")
+        for count in image_counts:
+            print(f"{count:>10} img", end="")
         print()
+        print("-" * (25 + 14 * len(image_counts)))
 
-        results = []
+        # Get all unique config names (excluding sequential)
+        config_names = sorted(set(name for (_, name) in all_results.keys() if name != "sequential-cpu"))
+        for config in config_names:
+            print(f"{config:<25}", end="")
+            for count in image_counts:
+                result = all_results.get((count, config))
+                baseline = sequential_cpu_baseline.get(count)
+                if result and baseline and result[0] > 0:
+                    speedup = baseline / result[0]
+                    print(f"{speedup:>10.2f}x", end="")
+                else:
+                    print(f"{'N/A':>11}", end="")
+            print()
 
-        # Sequential baseline (optional)
-        if args.sequential:
-            print("Sequential (no batch)...", end=" ", flush=True)
-            mean, stdev = bench_configuration(
-                binary, input_pattern, output_pattern, args.images,
-                None, args.warmup, args.iterations
-            )
-            print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
-            results.append(("sequential", mean, stdev))
+    # Verify 10x speedup target for PR26
+    if args.verify_10x:
+        print(f"\n{'='*70}")
+        print("10x Speedup Verification (PR26 Target)")
+        print(f"{'='*70}")
 
-        # Batch with different thread counts
-        for threads in thread_counts:
-            print(f"Batch (jobs={threads})...", end=" ", flush=True)
-            mean, stdev = bench_configuration(
-                binary, input_pattern, output_pattern, args.images,
-                threads, args.warmup, args.iterations
-            )
-            print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
-            results.append((f"batch-j{threads}", mean, stdev))
+        passed = True
+        for count in image_counts:
+            baseline = sequential_cpu_baseline.get(count)
+            if not baseline:
+                print(f"  {count} images: SKIP (no sequential baseline)")
+                continue
 
-        # Summary
-        print("\n" + "=" * 60)
-        print("Summary:")
-        print("=" * 60)
+            # Find best CUDA batch result for this image count
+            best_cuda = None
+            best_cuda_name = None
+            for (img_count, name), (mean, _) in all_results.items():
+                if img_count == count and "cuda" in name and mean > 0:
+                    if best_cuda is None or mean < best_cuda:
+                        best_cuda = mean
+                        best_cuda_name = name
 
-        baseline = results[0][1] if results else 1.0
-        for name, mean, stdev in results:
-            speedup = baseline / mean if mean > 0 else 0
-            per_image = mean / args.images
-            print(f"  {name:<15} {mean:>8.0f}ms  "
-                  f"({per_image:.0f}ms/image, {speedup:.2f}x vs baseline)")
+            if best_cuda:
+                speedup = baseline / best_cuda
+                target = 10.0
+                status = "PASS" if speedup >= target else "FAIL"
+                passed = passed and (speedup >= target)
+                print(f"  {count} images: {best_cuda_name} -> {speedup:.2f}x (target: {target}x) [{status}]")
+            else:
+                print(f"  {count} images: No CUDA results available")
+                if "cuda" in devices:
+                    passed = False
+
+        print()
+        if passed:
+            print("  *** ALL TARGETS PASSED ***")
+            return 0
+        else:
+            print("  *** SOME TARGETS FAILED ***")
+            return 1
 
     return 0
 
