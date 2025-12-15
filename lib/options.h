@@ -33,6 +33,7 @@ typedef struct {
   bool batch_mode;     // Enable batch processing mode
   int batch_jobs;      // Number of parallel workers (0 = auto-detect)
   bool batch_progress; // Show progress output
+  int cuda_streams;    // Number of CUDA streams (0 = auto-detect)
 
   Layout layout;
   int start_sheet;

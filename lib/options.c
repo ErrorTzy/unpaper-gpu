@@ -30,6 +30,7 @@ void options_init(Options *o) {
       .batch_mode = false,
       .batch_jobs = 0, // 0 = auto-detect
       .batch_progress = false,
+      .cuda_streams = 0, // 0 = auto-detect
 
       .layout = LAYOUT_SINGLE,
       .start_sheet = 1,

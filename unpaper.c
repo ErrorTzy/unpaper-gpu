@@ -57,6 +57,7 @@
           "         --perf (print per-stage timings)\n"                        \
           "         --batch, -B (enable batch processing mode)\n"              \
           "         --jobs=N, -j N (parallel workers, 0=auto, default: 0)\n"   \
+          "         --cuda-streams=N (CUDA streams, 0=auto, default: 0)\n"     \
           "         --progress (show batch progress)\n"                        \
           "\n"                                                                 \
           "Filenames may contain a formatting placeholder starting with '%%' " \
@@ -161,6 +162,7 @@ enum LONG_OPTION_VALUES {
   OPT_BATCH,
   OPT_JOBS,
   OPT_PROGRESS,
+  OPT_CUDA_STREAMS,
 };
 
 /****************************************************************************
@@ -419,6 +421,7 @@ int main(int argc, char *argv[]) {
           {"jobs", required_argument, NULL, OPT_JOBS},
           {"j", required_argument, NULL, OPT_JOBS},
           {"progress", no_argument, NULL, OPT_PROGRESS},
+          {"cuda-streams", required_argument, NULL, OPT_CUDA_STREAMS},
           {NULL, no_argument, NULL, 0}};
 
       c = getopt_long_only(argc, argv, "hVl:S:x::n::M:s:z:p:m:W:B:w:b:Tt:qv",
@@ -996,6 +999,13 @@ int main(int argc, char *argv[]) {
       case OPT_PROGRESS:
         options.batch_progress = true;
         break;
+
+      case OPT_CUDA_STREAMS:
+        if (sscanf(optarg, "%d", &options.cuda_streams) != 1 ||
+            options.cuda_streams < 0) {
+          errOutput("invalid value for --cuda-streams: '%s'", optarg);
+        }
+        break;
       }
     }
 
@@ -1245,6 +1255,16 @@ int main(int argc, char *argv[]) {
           verboseLog(VERBOSE_NORMAL,
                      "GPU auto-tune: %zu GB VRAM -> tier %zu -> %zu streams, %zu buffers\n",
                      vram_gb, tier, auto_stream_count, auto_buffer_count);
+        }
+
+        // Override auto-tuned stream count if --cuda-streams specified
+        if (options.cuda_streams > 0) {
+          auto_stream_count = (size_t)options.cuda_streams;
+          auto_buffer_count = auto_stream_count * 2;
+          if (auto_buffer_count > 64) auto_buffer_count = 64;
+          verboseLog(VERBOSE_NORMAL,
+                     "GPU manual override: %zu streams, %zu buffers\n",
+                     auto_stream_count, auto_buffer_count);
         }
 
         // Buffer size: 32MB covers A1 images (2500x3500 RGB24 = ~26MB)
