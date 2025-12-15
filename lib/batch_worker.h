@@ -15,6 +15,7 @@
 struct ThreadPool;
 struct UnpaperCudaStream;
 struct DecodeQueue;
+struct EncodeQueue;
 
 // Batch worker context - shared state for all workers
 typedef struct {
@@ -25,6 +26,7 @@ typedef struct {
   bool perf_enabled;                // Enable per-job performance output
   bool use_stream_pool;             // Use CUDA stream pool for GPU batch processing
   struct DecodeQueue *decode_queue; // Pre-decode queue for async decode (optional)
+  struct EncodeQueue *encode_queue; // Encode queue for async encode (optional)
 } BatchWorkerContext;
 
 // Per-job context passed to worker function
@@ -50,6 +52,10 @@ void batch_worker_enable_stream_pool(BatchWorkerContext *ctx, bool enable);
 // Set decode queue for pre-decoded image pipeline
 void batch_worker_set_decode_queue(BatchWorkerContext *ctx,
                                    struct DecodeQueue *decode_queue);
+
+// Set encode queue for async encoding pipeline
+void batch_worker_set_encode_queue(BatchWorkerContext *ctx,
+                                   struct EncodeQueue *encode_queue);
 
 // Process all jobs in the queue using the thread pool
 // Returns number of failed jobs (0 = all succeeded)

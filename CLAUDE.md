@@ -300,11 +300,21 @@ Files use SPDX headers. Add SPDX headers to new files and validate with `reuse l
 
 **PR 25: GPU batch - download/encode overlap**
 
-- Status: not started
+- Status: complete
 - Scope:
   - Async D2H with pinned memory (`cudaMemcpyAsync`)
   - Encoder thread consumes downloaded frames
   - Pipeline: while GPU processes N, CPU encodes N-1
+- Results:
+  - Encode queue module (`lib/encode_queue.c`, `lib/encode_queue.h`)
+  - Bounded queue with configurable depth (default: 2x parallelism)
+  - Multiple encoder threads (default: 2) for I/O-bound encoding
+  - Lock-free fast path for slot acquisition with atomic operations
+  - Fast path format conversions: RGB24->MONOWHITE, RGB24->GRAY8, GRAY8->MONOWHITE
+  - Statistics: images queued/encoded, waits, queue depth, encode time
+  - Integration via `sheet_process_state_set_encode_queue()`
+  - Frame cloning for async ownership transfer to encoder threads
+  - All CPU (24 tests) and CUDA (9 tests + 34 pytest) pass
 - Acceptance:
   - Encode latency hidden behind GPU processing
   - Full 4-stage pipeline operational

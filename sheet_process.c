@@ -9,6 +9,7 @@
 #include "imageprocess/deskew.h"
 #include "imageprocess/filters.h"
 #include "imageprocess/masks.h"
+#include "lib/encode_queue.h"
 #include "lib/logging.h"
 #include "unpaper.h"
 
@@ -71,6 +72,10 @@ void sheet_process_state_init(SheetProcessState *state,
   state->input_size = (RectangleSize){-1, -1};
   state->previous_size = (RectangleSize){-1, -1};
 
+  // Initialize encode queue to NULL (sync mode)
+  state->encode_queue = NULL;
+  state->job_index = 0;
+
   // Copy default max dimensions (will be adjusted per-sheet)
   state->mask_max_width = config->options->mask_detection_parameters.maximum_width;
   state->mask_max_height =
@@ -87,6 +92,16 @@ void sheet_process_state_set_decoded(SheetProcessState *state,
   }
   state->decoded_frames[input_index] = frame;
   state->use_decoded_frames = true;
+}
+
+void sheet_process_state_set_encode_queue(SheetProcessState *state,
+                                          struct EncodeQueue *encode_queue,
+                                          int job_index) {
+  if (!state) {
+    return;
+  }
+  state->encode_queue = encode_queue;
+  state->job_index = job_index;
 }
 
 void sheet_process_state_cleanup(SheetProcessState *state) {
@@ -510,27 +525,43 @@ bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
     image_ensure_cpu(&state->sheet);
     perf_stage_end(&state->perf, PERF_STAGE_DOWNLOAD);
 
-    perf_stage_begin(&state->perf, PERF_STAGE_ENCODE);
-    if (state->output_count == 1) {
-      saveImage(state->output_files[0], state->sheet, output_pixel_format);
-    } else {
-      for (int j = 0; j < state->output_count; j++) {
-        state->page = create_compatible_image(
-            state->sheet,
-            (RectangleSize){state->sheet.frame->width / state->output_count,
-                            state->sheet.frame->height},
-            false);
-        copy_rectangle(
-            state->sheet, state->page,
-            (Rectangle){{{state->page.frame->width * j, 0},
-                         {state->page.frame->width * j + state->page.frame->width,
-                          state->page.frame->height}}},
-            POINT_ORIGIN);
-        saveImage(state->output_files[j], state->page, output_pixel_format);
-        free_image(&state->page);
+    // Check if async encoding is enabled
+    if (state->encode_queue != NULL) {
+      // Async path: submit to encode queue
+      // Clone the frame since encode queue takes ownership
+      AVFrame *frame_copy = av_frame_clone(state->sheet.frame);
+      if (frame_copy) {
+        // Note: pinned memory optimization would require changes to image_ensure_cpu
+        // For now, we use non-pinned memory for the encode queue submission
+        encode_queue_submit(state->encode_queue, frame_copy,
+                            state->output_files, state->output_count,
+                            output_pixel_format, state->job_index, false);
       }
+      // Encode timing is handled by encode queue, so skip perf stage
+    } else {
+      // Sync path: encode directly
+      perf_stage_begin(&state->perf, PERF_STAGE_ENCODE);
+      if (state->output_count == 1) {
+        saveImage(state->output_files[0], state->sheet, output_pixel_format);
+      } else {
+        for (int j = 0; j < state->output_count; j++) {
+          state->page = create_compatible_image(
+              state->sheet,
+              (RectangleSize){state->sheet.frame->width / state->output_count,
+                              state->sheet.frame->height},
+              false);
+          copy_rectangle(
+              state->sheet, state->page,
+              (Rectangle){{{state->page.frame->width * j, 0},
+                           {state->page.frame->width * j + state->page.frame->width,
+                            state->page.frame->height}}},
+              POINT_ORIGIN);
+          saveImage(state->output_files[j], state->page, output_pixel_format);
+          free_image(&state->page);
+        }
+      }
+      perf_stage_end(&state->perf, PERF_STAGE_ENCODE);
     }
-    perf_stage_end(&state->perf, PERF_STAGE_ENCODE);
   }
 
   // Print perf if enabled

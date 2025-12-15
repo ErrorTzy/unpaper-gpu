@@ -14,6 +14,9 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+// Forward declaration for encode queue
+struct EncodeQueue;
+
 // Read-only context shared between all workers
 // Set once during command-line parsing, never modified during processing
 typedef struct {
@@ -74,6 +77,10 @@ typedef struct {
 
   // Performance recording
   PerfRecorder perf;
+
+  // Async encode queue (optional, set via sheet_process_state_set_encode_queue)
+  struct EncodeQueue *encode_queue;
+  int job_index;  // For encode queue submission
 } SheetProcessState;
 
 // Initialize shared config (call once after parsing)
@@ -97,6 +104,13 @@ void sheet_process_state_cleanup(SheetProcessState *state);
 // input_index: Which input (0 or 1)
 void sheet_process_state_set_decoded(SheetProcessState *state,
                                      struct AVFrame *frame, int input_index);
+
+// Set encode queue for async encoding (optional)
+// If set, process_sheet will submit encoded frames to this queue
+// instead of calling saveImage directly
+void sheet_process_state_set_encode_queue(SheetProcessState *state,
+                                          struct EncodeQueue *encode_queue,
+                                          int job_index);
 
 // Process a single sheet
 // Returns true on success, false on failure

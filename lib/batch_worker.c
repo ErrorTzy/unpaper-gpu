@@ -4,6 +4,7 @@
 
 #include "lib/batch_worker.h"
 #include "lib/decode_queue.h"
+#include "lib/encode_queue.h"
 #include "lib/gpu_monitor.h"
 #include "lib/threadpool.h"
 #include "sheet_process.h"
@@ -26,6 +27,7 @@ void batch_worker_init(BatchWorkerContext *ctx, const Options *options,
   ctx->config = NULL;
   ctx->use_stream_pool = false;
   ctx->decode_queue = NULL;
+  ctx->encode_queue = NULL;
   pthread_mutex_init(&ctx->progress_mutex, NULL);
 }
 
@@ -47,6 +49,11 @@ void batch_worker_set_decode_queue(BatchWorkerContext *ctx,
   ctx->decode_queue = decode_queue;
 }
 
+void batch_worker_set_encode_queue(BatchWorkerContext *ctx,
+                                   EncodeQueue *encode_queue) {
+  ctx->encode_queue = encode_queue;
+}
+
 bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
   if (!ctx->config) {
     fprintf(stderr, "Batch worker config not set\n");
@@ -60,6 +67,11 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
 
   SheetProcessState state;
   sheet_process_state_init(&state, ctx->config, job);
+
+  // Set encode queue for async encoding if available
+  if (ctx->encode_queue != NULL) {
+    sheet_process_state_set_encode_queue(&state, ctx->encode_queue, (int)job_index);
+  }
 
   // Get pre-decoded images from queue if available
   DecodedImage *decoded_images[BATCH_MAX_FILES_PER_SHEET] = {NULL};

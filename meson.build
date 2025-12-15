@@ -53,6 +53,7 @@ unpaper_sources = [
     'lib/batch.c',
     'lib/batch_worker.c',
     'lib/decode_queue.c',
+    'lib/encode_queue.c',
     'lib/gpu_monitor.c',
     'lib/logging.c',
     'lib/perf.c',

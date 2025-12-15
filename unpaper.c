@@ -32,6 +32,7 @@
 #include "lib/batch.h"
 #include "lib/batch_worker.h"
 #include "lib/decode_queue.h"
+#include "lib/encode_queue.h"
 #include "lib/gpu_monitor.h"
 #include "lib/options.h"
 #include "lib/perf.h"
@@ -1268,9 +1269,30 @@ int main(int argc, char *argv[]) {
         }
       }
 
+      // Create encode queue for async encoding pipeline
+      // Queue depth = 2x parallelism to buffer completed images while encoding
+      const size_t encode_queue_depth = (size_t)batch_queue.parallelism * 2;
+      // Use 2 encoder threads - encoding is often I/O bound
+      const int num_encoder_threads = 2;
+      EncodeQueue *encode_queue = encode_queue_create(encode_queue_depth, num_encoder_threads);
+      if (encode_queue) {
+        verboseLog(VERBOSE_NORMAL, "Encode queue: %zu slots, %d encoder threads\n",
+                   encode_queue_depth, num_encoder_threads);
+        if (!encode_queue_start(encode_queue)) {
+          verboseLog(VERBOSE_NORMAL, "Failed to start encoder threads, falling back to inline encode\n");
+          encode_queue_destroy(encode_queue);
+          encode_queue = NULL;
+        }
+      }
+
       // Create thread pool
       ThreadPool *pool = threadpool_create(batch_queue.parallelism);
       if (!pool) {
+        if (encode_queue) {
+          encode_queue_signal_done(encode_queue);
+          encode_queue_wait(encode_queue);
+          encode_queue_destroy(encode_queue);
+        }
         if (decode_queue) {
           decode_queue_stop_producer(decode_queue);
           decode_queue_destroy(decode_queue);
@@ -1286,6 +1308,7 @@ int main(int argc, char *argv[]) {
       batch_worker_init(&worker_ctx, &options, &batch_queue);
       batch_worker_set_config(&worker_ctx, &config);
       batch_worker_set_decode_queue(&worker_ctx, decode_queue);
+      batch_worker_set_encode_queue(&worker_ctx, encode_queue);
 #ifdef UNPAPER_WITH_CUDA
       // Enable stream pooling if the stream pool was initialized
       batch_worker_enable_stream_pool(&worker_ctx, streampool_active);
@@ -1305,6 +1328,16 @@ int main(int argc, char *argv[]) {
           decode_queue_print_stats(decode_queue);
         }
         decode_queue_destroy(decode_queue);
+      }
+
+      // Cleanup encode queue - wait for all pending encodes to complete
+      if (encode_queue) {
+        encode_queue_signal_done(encode_queue);
+        encode_queue_wait(encode_queue);
+        if (options.perf) {
+          encode_queue_print_stats(encode_queue);
+        }
+        encode_queue_destroy(encode_queue);
       }
 
 #ifdef UNPAPER_WITH_CUDA
