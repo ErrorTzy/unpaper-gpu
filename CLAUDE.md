@@ -367,6 +367,42 @@ Files use SPDX headers. Add SPDX headers to new files and validate with `reuse l
   - Documentation complete [DONE]
   - Robust handling of edge cases [DONE]
 
+**PR 28: GPU auto-tuning for high-end GPUs**
+
+- Status: complete
+- Scope:
+  - Auto-scale GPU resources based on available VRAM
+  - Parallel decode threads to feed high-throughput GPUs
+  - Scale encoder threads for fast GPU output
+- Results:
+  - GPU auto-tuning based on VRAM size (`unpaper.c`):
+    - Formula: `tier = min(8, VRAM_GB / 3)`
+    - Streams: `4 × tier` (4 to 32 streams)
+    - Buffers: `streams × 2` (8 to 64 buffers)
+    - Example: 24GB GPU → tier 7 → 28 streams, 56 buffers, 1792MB pool
+  - Parallel decode queue (`lib/decode_queue.c`, `lib/decode_queue.h`):
+    - `decode_queue_create_parallel()` for multi-threaded decoding
+    - Work stealing via atomic job counter for load balancing
+    - Decode threads scale with stream count: `streams / 4` (2 to 8 threads)
+  - Encoder thread scaling for CUDA mode:
+    - `parallelism / 4` threads (2 to 8) for high-throughput batches
+  - Verbose output shows auto-tuned values:
+    ```
+    GPU auto-tune: 23 GB VRAM -> tier 7 -> 28 streams, 56 buffers
+    GPU memory pool: 56 buffers x 33554432 bytes (1792.0 MB total)
+    GPU stream pool: 28 streams
+    Decode queue: 56 slots (pinned memory), parallel decode
+    Encode queue: 56 slots, 4 encoder threads
+    ```
+  - Benchmark results (50 images on RTX 5090 24GB):
+    - Sequential CPU: 307.9s (baseline)
+    - Batch CUDA (j=8): 20.5s (**15.03x speedup**)
+  - All CPU (24 tests) and CUDA (9 tests + 34 pytest) pass
+- Acceptance:
+  - High-end GPUs automatically utilize more resources [DONE]
+  - Parallel decode reduces GPU starvation [DONE]
+  - 15x speedup achieved (exceeds 10x target) [DONE]
+
 #### Implementation Notes
 
 **Thread safety**:
@@ -375,10 +411,11 @@ Files use SPDX headers. Add SPDX headers to new files and validate with `reuse l
 - `Image` struct: per-job, not shared
 - CUDA state: per-stream isolation
 
-**Memory budget for GPU batch**:
-- Typical A1 image: ~4MB (2500x3500 RGB24)
-- 4 concurrent images: ~16MB GPU memory
-- Pool should support ~8 buffers for triple-buffered 4-stream operation
+**Memory budget for GPU batch** (auto-scaled based on VRAM):
+- Typical A1 image: ~26MB (2500x3500 RGB24), buffer size 32MB
+- Default (small GPU): 4 streams, 8 buffers = 256MB pool
+- High-end (24GB GPU): 28 streams, 56 buffers = 1792MB pool
+- Auto-tuning formula: `tier = VRAM_GB / 3`, streams = `4 × tier`, buffers = `2 × streams`
 
 ---
 

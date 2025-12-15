@@ -40,7 +40,15 @@ typedef struct {
 // Create a decode queue
 // - queue_depth: Maximum pre-decoded images to buffer (e.g., 4-8)
 // - use_pinned_memory: Allocate decoded frames in CUDA-pinned memory
+// - num_producers: Number of producer threads (1 = sequential, >1 = parallel)
 DecodeQueue *decode_queue_create(size_t queue_depth, bool use_pinned_memory);
+
+// Create a decode queue with multiple producer threads
+// - queue_depth: Maximum pre-decoded images to buffer
+// - use_pinned_memory: Allocate decoded frames in CUDA-pinned memory
+// - num_producers: Number of producer threads for parallel decoding
+DecodeQueue *decode_queue_create_parallel(size_t queue_depth, bool use_pinned_memory,
+                                          int num_producers);
 
 // Destroy the decode queue and free all resources
 void decode_queue_destroy(DecodeQueue *queue);

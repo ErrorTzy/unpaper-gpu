@@ -1215,20 +1215,40 @@ int main(int argc, char *argv[]) {
 #ifdef UNPAPER_WITH_CUDA
       bool mempool_active = false;
       bool streampool_active = false;
+      size_t auto_stream_count = 4;
+      size_t auto_buffer_count = 8;
       if (options.device == UNPAPER_DEVICE_CUDA) {
         // Check available GPU memory before starting batch
-        GpuMemoryInfo mem_info;
+        GpuMemoryInfo mem_info = {0};
         if (gpu_monitor_get_memory_info(&mem_info)) {
           verboseLog(VERBOSE_NORMAL, "GPU memory: %.1f MB free of %.1f MB total\n",
                      (double)mem_info.free_bytes / (1024.0 * 1024.0),
                      (double)mem_info.total_bytes / (1024.0 * 1024.0));
+
+          // Auto-tune pool sizes based on available GPU memory
+          // Scale: For every 3GB of VRAM, multiply parallelism tier
+          // This allows high-end GPUs (RTX 5090 24GB) to use more resources
+          size_t vram_gb = mem_info.total_bytes / (1024 * 1024 * 1024);
+          size_t tier = vram_gb / 3;  // 1 tier per 3GB
+          if (tier < 1) tier = 1;
+          if (tier > 8) tier = 8;  // Cap at 8x scaling
+
+          // Scale streams: 4 per tier (4, 8, 12, 16, 20, 24, 28, 32)
+          auto_stream_count = 4 * tier;
+          if (auto_stream_count > 32) auto_stream_count = 32;
+
+          // Scale buffers: 2x streams for double-buffering
+          auto_buffer_count = auto_stream_count * 2;
+          if (auto_buffer_count > 64) auto_buffer_count = 64;
+
+          verboseLog(VERBOSE_NORMAL,
+                     "GPU auto-tune: %zu GB VRAM -> tier %zu -> %zu streams, %zu buffers\n",
+                     vram_gb, tier, auto_stream_count, auto_buffer_count);
         }
 
-        // Estimate buffer size: A1 image is ~26MB (2500x3500 RGB24)
-        // Use 8 buffers for triple-buffered 4-stream operation
-        const size_t buffer_count = 8;
-        const size_t buffer_size = 32 * 1024 * 1024;  // 32MB covers A1 and larger
-        const size_t total_pool_size = buffer_count * buffer_size;
+        // Buffer size: 32MB covers A1 images (2500x3500 RGB24 = ~26MB)
+        const size_t buffer_size = 32 * 1024 * 1024;
+        const size_t total_pool_size = auto_buffer_count * buffer_size;
 
         // Warn if GPU memory seems low for the batch
         if (mem_info.free_bytes > 0 && mem_info.free_bytes < total_pool_size * 2) {
@@ -1239,24 +1259,22 @@ int main(int argc, char *argv[]) {
                   (double)total_pool_size / (1024.0 * 1024.0));
         }
 
-        if (cuda_mempool_global_init(buffer_count, buffer_size)) {
+        if (cuda_mempool_global_init(auto_buffer_count, buffer_size)) {
           mempool_active = true;
           verboseLog(VERBOSE_NORMAL,
-                     "GPU memory pool: %zu buffers x %zu bytes (%.1f MB)\n",
-                     buffer_count, buffer_size,
-                     (double)(buffer_count * buffer_size) / (1024.0 * 1024.0));
+                     "GPU memory pool: %zu buffers x %zu bytes (%.1f MB total)\n",
+                     auto_buffer_count, buffer_size,
+                     (double)total_pool_size / (1024.0 * 1024.0));
         } else {
           verboseLog(VERBOSE_NORMAL,
                      "GPU memory pool initialization failed, using direct allocation\n");
         }
 
         // Initialize stream pool for concurrent GPU operations
-        // Use 4 streams for good parallelism without excessive resource usage
-        const size_t stream_count = 4;
-        if (cuda_stream_pool_global_init(stream_count)) {
+        if (cuda_stream_pool_global_init(auto_stream_count)) {
           streampool_active = true;
           verboseLog(VERBOSE_NORMAL, "GPU stream pool: %zu streams\n",
-                     stream_count);
+                     auto_stream_count);
         } else {
           verboseLog(VERBOSE_NORMAL,
                      "GPU stream pool initialization failed, using default stream\n");
@@ -1276,16 +1294,32 @@ int main(int argc, char *argv[]) {
                                 pointCount, middleWipe, blackfilterExclude, 0);
 
       // Create decode queue for pre-decoded image pipeline
-      // Queue depth = 2x parallelism for good overlap (decode ahead while processing)
-      const size_t decode_queue_depth = (size_t)batch_queue.parallelism * 2;
+      // Queue depth scales with parallelism and GPU buffer count
+      size_t decode_queue_depth = (size_t)batch_queue.parallelism * 2;
       bool use_pinned_memory = false;
+      int num_decode_threads = 1;  // Single-threaded by default
 #ifdef UNPAPER_WITH_CUDA
       use_pinned_memory = (options.device == UNPAPER_DEVICE_CUDA);
+      // For CUDA with auto-tuned buffers, ensure decode queue can keep GPU fed
+      if (use_pinned_memory && auto_buffer_count > decode_queue_depth) {
+        decode_queue_depth = auto_buffer_count;
+      }
+      // Scale decode threads with CUDA stream count to keep GPU fed
+      // High-end GPUs need parallel decode to prevent starvation
+      if (options.device == UNPAPER_DEVICE_CUDA && auto_stream_count > 4) {
+        num_decode_threads = (int)(auto_stream_count / 4);  // 1 decode thread per 4 streams
+        if (num_decode_threads < 2) num_decode_threads = 2;
+        if (num_decode_threads > 8) num_decode_threads = 8;
+      }
 #endif
-      DecodeQueue *decode_queue = decode_queue_create(decode_queue_depth, use_pinned_memory);
+      DecodeQueue *decode_queue = (num_decode_threads > 1)
+          ? decode_queue_create_parallel(decode_queue_depth, use_pinned_memory, num_decode_threads)
+          : decode_queue_create(decode_queue_depth, use_pinned_memory);
       if (decode_queue) {
-        verboseLog(VERBOSE_NORMAL, "Decode queue: %zu slots%s\n",
-                   decode_queue_depth, use_pinned_memory ? " (pinned memory)" : "");
+        verboseLog(VERBOSE_NORMAL, "Decode queue: %zu slots%s%s\n",
+                   decode_queue_depth,
+                   use_pinned_memory ? " (pinned memory)" : "",
+                   num_decode_threads > 1 ? ", parallel decode" : "");
         // Start producer thread
         if (!decode_queue_start_producer(decode_queue, &batch_queue, &options)) {
           verboseLog(VERBOSE_NORMAL, "Failed to start decode producer, falling back to inline decode\n");
@@ -1295,10 +1329,24 @@ int main(int argc, char *argv[]) {
       }
 
       // Create encode queue for async encoding pipeline
-      // Queue depth = 2x parallelism to buffer completed images while encoding
-      const size_t encode_queue_depth = (size_t)batch_queue.parallelism * 2;
-      // Use 2 encoder threads - encoding is often I/O bound
-      const int num_encoder_threads = 2;
+      // Queue depth scales with parallelism and GPU buffer count
+      size_t encode_queue_depth = (size_t)batch_queue.parallelism * 2;
+#ifdef UNPAPER_WITH_CUDA
+      // For CUDA with auto-tuned buffers, ensure encode queue can handle throughput
+      if (options.device == UNPAPER_DEVICE_CUDA && auto_buffer_count > encode_queue_depth) {
+        encode_queue_depth = auto_buffer_count;
+      }
+#endif
+      // Scale encoder threads with parallelism to avoid I/O bottleneck on fast GPUs
+      // Base 2 threads, scale up to 8 for high-parallelism GPU batches
+      int num_encoder_threads = 2;
+#ifdef UNPAPER_WITH_CUDA
+      if (options.device == UNPAPER_DEVICE_CUDA && batch_queue.parallelism >= 8) {
+        num_encoder_threads = batch_queue.parallelism / 4;
+        if (num_encoder_threads < 2) num_encoder_threads = 2;
+        if (num_encoder_threads > 8) num_encoder_threads = 8;
+      }
+#endif
       EncodeQueue *encode_queue = encode_queue_create(encode_queue_depth, num_encoder_threads);
       if (encode_queue) {
         verboseLog(VERBOSE_NORMAL, "Encode queue: %zu slots, %d encoder threads\n",

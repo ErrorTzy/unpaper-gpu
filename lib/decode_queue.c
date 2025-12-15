@@ -34,16 +34,23 @@ typedef struct {
   atomic_int state;
 } DecodeSlot;
 
+// Maximum number of parallel producer threads
+#define MAX_PRODUCER_THREADS 16
+
 struct DecodeQueue {
   // Slot array (circular buffer)
   DecodeSlot *slots;
   size_t queue_depth;
 
-  // Producer state
-  pthread_t producer_thread;
+  // Producer state - supports multiple threads
+  pthread_t producer_threads[MAX_PRODUCER_THREADS];
+  int num_producers;
   bool producer_started;
   atomic_bool producer_running;
-  atomic_bool producer_done;
+  atomic_int producers_done;  // Counter of completed producers
+
+  // Shared job counter for work distribution among producers
+  atomic_size_t next_job_index;
 
   // Source data for producer
   BatchQueue *batch_queue;
@@ -259,15 +266,17 @@ static int find_ready_slot(DecodeQueue *queue, int job_index, int input_index) {
   return -1;
 }
 
-// Producer thread function
+// Producer thread function - uses work stealing via shared job counter
 static void *producer_thread_fn(void *arg) {
   DecodeQueue *queue = (DecodeQueue *)arg;
   BatchQueue *batch = queue->batch_queue;
 
-  // Iterate through all jobs
-  for (size_t job_idx = 0; job_idx < batch->count; job_idx++) {
-    if (!atomic_load(&queue->producer_running)) {
-      break;
+  // Work stealing loop - each thread grabs jobs atomically
+  while (atomic_load(&queue->producer_running)) {
+    // Atomically get next job index
+    size_t job_idx = atomic_fetch_add(&queue->next_job_index, 1);
+    if (job_idx >= batch->count) {
+      break;  // No more jobs
     }
 
     BatchJob *job = batch_queue_get(batch, job_idx);
@@ -359,19 +368,29 @@ static void *producer_thread_fn(void *arg) {
     }
   }
 
-  atomic_store(&queue->producer_done, true);
+  // Mark this producer as done
+  int done_count = atomic_fetch_add(&queue->producers_done, 1) + 1;
 
-  // Final signal to wake up any waiting consumers
-  pthread_mutex_lock(&queue->mutex);
-  pthread_cond_broadcast(&queue->not_empty);
-  pthread_mutex_unlock(&queue->mutex);
+  // Last producer signals completion
+  if (done_count >= queue->num_producers) {
+    // Final signal to wake up any waiting consumers
+    pthread_mutex_lock(&queue->mutex);
+    pthread_cond_broadcast(&queue->not_empty);
+    pthread_mutex_unlock(&queue->mutex);
+  }
 
   return NULL;
 }
 
-DecodeQueue *decode_queue_create(size_t queue_depth, bool use_pinned_memory) {
-  if (queue_depth == 0) {
+// Internal create function with producer count
+static DecodeQueue *decode_queue_create_internal(size_t queue_depth,
+                                                  bool use_pinned_memory,
+                                                  int num_producers) {
+  if (queue_depth == 0 || num_producers < 1) {
     return NULL;
+  }
+  if (num_producers > MAX_PRODUCER_THREADS) {
+    num_producers = MAX_PRODUCER_THREADS;
   }
 
   DecodeQueue *queue = calloc(1, sizeof(DecodeQueue));
@@ -387,9 +406,11 @@ DecodeQueue *decode_queue_create(size_t queue_depth, bool use_pinned_memory) {
 
   queue->queue_depth = queue_depth;
   queue->use_pinned_memory = use_pinned_memory;
+  queue->num_producers = num_producers;
   queue->producer_started = false;
   atomic_init(&queue->producer_running, false);
-  atomic_init(&queue->producer_done, false);
+  atomic_init(&queue->producers_done, 0);
+  atomic_init(&queue->next_job_index, 0);
 
   pthread_mutex_init(&queue->mutex, NULL);
   pthread_cond_init(&queue->not_full, NULL);
@@ -411,6 +432,15 @@ DecodeQueue *decode_queue_create(size_t queue_depth, bool use_pinned_memory) {
   }
 
   return queue;
+}
+
+DecodeQueue *decode_queue_create(size_t queue_depth, bool use_pinned_memory) {
+  return decode_queue_create_internal(queue_depth, use_pinned_memory, 1);
+}
+
+DecodeQueue *decode_queue_create_parallel(size_t queue_depth, bool use_pinned_memory,
+                                          int num_producers) {
+  return decode_queue_create_internal(queue_depth, use_pinned_memory, num_producers);
 }
 
 void decode_queue_destroy(DecodeQueue *queue) {
@@ -459,12 +489,26 @@ bool decode_queue_start_producer(DecodeQueue *queue, BatchQueue *batch_queue,
   queue->batch_queue = batch_queue;
   queue->options = options;
   atomic_store(&queue->producer_running, true);
+  atomic_store(&queue->producers_done, 0);
+  atomic_store(&queue->next_job_index, 0);
 
-  if (pthread_create(&queue->producer_thread, NULL, producer_thread_fn, queue) != 0) {
+  // Start all producer threads
+  int started = 0;
+  for (int i = 0; i < queue->num_producers; i++) {
+    if (pthread_create(&queue->producer_threads[i], NULL, producer_thread_fn, queue) != 0) {
+      // Failed to create thread - continue with fewer
+      break;
+    }
+    started++;
+  }
+
+  if (started == 0) {
     atomic_store(&queue->producer_running, false);
     return false;
   }
 
+  // Update actual producer count if some failed to start
+  queue->num_producers = started;
   queue->producer_started = true;
   return true;
 }
@@ -474,16 +518,18 @@ void decode_queue_stop_producer(DecodeQueue *queue) {
     return;
   }
 
-  // Signal producer to stop
+  // Signal all producers to stop
   atomic_store(&queue->producer_running, false);
 
-  // Wake up producer if waiting
+  // Wake up any waiting producers
   pthread_mutex_lock(&queue->mutex);
   pthread_cond_broadcast(&queue->not_full);
   pthread_mutex_unlock(&queue->mutex);
 
-  // Wait for producer to finish
-  pthread_join(queue->producer_thread, NULL);
+  // Wait for all producer threads to finish
+  for (int i = 0; i < queue->num_producers; i++) {
+    pthread_join(queue->producer_threads[i], NULL);
+  }
   queue->producer_started = false;
 }
 
@@ -500,8 +546,8 @@ DecodedImage *decode_queue_get(DecodeQueue *queue, int job_index,
       return &queue->slots[slot_idx].image;
     }
 
-    // Check if producer is done (no more images coming)
-    if (atomic_load(&queue->producer_done)) {
+    // Check if all producers are done (no more images coming)
+    if (atomic_load(&queue->producers_done) >= queue->num_producers) {
       // One more check for the slot
       slot_idx = find_ready_slot(queue, job_index, input_index);
       if (slot_idx >= 0) {
@@ -569,7 +615,8 @@ bool decode_queue_producer_done(DecodeQueue *queue) {
   if (!queue) {
     return true;
   }
-  return atomic_load(&queue->producer_done);
+  // All producers are done when the done counter reaches num_producers
+  return atomic_load(&queue->producers_done) >= queue->num_producers;
 }
 
 DecodeQueueStats decode_queue_get_stats(const DecodeQueue *queue) {
