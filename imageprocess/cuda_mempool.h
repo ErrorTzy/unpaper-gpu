@@ -84,6 +84,33 @@ CudaMemPoolStats cuda_mempool_global_get_stats(void);
 // Print global pool statistics.
 void cuda_mempool_global_print_stats(void);
 
+// Integral buffer pool - separate from image pool due to different buffer sizes.
+// Integral buffers are width*height*4 bytes (int32), typically ~35MB for A1 images.
+// For batch processing with N streams, allocate 2*N buffers for double-buffering.
+
+// Initialize global integral pool with specified parameters.
+// buffer_count: typically 2 * stream_count
+// buffer_size: typically width * height * 4, aligned to 512 bytes
+bool cuda_mempool_integral_global_init(size_t buffer_count, size_t buffer_size);
+
+// Destroy global integral pool.
+void cuda_mempool_integral_global_cleanup(void);
+
+// Check if global integral pool is active.
+bool cuda_mempool_integral_global_active(void);
+
+// Acquire from global integral pool (falls back to direct alloc if no pool).
+uint64_t cuda_mempool_integral_global_acquire(size_t bytes);
+
+// Release to global integral pool (falls back to cudaFree if no pool).
+void cuda_mempool_integral_global_release(uint64_t dptr);
+
+// Get global integral pool statistics.
+CudaMemPoolStats cuda_mempool_integral_global_get_stats(void);
+
+// Print global integral pool statistics.
+void cuda_mempool_integral_global_print_stats(void);
+
 #ifdef __cplusplus
 }
 #endif

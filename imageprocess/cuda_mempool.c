@@ -50,9 +50,13 @@ struct CudaMemPool {
   atomic_size_t peak_in_use;
 };
 
-// Global singleton pool
+// Global singleton pool for image buffers
 static CudaMemPool *global_pool = NULL;
 static pthread_mutex_t global_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Global singleton pool for integral buffers (separate due to different sizes)
+static CudaMemPool *global_integral_pool = NULL;
+static pthread_mutex_t global_integral_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 CudaMemPool *cuda_mempool_create(size_t buffer_count, size_t buffer_size) {
   if (buffer_count == 0 || buffer_size == 0) {
@@ -379,6 +383,117 @@ void cuda_mempool_global_print_stats(void) {
   pthread_mutex_unlock(&global_pool_mutex);
 }
 
+// Integral pool implementation
+
+bool cuda_mempool_integral_global_init(size_t buffer_count, size_t buffer_size) {
+  pthread_mutex_lock(&global_integral_pool_mutex);
+
+  if (global_integral_pool != NULL) {
+    // Already initialized
+    pthread_mutex_unlock(&global_integral_pool_mutex);
+    return true;
+  }
+
+  global_integral_pool = cuda_mempool_create(buffer_count, buffer_size);
+
+  pthread_mutex_unlock(&global_integral_pool_mutex);
+  return global_integral_pool != NULL;
+}
+
+void cuda_mempool_integral_global_cleanup(void) {
+  pthread_mutex_lock(&global_integral_pool_mutex);
+
+  if (global_integral_pool != NULL) {
+    cuda_mempool_destroy(global_integral_pool);
+    global_integral_pool = NULL;
+  }
+
+  pthread_mutex_unlock(&global_integral_pool_mutex);
+}
+
+bool cuda_mempool_integral_global_active(void) {
+  pthread_mutex_lock(&global_integral_pool_mutex);
+  bool active = (global_integral_pool != NULL);
+  pthread_mutex_unlock(&global_integral_pool_mutex);
+  return active;
+}
+
+uint64_t cuda_mempool_integral_global_acquire(size_t bytes) {
+  // Fast path: check without lock
+  CudaMemPool *pool = global_integral_pool;
+  if (pool != NULL) {
+    return cuda_mempool_acquire(pool, bytes);
+  }
+
+  // No pool - direct allocation
+  return unpaper_cuda_malloc(bytes);
+}
+
+void cuda_mempool_integral_global_release(uint64_t dptr) {
+  if (dptr == 0) {
+    return;
+  }
+
+  // Fast path: check without lock
+  CudaMemPool *pool = global_integral_pool;
+  if (pool != NULL) {
+    cuda_mempool_release(pool, dptr);
+    return;
+  }
+
+  // No pool - direct free
+  unpaper_cuda_free(dptr);
+}
+
+CudaMemPoolStats cuda_mempool_integral_global_get_stats(void) {
+  CudaMemPoolStats stats = {0};
+
+  pthread_mutex_lock(&global_integral_pool_mutex);
+  if (global_integral_pool != NULL) {
+    stats = cuda_mempool_get_stats(global_integral_pool);
+  }
+  pthread_mutex_unlock(&global_integral_pool_mutex);
+
+  return stats;
+}
+
+void cuda_mempool_integral_global_print_stats(void) {
+  pthread_mutex_lock(&global_integral_pool_mutex);
+  if (global_integral_pool != NULL) {
+    fprintf(stderr, "GPU Integral Buffer Pool Statistics:\n");
+    CudaMemPoolStats stats = cuda_mempool_get_stats(global_integral_pool);
+
+    double hit_rate = 0.0;
+    if (stats.total_allocations > 0) {
+      hit_rate =
+          100.0 * (double)stats.pool_hits / (double)stats.total_allocations;
+    }
+
+    fprintf(stderr,
+            "  Pool size: %zu buffers x %zu bytes = %.2f MB\n"
+            "  Total acquisitions: %zu\n"
+            "  Pool hits: %zu (%.1f%%)\n"
+            "  Pool misses: %zu\n"
+            "  Peak concurrent usage: %zu\n",
+            stats.buffer_count, stats.buffer_size,
+            (double)stats.total_bytes_pooled / (1024.0 * 1024.0),
+            stats.total_allocations, stats.pool_hits, hit_rate,
+            stats.pool_misses, stats.peak_in_use);
+
+    if (stats.pool_misses > 0) {
+      if (stats.size_mismatches > 0) {
+        fprintf(stderr,
+                "  WARNING: %zu allocations required larger buffers\n",
+                stats.size_mismatches);
+      }
+      if (stats.pool_exhaustion > 0) {
+        fprintf(stderr, "  Pool exhaustion: %zu\n", stats.pool_exhaustion);
+      }
+    }
+  }
+  pthread_mutex_unlock(&global_integral_pool_mutex);
+}
+
 #else // !UNPAPER_WITH_CUDA
 
 // Stub implementations for non-CUDA builds
@@ -433,5 +548,29 @@ CudaMemPoolStats cuda_mempool_global_get_stats(void) {
 }
 
 void cuda_mempool_global_print_stats(void) {}
+
+bool cuda_mempool_integral_global_init(size_t buffer_count, size_t buffer_size) {
+  (void)buffer_count;
+  (void)buffer_size;
+  return false;
+}
+
+void cuda_mempool_integral_global_cleanup(void) {}
+
+bool cuda_mempool_integral_global_active(void) { return false; }
+
+uint64_t cuda_mempool_integral_global_acquire(size_t bytes) {
+  (void)bytes;
+  return 0;
+}
+
+void cuda_mempool_integral_global_release(uint64_t dptr) { (void)dptr; }
+
+CudaMemPoolStats cuda_mempool_integral_global_get_stats(void) {
+  CudaMemPoolStats stats = {0};
+  return stats;
+}
+
+void cuda_mempool_integral_global_print_stats(void) {}
 
 #endif // UNPAPER_WITH_CUDA

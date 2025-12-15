@@ -1214,6 +1214,7 @@ int main(int argc, char *argv[]) {
       // Stream pool enables concurrent GPU operations across multiple jobs
 #ifdef UNPAPER_WITH_CUDA
       bool mempool_active = false;
+      bool integralpool_active = false;
       bool streampool_active = false;
       size_t auto_stream_count = 4;
       size_t auto_buffer_count = 8;
@@ -1268,6 +1269,22 @@ int main(int argc, char *argv[]) {
         } else {
           verboseLog(VERBOSE_NORMAL,
                      "GPU memory pool initialization failed, using direct allocation\n");
+        }
+
+        // Integral buffer pool for GPU integral image computation
+        // Integral buffers are int32, ~36MB for A1 images (2500x3500x4 aligned to 512)
+        // Pool same count as image buffers for matching throughput
+        const size_t integral_buffer_size = 36 * 1024 * 1024;
+        const size_t total_integral_pool_size = auto_buffer_count * integral_buffer_size;
+        if (cuda_mempool_integral_global_init(auto_buffer_count, integral_buffer_size)) {
+          integralpool_active = true;
+          verboseLog(VERBOSE_NORMAL,
+                     "GPU integral pool: %zu buffers x %zu bytes (%.1f MB total)\n",
+                     auto_buffer_count, integral_buffer_size,
+                     (double)total_integral_pool_size / (1024.0 * 1024.0));
+        } else {
+          verboseLog(VERBOSE_NORMAL,
+                     "GPU integral pool initialization failed, using direct allocation\n");
         }
 
         // Initialize stream pool for concurrent GPU operations
@@ -1425,6 +1442,9 @@ int main(int argc, char *argv[]) {
           if (mempool_active) {
             cuda_mempool_global_print_stats();
           }
+          if (integralpool_active) {
+            cuda_mempool_integral_global_print_stats();
+          }
           if (streampool_active) {
             cuda_stream_pool_global_print_stats();
           }
@@ -1439,6 +1459,9 @@ int main(int argc, char *argv[]) {
         }
         if (streampool_active) {
           cuda_stream_pool_global_cleanup();
+        }
+        if (integralpool_active) {
+          cuda_mempool_integral_global_cleanup();
         }
         if (mempool_active) {
           cuda_mempool_global_cleanup();

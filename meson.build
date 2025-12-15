@@ -415,6 +415,7 @@ if have_cuda
         [
             'tests/npp_integral_test.c',
             'imageprocess/cuda_runtime.c',
+            'imageprocess/cuda_mempool.c',
             'imageprocess/npp_wrapper.c',
             'imageprocess/npp_integral.c',
             'lib/logging.c',

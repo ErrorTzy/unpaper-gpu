@@ -489,24 +489,38 @@ Move all computation to GPU using:
 
 **PR 30: Integral Buffer Pool + GPU Integral Implementation**
 
-- Status: planned
+- Status: complete
 - Scope:
   - Extend `cuda_mempool` to support integral buffers:
-    - Integral output size: (width+1) × (height+1) × 4 bytes (int32)
-    - For A1 (2500×3500): 2501×3501×4 = ~35MB per buffer
-    - Pool 2× stream count buffers for double-buffering
+    - Integral output size: width × height × 4 bytes (int32) for NPP format
+    - For A1 (2500×3500): ~36MB per buffer (aligned to 512 bytes)
+    - Pool same count as image buffers for matching throughput
   - Implement full GPU integral pipeline:
-    - Allocate output buffer from pool
+    - Allocate output buffer from pool via `cuda_mempool_integral_global_acquire()`
     - Call NPP integral with stream context
-    - Return buffer to pool after use
+    - Return buffer to pool via `cuda_mempool_integral_global_release()`
   - Add integral buffer statistics to `--perf` output
+- Results:
+  - Separate integral pool added to `cuda_mempool.c/.h`:
+    - `cuda_mempool_integral_global_init()` / `cleanup()` / `acquire()` / `release()`
+    - Lock-free fast path for concurrent acquisition
+    - Same buffer count as image pool (auto-scaled based on VRAM)
+  - `npp_integral.c` uses pooled buffers for allocation/deallocation
+  - Integral pool initialization added to `unpaper.c` batch mode:
+    - 36MB buffers for A1 images (2500×3500×4 aligned)
+    - Verbose output: "GPU integral pool: N buffers x 36MB (total MB)"
+  - Statistics printed with `--perf`:
+    - Pool hits/misses, peak concurrent usage
+  - All 10 CUDA tests + 34 pytest pass
 - Files:
-  - `imageprocess/cuda_mempool.c/.h` - extend for integral buffers
-  - `imageprocess/npp_integral.c/.h` - complete implementation
+  - `imageprocess/cuda_mempool.c/.h` - integral pool functions
+  - `imageprocess/npp_integral.c` - use pooled buffers
+  - `unpaper.c` - initialize/cleanup integral pool
+  - `meson.build` - add cuda_mempool.c to npp_integral_test
 - Acceptance:
-  - GPU integral produces identical results to CPU `cv::integral()`
-  - Integral buffers pooled (no per-call allocation)
-  - Statistics show integral buffer hits/misses
+  - GPU integral produces identical results to CPU reference [DONE]
+  - Integral buffers pooled (no per-call allocation) [DONE]
+  - Statistics show integral buffer hits/misses [DONE]
 
 **PR 31: Blurfilter GPU Scan Kernel**
 

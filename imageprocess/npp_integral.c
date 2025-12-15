@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "imageprocess/cuda_mempool.h"
 #include "lib/logging.h"
 
 // Alignment for NPP buffers (typically 512 bytes for best performance)
@@ -54,11 +55,10 @@ uint64_t unpaper_npp_integral_alloc(int width, int height, size_t *step_out) {
     return 0;
   }
 
-  void *ptr = NULL;
-  cudaError_t err = cudaMalloc(&ptr, total_bytes);
-  if (err != cudaSuccess || ptr == NULL) {
-    errOutput("NPP integral: cudaMalloc failed for %zu bytes: %s", total_bytes,
-              cudaGetErrorString(err));
+  // Use integral pool if available for better batch performance
+  uint64_t ptr = cuda_mempool_integral_global_acquire(total_bytes);
+  if (ptr == 0) {
+    errOutput("NPP integral: allocation failed for %zu bytes", total_bytes);
     if (step_out != NULL) {
       *step_out = 0;
     }
@@ -69,12 +69,13 @@ uint64_t unpaper_npp_integral_alloc(int width, int height, size_t *step_out) {
     *step_out = step;
   }
 
-  return (uint64_t)ptr;
+  return ptr;
 }
 
 void unpaper_npp_integral_free(uint64_t device_ptr) {
   if (device_ptr != 0) {
-    cudaFree((void *)device_ptr);
+    // Release to integral pool if available
+    cuda_mempool_integral_global_release(device_ptr);
   }
 }
 
