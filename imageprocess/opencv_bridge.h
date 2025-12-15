@@ -24,7 +24,8 @@ typedef struct {
   int width;
   int height;
   size_t pitch_bytes;
-  bool opencv_allocated; // true if allocated via OpenCV/cudart, false via unpaper
+  bool opencv_allocated; // true if allocated via OpenCV/cudart, false via
+                         // unpaper
 } UnpaperOpencvMask;
 
 bool unpaper_opencv_enabled(void);
@@ -62,13 +63,15 @@ void unpaper_opencv_mask_free(UnpaperOpencvMask *mask);
  * @param black_threshold Pixels with grayscale <= this are considered black
  * @param gray_threshold  Tiles with inverse lightness < this are wiped
  * @param stream         Optional CUDA stream (may be NULL)
+ * @param sync_after     If true, synchronize stream before returning.
+ *                       Set to false for batch processing to defer sync.
  * @return true on success, false if operation not supported
  */
 bool unpaper_opencv_grayfilter(uint64_t src_device, int width, int height,
                                size_t pitch_bytes, int format, int tile_width,
                                int tile_height, int step_x, int step_y,
                                uint8_t black_threshold, uint8_t gray_threshold,
-                               UnpaperCudaStream *stream);
+                               UnpaperCudaStream *stream, bool sync_after);
 
 /**
  * Blurfilter using OpenCV CUDA with integral images.
@@ -86,13 +89,15 @@ bool unpaper_opencv_grayfilter(uint64_t src_device, int width, int height,
  * @param white_threshold Pixels with grayscale <= this are counted as dark
  * @param intensity       Max ratio of dark pixels to keep a block
  * @param stream          Optional CUDA stream (may be NULL)
+ * @param sync_after      If true, synchronize stream before returning.
+ *                        Set to false for batch processing to defer sync.
  * @return true on success, false if operation not supported
  */
 bool unpaper_opencv_blurfilter(uint64_t src_device, int width, int height,
                                size_t pitch_bytes, int format, int block_width,
                                int block_height, int step_x, int step_y,
                                uint8_t white_threshold, float intensity,
-                               UnpaperCudaStream *stream);
+                               UnpaperCudaStream *stream, bool sync_after);
 
 /**
  * Blackfilter using OpenCV CUDA with CCL.
@@ -119,15 +124,12 @@ bool unpaper_opencv_blurfilter(uint64_t src_device, int width, int height,
  * @param stream           Optional CUDA stream (may be NULL)
  * @return true on success, false if operation not supported
  */
-bool unpaper_opencv_blackfilter(uint64_t src_device, int width, int height,
-                                size_t pitch_bytes, int format, int scan_size_w,
-                                int scan_size_h, int scan_depth_h,
-                                int scan_depth_v, int scan_step_h,
-                                int scan_step_v, bool scan_dir_h,
-                                bool scan_dir_v, uint8_t black_threshold,
-                                uint8_t area_threshold, uint64_t intensity,
-                                const int32_t *exclusions, int exclusion_count,
-                                UnpaperCudaStream *stream);
+bool unpaper_opencv_blackfilter(
+    uint64_t src_device, int width, int height, size_t pitch_bytes, int format,
+    int scan_size_w, int scan_size_h, int scan_depth_h, int scan_depth_v,
+    int scan_step_h, int scan_step_v, bool scan_dir_h, bool scan_dir_v,
+    uint8_t black_threshold, uint8_t area_threshold, uint64_t intensity,
+    const int32_t *exclusions, int exclusion_count, UnpaperCudaStream *stream);
 
 /**
  * Sum grayscale values in a rectangle using OpenCV CUDA.

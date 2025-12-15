@@ -4,8 +4,8 @@
 
 #include "imageprocess/backend.h"
 
-#include <math.h>
 #include <inttypes.h>
+#include <math.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <string.h>
@@ -15,11 +15,17 @@
 #include <libavutil/pixfmt.h>
 
 #include "imageprocess/cuda_kernels_format.h"
+#include "imageprocess/cuda_mempool.h"
 #include "imageprocess/cuda_runtime.h"
+#include "imageprocess/npp_integral.h"
+#include "imageprocess/npp_wrapper.h"
+
 #include "imageprocess/opencv_bridge.h"
 #include "imageprocess/opencv_ops.h"
 #include "lib/logging.h"
 #include "lib/math_util.h"
+#include <cuda_runtime.h>
+#include <nppi_color_conversion.h>
 
 typedef struct {
   uint64_t dptr;
@@ -61,6 +67,8 @@ static void *k_noisefilter_count;
 static void *k_noisefilter_apply;
 static void *k_noisefilter_apply_mask;
 static void *k_blackfilter_floodfill_rect;
+static void *k_blackfilter_scan_parallel;
+static void *k_blackfilter_wipe_regions;
 static void *k_detect_edge_rotation_peaks;
 static void *k_rotate_bytes;
 static void *k_rotate_mono;
@@ -103,10 +111,10 @@ static void ensure_kernels_loaded(void) {
       unpaper_cuda_module_get_function(module, "unpaper_stretch_mono");
   k_count_brightness_range = unpaper_cuda_module_get_function(
       module, "unpaper_count_brightness_range");
-  k_sum_lightness_rect = unpaper_cuda_module_get_function(
-      module, "unpaper_sum_lightness_rect");
-  k_sum_grayscale_rect = unpaper_cuda_module_get_function(
-      module, "unpaper_sum_grayscale_rect");
+  k_sum_lightness_rect =
+      unpaper_cuda_module_get_function(module, "unpaper_sum_lightness_rect");
+  k_sum_grayscale_rect =
+      unpaper_cuda_module_get_function(module, "unpaper_sum_grayscale_rect");
   k_sum_darkness_inverse_rect = unpaper_cuda_module_get_function(
       module, "unpaper_sum_darkness_inverse_rect");
   k_apply_masks_bytes =
@@ -115,16 +123,20 @@ static void ensure_kernels_loaded(void) {
       unpaper_cuda_module_get_function(module, "unpaper_apply_masks_mono");
   k_noisefilter_build_labels = unpaper_cuda_module_get_function(
       module, "unpaper_noisefilter_build_labels");
-  k_noisefilter_propagate = unpaper_cuda_module_get_function(
-      module, "unpaper_noisefilter_propagate");
-  k_noisefilter_count = unpaper_cuda_module_get_function(
-      module, "unpaper_noisefilter_count");
-  k_noisefilter_apply = unpaper_cuda_module_get_function(
-      module, "unpaper_noisefilter_apply");
+  k_noisefilter_propagate =
+      unpaper_cuda_module_get_function(module, "unpaper_noisefilter_propagate");
+  k_noisefilter_count =
+      unpaper_cuda_module_get_function(module, "unpaper_noisefilter_count");
+  k_noisefilter_apply =
+      unpaper_cuda_module_get_function(module, "unpaper_noisefilter_apply");
   k_noisefilter_apply_mask = unpaper_cuda_module_get_function(
       module, "unpaper_noisefilter_apply_mask");
   k_blackfilter_floodfill_rect = unpaper_cuda_module_get_function(
       module, "unpaper_blackfilter_floodfill_rect");
+  k_blackfilter_scan_parallel = unpaper_cuda_module_get_function(
+      module, "unpaper_blackfilter_scan_parallel");
+  k_blackfilter_wipe_regions = unpaper_cuda_module_get_function(
+      module, "unpaper_blackfilter_wipe_regions");
   k_detect_edge_rotation_peaks = unpaper_cuda_module_get_function(
       module, "unpaper_detect_edge_rotation_peaks");
   k_rotate_bytes =
@@ -184,9 +196,10 @@ static bool rect_empty(Rectangle area) {
          (area.vertex[0].y > area.vertex[1].y);
 }
 
-static unsigned long long cuda_rect_count_brightness_range(
-    Image image, Rectangle input_area, uint8_t min_brightness,
-    uint8_t max_brightness) {
+static unsigned long long
+cuda_rect_count_brightness_range(Image image, Rectangle input_area,
+                                 uint8_t min_brightness,
+                                 uint8_t max_brightness) {
   Rectangle area = clip_rectangle(image, input_area);
   if (rect_empty(area)) {
     return 0;
@@ -232,8 +245,18 @@ static unsigned long long cuda_rect_count_brightness_range(
   }
 
   void *params[] = {
-      &st->dptr, &st->linesize, &src_fmt, &src_w, &src_h, &x0, &y0, &x1, &y1,
-      &min_brightness, &max_brightness, &out_dptr,
+      &st->dptr,
+      &st->linesize,
+      &src_fmt,
+      &src_w,
+      &src_h,
+      &x0,
+      &y0,
+      &x1,
+      &y1,
+      &min_brightness,
+      &max_brightness,
+      &out_dptr,
   };
   unpaper_cuda_launch_kernel(k_count_brightness_range, grid_x, 1, 1, block_x, 1,
                              1, params);
@@ -291,8 +314,8 @@ static unsigned long long cuda_rect_sum_lightness(Image image,
   }
 
   void *params[] = {
-      &st->dptr, &st->linesize, &src_fmt, &src_w, &src_h, &x0, &y0, &x1, &y1,
-      &out_dptr,
+      &st->dptr, &st->linesize, &src_fmt, &src_w, &src_h,
+      &x0,       &y0,           &x1,      &y1,    &out_dptr,
   };
   unpaper_cuda_launch_kernel(k_sum_lightness_rect, grid_x, 1, 1, block_x, 1, 1,
                              params);
@@ -350,8 +373,8 @@ static unsigned long long cuda_rect_sum_grayscale(Image image,
   }
 
   void *params[] = {
-      &st->dptr, &st->linesize, &src_fmt, &src_w, &src_h, &x0, &y0, &x1, &y1,
-      &out_dptr,
+      &st->dptr, &st->linesize, &src_fmt, &src_w, &src_h,
+      &x0,       &y0,           &x1,      &y1,    &out_dptr,
   };
   unpaper_cuda_launch_kernel(k_sum_grayscale_rect, grid_x, 1, 1, block_x, 1, 1,
                              params);
@@ -425,20 +448,88 @@ static uint32_t detect_edge_cuda(Image image, Point origin, Delta step,
   return count;
 }
 
-static bool detect_mask_cuda(Image image, MaskDetectionParameters params,
-                             Point origin, Rectangle *mask) {
-  const RectangleSize image_size = size_of_image(image);
+// Optimized edge detection using pre-computed CPU integral (no GPU syncs)
+static uint32_t detect_edge_cuda_with_integral(
+    const UnpaperCpuIntegral *integral, RectangleSize image_size, Point origin,
+    Delta step, int32_t scan_size, int32_t scan_depth, float threshold) {
+  Rectangle scan_area;
 
+  if (step.vertical == 0) {
+    if (scan_depth == -1) {
+      scan_depth = image_size.height;
+    }
+    scan_area = rectangle_from_size(
+        shift_point(origin, (Delta){-scan_size / 2, -scan_depth / 2}),
+        (RectangleSize){scan_size, scan_depth});
+  } else if (step.horizontal == 0) {
+    if (scan_depth == -1) {
+      scan_depth = image_size.width;
+    }
+    scan_area = rectangle_from_size(
+        shift_point(origin, (Delta){-scan_depth / 2, -scan_size / 2}),
+        (RectangleSize){scan_depth, scan_size});
+  } else {
+    return 0; // Diagonal steps not supported
+  }
+
+  uint32_t total = 0;
+  uint32_t count = 0;
+  uint8_t blackness;
+
+  do {
+    // Clip scan area to image bounds
+    int x0 = scan_area.vertex[0].x;
+    int y0 = scan_area.vertex[0].y;
+    int x1 = scan_area.vertex[1].x;
+    int y1 = scan_area.vertex[1].y;
+
+    // Clamp to image bounds
+    if (x0 < 0)
+      x0 = 0;
+    if (y0 < 0)
+      y0 = 0;
+    if (x1 >= image_size.width)
+      x1 = image_size.width - 1;
+    if (y1 >= image_size.height)
+      y1 = image_size.height - 1;
+
+    if (x0 > x1 || y0 > y1) {
+      blackness = 0;
+    } else {
+      // Compute sum using CPU integral (O(1), no GPU sync!)
+      int64_t sum = unpaper_cpu_integral_rect_sum(integral, x0, y0, x1, y1);
+      int64_t pixel_count = (int64_t)(x1 - x0 + 1) * (int64_t)(y1 - y0 + 1);
+
+      if (pixel_count > 0) {
+        int64_t avg = sum / pixel_count;
+        blackness = (uint8_t)(0xFF - (uint8_t)(avg > 255 ? 255 : avg));
+      } else {
+        blackness = 0;
+      }
+    }
+
+    total += blackness;
+    count++;
+    scan_area = shift_rectangle(scan_area, step);
+  } while ((blackness >= ((threshold * total) / count)) && blackness != 0);
+
+  return count;
+}
+
+// Optimized mask detection using pre-computed CPU integral
+static bool detect_mask_cuda_with_integral(const UnpaperCpuIntegral *integral,
+                                           RectangleSize image_size,
+                                           MaskDetectionParameters params,
+                                           Point origin, Rectangle *mask) {
   if (params.scan_direction.horizontal) {
-    const uint32_t left_edge =
-        detect_edge_cuda(image, origin,
-                         (Delta){-params.scan_step.horizontal, 0},
-                         params.scan_size.width, params.scan_depth.horizontal,
-                         params.scan_threshold.horizontal);
-    const uint32_t right_edge =
-        detect_edge_cuda(image, origin, (Delta){params.scan_step.horizontal, 0},
-                         params.scan_size.width, params.scan_depth.horizontal,
-                         params.scan_threshold.horizontal);
+    const uint32_t left_edge = detect_edge_cuda_with_integral(
+        integral, image_size, origin, (Delta){-params.scan_step.horizontal, 0},
+        params.scan_size.width, params.scan_depth.horizontal,
+        params.scan_threshold.horizontal);
+    const uint32_t right_edge = detect_edge_cuda_with_integral(
+        integral, image_size, origin, (Delta){params.scan_step.horizontal, 0},
+        params.scan_size.width, params.scan_depth.horizontal,
+        params.scan_threshold.horizontal);
 
     mask->vertex[0].x = origin.x -
                         (params.scan_step.horizontal * (int32_t)left_edge) -
@@ -452,21 +543,21 @@ static bool detect_mask_cuda(Image image, MaskDetectionParameters params,
   }
 
   if (params.scan_direction.vertical) {
-    const uint32_t top_edge =
-        detect_edge_cuda(image, origin, (Delta){0, -params.scan_step.vertical},
-                         params.scan_size.height, params.scan_depth.vertical,
-                         params.scan_threshold.vertical);
-    const uint32_t bottom_edge =
-        detect_edge_cuda(image, origin, (Delta){0, params.scan_step.vertical},
-                         params.scan_size.height, params.scan_depth.vertical,
-                         params.scan_threshold.vertical);
+    const uint32_t top_edge = detect_edge_cuda_with_integral(
+        integral, image_size, origin, (Delta){0, -params.scan_step.vertical},
+        params.scan_size.height, params.scan_depth.vertical,
+        params.scan_threshold.vertical);
+    const uint32_t bottom_edge = detect_edge_cuda_with_integral(
+        integral, image_size, origin, (Delta){0, params.scan_step.vertical},
+        params.scan_size.height, params.scan_depth.vertical,
+        params.scan_threshold.vertical);
 
-    mask->vertex[0].y =
-        origin.y - (params.scan_step.vertical * (int32_t)top_edge) -
-        params.scan_size.height / 2;
-    mask->vertex[1].y =
-        origin.y + (params.scan_step.vertical * (int32_t)bottom_edge) +
-        params.scan_size.height / 2;
+    mask->vertex[0].y = origin.y -
+                        (params.scan_step.vertical * (int32_t)top_edge) -
+                        params.scan_size.height / 2;
+    mask->vertex[1].y = origin.y +
+                        (params.scan_step.vertical * (int32_t)bottom_edge) +
+                        params.scan_size.height / 2;
   } else {
     mask->vertex[0].y = 0;
     mask->vertex[1].y = image_size.height - 1;
@@ -496,9 +587,80 @@ static bool detect_mask_cuda(Image image, MaskDetectionParameters params,
   return success;
 }
 
-static uint32_t detect_border_edge_cuda(Image image, const Rectangle outside_mask,
-                                       Delta step, int32_t size,
-                                       int32_t threshold) {
+static bool detect_mask_cuda(Image image, MaskDetectionParameters params,
+                             Point origin, Rectangle *mask) {
+  const RectangleSize image_size = size_of_image(image);
+
+  if (params.scan_direction.horizontal) {
+    const uint32_t left_edge = detect_edge_cuda(
+        image, origin, (Delta){-params.scan_step.horizontal, 0},
+        params.scan_size.width, params.scan_depth.horizontal,
+        params.scan_threshold.horizontal);
+    const uint32_t right_edge =
+        detect_edge_cuda(image, origin, (Delta){params.scan_step.horizontal, 0},
+                         params.scan_size.width, params.scan_depth.horizontal,
+                         params.scan_threshold.horizontal);
+
+    mask->vertex[0].x = origin.x -
+                        (params.scan_step.horizontal * (int32_t)left_edge) -
+                        params.scan_size.width / 2;
+    mask->vertex[1].x = origin.x +
+                        (params.scan_step.horizontal * (int32_t)right_edge) +
+                        params.scan_size.width / 2;
+  } else {
+    mask->vertex[0].x = 0;
+    mask->vertex[1].x = image_size.width - 1;
+  }
+
+  if (params.scan_direction.vertical) {
+    const uint32_t top_edge =
+        detect_edge_cuda(image, origin, (Delta){0, -params.scan_step.vertical},
+                         params.scan_size.height, params.scan_depth.vertical,
+                         params.scan_threshold.vertical);
+    const uint32_t bottom_edge =
+        detect_edge_cuda(image, origin, (Delta){0, params.scan_step.vertical},
+                         params.scan_size.height, params.scan_depth.vertical,
+                         params.scan_threshold.vertical);
+
+    mask->vertex[0].y = origin.y -
+                        (params.scan_step.vertical * (int32_t)top_edge) -
+                        params.scan_size.height / 2;
+    mask->vertex[1].y = origin.y +
+                        (params.scan_step.vertical * (int32_t)bottom_edge) +
+                        params.scan_size.height / 2;
+  } else {
+    mask->vertex[0].y = 0;
+    mask->vertex[1].y = image_size.height - 1;
+  }
+
+  const RectangleSize size = size_of_rectangle(*mask);
+  bool success = true;
+
+  if ((params.minimum_width != -1 && size.width < params.minimum_width) ||
+      (params.maximum_width != -1 && size.width > params.maximum_width)) {
+    verboseLog(VERBOSE_DEBUG, "mask width (%d) not within min/max (%d / %d)\n",
+               size.width, params.minimum_width, params.maximum_width);
+    mask->vertex[0].x = origin.x - params.maximum_width / 2;
+    mask->vertex[1].x = origin.x + params.maximum_width / 2;
+    success = false;
+  }
+
+  if ((params.minimum_height != -1 && size.height < params.minimum_height) ||
+      (params.maximum_height != -1 && size.height > params.maximum_height)) {
+    verboseLog(VERBOSE_DEBUG, "mask height (%d) not within min/max (%d / %d)\n",
+               size.height, params.minimum_height, params.maximum_height);
+    mask->vertex[0].y = origin.y - params.maximum_height / 2;
+    mask->vertex[1].y = origin.y + params.maximum_height / 2;
+    success = false;
+  }
+
+  return success;
+}
+
+static uint32_t detect_border_edge_cuda(Image image,
+                                        const Rectangle outside_mask,
+                                        Delta step, int32_t size,
+                                        int32_t threshold) {
   Rectangle area = outside_mask;
   const RectangleSize mask_size = size_of_rectangle(outside_mask);
   int32_t max_step;
@@ -523,6 +685,58 @@ static uint32_t detect_border_edge_cuda(Image image, const Rectangle outside_mas
   while (result < (uint32_t)max_step) {
     const unsigned long long cnt = cuda_rect_count_brightness_range(
         image, area, 0, image.abs_black_threshold);
+    if (cnt >= (unsigned long long)threshold) {
+      return result;
+    }
+
+    area = shift_rectangle(area, step);
+
+    int32_t delta = step.horizontal + step.vertical;
+    if (delta < 0) {
+      delta = -delta;
+    }
+    result += (uint32_t)delta;
+  }
+
+  return 0;
+}
+
+// Optimized border edge detection using pre-computed dark pixel integral
+// The integral contains sum of (pixel <= threshold ? 1 : 0) * 255
+// So integral_sum / 255 gives dark pixel count
+static uint32_t
+detect_border_edge_with_dark_integral(const UnpaperCpuIntegral *dark_integral,
+                                      const Rectangle outside_mask, Delta step,
+                                      int32_t size, int32_t threshold) {
+  Rectangle area = outside_mask;
+  const RectangleSize mask_size = size_of_rectangle(outside_mask);
+  int32_t max_step;
+
+  if (step.vertical == 0) {
+    if (step.horizontal > 0) {
+      area.vertex[1].x = outside_mask.vertex[0].x + size;
+    } else {
+      area.vertex[0].x = outside_mask.vertex[1].x - size;
+    }
+    max_step = mask_size.width;
+  } else {
+    if (step.vertical > 0) {
+      area.vertex[1].y = outside_mask.vertex[0].y + size;
+    } else {
+      area.vertex[0].y = outside_mask.vertex[1].y - size;
+    }
+    max_step = mask_size.height;
+  }
+
+  uint32_t result = 0;
+  while (result < (uint32_t)max_step) {
+    // Compute dark pixel count using integral (O(1), no GPU sync!)
+    int64_t sum = unpaper_cpu_integral_rect_sum(
+        dark_integral, area.vertex[0].x, area.vertex[0].y, area.vertex[1].x,
+        area.vertex[1].y);
+    // Integral contains 255 for dark pixels, 0 for light, so divide by 255
+    unsigned long long cnt = (unsigned long long)(sum / 255);
+
     if (cnt >= (unsigned long long)threshold) {
       return result;
     }
@@ -586,8 +800,8 @@ static unsigned long long cuda_rect_sum_darkness_inverse(Image image,
   }
 
   void *params[] = {
-      &st->dptr, &st->linesize, &src_fmt, &src_w, &src_h, &x0, &y0, &x1, &y1,
-      &out_dptr,
+      &st->dptr, &st->linesize, &src_fmt, &src_w, &src_h,
+      &x0,       &y0,           &x1,      &y1,    &out_dptr,
   };
   unpaper_cuda_launch_kernel(k_sum_darkness_inverse_rect, grid_x, 1, 1, block_x,
                              1, 1, params);
@@ -626,6 +840,121 @@ static uint8_t cuda_darkness_rect(Image image, Rectangle input_area) {
   return (uint8_t)(0xFFu - (sum / count));
 }
 
+// Compute darkness using pre-computed CPU integral (no GPU sync!)
+// darkness = 255 - average_pixel_value = 255 - (pixel_sum / pixel_count)
+static uint8_t darkness_rect_with_integral(const UnpaperCpuIntegral *integral,
+                                           RectangleSize image_size,
+                                           Rectangle input_area) {
+  // Clamp to image bounds
+  Rectangle area = input_area;
+  if (area.vertex[0].x < 0)
+    area.vertex[0].x = 0;
+  if (area.vertex[0].y < 0)
+    area.vertex[0].y = 0;
+  if (area.vertex[1].x >= image_size.width)
+    area.vertex[1].x = image_size.width - 1;
+  if (area.vertex[1].y >= image_size.height)
+    area.vertex[1].y = image_size.height - 1;
+
+  if (area.vertex[0].x > area.vertex[1].x ||
+      area.vertex[0].y > area.vertex[1].y) {
+    return 0;
+  }
+
+  const int rect_w = area.vertex[1].x - area.vertex[0].x + 1;
+  const int rect_h = area.vertex[1].y - area.vertex[0].y + 1;
+  const unsigned long long count = (unsigned long long)rect_w * rect_h;
+  if (count == 0ull) {
+    return 0;
+  }
+
+  // Get pixel sum from integral image (O(1) lookup)
+  int64_t sum = unpaper_cpu_integral_rect_sum(
+      integral, area.vertex[0].x, area.vertex[0].y, area.vertex[1].x,
+      area.vertex[1].y);
+
+  // darkness = 255 - average_pixel_value
+  // For grayscale, sum is sum of pixel values (0-255)
+  uint8_t avg = (uint8_t)(sum / (int64_t)count);
+  return (uint8_t)(0xFFu - avg);
+}
+
+// Blackfilter scan using pre-computed integral (no GPU syncs in loop)
+static void blackfilter_scan_cuda_with_integral(
+    Image image, const UnpaperCpuIntegral *integral, RectangleSize image_size,
+    BlackfilterParameters params, Delta step, RectangleSize stripe_size,
+    Delta shift, uint64_t stack_dptr, int stack_cap) {
+  if (step.horizontal != 0 && step.vertical != 0) {
+    errOutput("blackfilter_scan() called with diagonal steps, impossible! "
+              "(%d, %d)",
+              step.horizontal, step.vertical);
+  }
+
+  const Rectangle image_area = {
+      {POINT_ORIGIN, {image_size.width - 1, image_size.height - 1}}};
+
+  Rectangle area = rectangle_from_size(POINT_ORIGIN, stripe_size);
+  while (point_in_rectangle(area.vertex[0], image_area)) {
+    if (!point_in_rectangle(area.vertex[1], image_area)) {
+      Delta d = distance_between(area.vertex[1], image_area.vertex[1]);
+      area = shift_rectangle(area, d);
+    }
+
+    do {
+      // Use integral-based darkness calculation (no GPU sync!)
+      const uint8_t blackness =
+          darkness_rect_with_integral(integral, image_size, area);
+      if (blackness >= params.abs_threshold) {
+        if (!rectangle_overlap_any(area, params.exclusions_count,
+                                   params.exclusions)) {
+          ensure_kernels_loaded();
+          image_ensure_cuda(&image);
+          ImageCudaState *st = image_cuda_state(image);
+          if (st == NULL || st->dptr == 0) {
+            errOutput("CUDA image state missing for blackfilter floodfill.");
+          }
+
+          const UnpaperCudaFormat fmt =
+              cuda_format_from_av(image.frame->format);
+          if (fmt == UNPAPER_CUDA_FMT_INVALID) {
+            errOutput("CUDA blackfilter: unsupported pixel format.");
+          }
+
+          const Rectangle clipped = clip_rectangle(image, area);
+          if (!rect_empty(clipped)) {
+            const int x0 = clipped.vertex[0].x;
+            const int y0 = clipped.vertex[0].y;
+            const int x1 = clipped.vertex[1].x;
+            const int y1 = clipped.vertex[1].y;
+            const int img_fmt = (int)fmt;
+            const int w = image.frame->width;
+            const int h = image.frame->height;
+            const uint8_t mask_max = image.abs_black_threshold;
+            const unsigned long long intensity =
+                params.intensity < 0 ? 0ull
+                                     : (unsigned long long)params.intensity;
+
+            void *kparams[] = {
+                &st->dptr,  &st->linesize, &img_fmt,   &w,  &h,
+                &x0,        &y0,           &x1,        &y1, &mask_max,
+                &intensity, &stack_dptr,   &stack_cap,
+            };
+            unpaper_cuda_launch_kernel(k_blackfilter_floodfill_rect, 1, 1, 1, 1,
+                                       1, 1, kparams);
+
+            st->cuda_dirty = true;
+            st->cpu_dirty = false;
+          }
+        }
+      }
+
+      area = shift_rectangle(area, step);
+    } while (point_in_rectangle(area.vertex[0], image_area));
+
+    area = shift_rectangle(area, shift);
+  }
+}
+
 static void blackfilter_scan_cuda(Image image, BlackfilterParameters params,
                                   Delta step, RectangleSize stripe_size,
                                   Delta shift, uint64_t stack_dptr,
@@ -657,7 +986,8 @@ static void blackfilter_scan_cuda(Image image, BlackfilterParameters params,
             errOutput("CUDA image state missing for blackfilter floodfill.");
           }
 
-          const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+          const UnpaperCudaFormat fmt =
+              cuda_format_from_av(image.frame->format);
           if (fmt == UNPAPER_CUDA_FMT_INVALID) {
             errOutput("CUDA blackfilter: unsupported pixel format.");
           }
@@ -677,8 +1007,9 @@ static void blackfilter_scan_cuda(Image image, BlackfilterParameters params,
                                      : (unsigned long long)params.intensity;
 
             void *kparams[] = {
-                &st->dptr, &st->linesize, &img_fmt, &w, &h, &x0, &y0, &x1, &y1,
-                &mask_max, &intensity, &stack_dptr, &stack_cap,
+                &st->dptr,  &st->linesize, &img_fmt,   &w,  &h,
+                &x0,        &y0,           &x1,        &y1, &mask_max,
+                &intensity, &stack_dptr,   &stack_cap,
             };
             unpaper_cuda_launch_kernel(k_blackfilter_floodfill_rect, 1, 1, 1, 1,
                                        1, 1, kparams);
@@ -696,7 +1027,8 @@ static void blackfilter_scan_cuda(Image image, BlackfilterParameters params,
   }
 }
 
-static void wipe_rectangle_cuda(Image image, Rectangle input_area, Pixel color) {
+static void wipe_rectangle_cuda(Image image, Rectangle input_area,
+                                Pixel color) {
   Rectangle area = clip_rectangle(image, input_area);
   RectangleSize sz = size_of_rectangle(area);
   if (sz.width <= 0 || sz.height <= 0) {
@@ -734,9 +1066,9 @@ static void wipe_rectangle_cuda(Image image, Rectangle input_area, Pixel color) 
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
     const uint8_t gray = pixel_grayscale(color);
     const bool pixel_black = gray < image.abs_black_threshold;
-    const uint8_t bit_set =
-        (fmt == UNPAPER_CUDA_FMT_MONOWHITE) ? (pixel_black ? 1u : 0u)
-                                            : (pixel_black ? 0u : 1u);
+    const uint8_t bit_set = (fmt == UNPAPER_CUDA_FMT_MONOWHITE)
+                                ? (pixel_black ? 1u : 0u)
+                                : (pixel_black ? 0u : 1u);
 
     void *params[] = {
         &st->dptr, &st->linesize, &x0, &y0, &x1, &y1, &bit_set,
@@ -839,7 +1171,8 @@ static void copy_rectangle_cuda(Image source, Image target,
 
   const UnpaperCudaFormat src_fmt = cuda_format_from_av(source.frame->format);
   const UnpaperCudaFormat dst_fmt = cuda_format_from_av(target.frame->format);
-  if (src_fmt == UNPAPER_CUDA_FMT_INVALID || dst_fmt == UNPAPER_CUDA_FMT_INVALID) {
+  if (src_fmt == UNPAPER_CUDA_FMT_INVALID ||
+      dst_fmt == UNPAPER_CUDA_FMT_INVALID) {
     errOutput("CUDA copy_rectangle: unsupported pixel format.");
   }
 
@@ -861,9 +1194,10 @@ static void copy_rectangle_cuda(Image source, Image target,
       dst_fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
     const uint8_t threshold = target.abs_black_threshold;
     void *params[] = {
-        &src_st->dptr, &src_st->linesize, &src_fmt, &dst_st->dptr,
-        &dst_st->linesize, &dst_fmt, &src_x0, &src_y0, &dst_x0,
-        &dst_y0, &w, &h, &threshold,
+        &src_st->dptr,     &src_st->linesize, &src_fmt, &dst_st->dptr,
+        &dst_st->linesize, &dst_fmt,          &src_x0,  &src_y0,
+        &dst_x0,           &dst_y0,           &w,       &h,
+        &threshold,
     };
 
     const uint32_t block_x = 32;
@@ -876,9 +1210,9 @@ static void copy_rectangle_cuda(Image source, Image target,
                                block_y, 1, params);
   } else {
     void *params[] = {
-        &src_st->dptr, &src_st->linesize, &src_fmt, &dst_st->dptr,
-        &dst_st->linesize, &dst_fmt, &src_x0, &src_y0, &dst_x0,
-        &dst_y0, &w, &h,
+        &src_st->dptr,     &src_st->linesize, &src_fmt, &dst_st->dptr,
+        &dst_st->linesize, &dst_fmt,          &src_x0,  &src_y0,
+        &dst_x0,           &dst_y0,           &w,       &h,
     };
     const uint32_t block_x = 16;
     const uint32_t block_y = 16;
@@ -916,7 +1250,8 @@ static void center_image_cuda(Image source, Image target, Point target_origin,
     source_size.height = target_size.height;
   }
 
-  copy_rectangle_cuda(source, target, rectangle_from_size(source_origin, source_size),
+  copy_rectangle_cuda(source, target,
+                      rectangle_from_size(source_origin, source_size),
                       target_origin);
 }
 
@@ -936,7 +1271,8 @@ static void flip_rotate_90_cuda(Image *pImage, RotationDirection direction) {
 
   RectangleSize src_size = size_of_image(*pImage);
   Image newimage = create_compatible_image(
-      *pImage, (RectangleSize){.width = src_size.height, .height = src_size.width},
+      *pImage,
+      (RectangleSize){.width = src_size.height, .height = src_size.width},
       false);
   image_ensure_cuda(&newimage);
   ImageCudaState *dst_st = image_cuda_state(newimage);
@@ -967,8 +1303,8 @@ static void flip_rotate_90_cuda(Image *pImage, RotationDirection direction) {
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
     const int dir = (int)direction;
     void *params[] = {
-        &src_st->dptr, &src_st->linesize, &dst_st->dptr, &dst_st->linesize,
-        &src_size.width, &src_size.height, &dir,
+        &src_st->dptr,   &src_st->linesize, &dst_st->dptr, &dst_st->linesize,
+        &src_size.width, &src_size.height,  &dir,
     };
     const uint32_t block_x = 32;
     const uint32_t block_y = 8;
@@ -983,8 +1319,8 @@ static void flip_rotate_90_cuda(Image *pImage, RotationDirection direction) {
     // Use custom kernel for RGB24 and Y400A (OpenCV transpose doesn't support)
     const int dir = (int)direction;
     void *params[] = {
-        &src_st->dptr, &src_st->linesize, &dst_st->dptr, &dst_st->linesize,
-        &fmt, &src_size.width, &src_size.height, &dir,
+        &src_st->dptr, &src_st->linesize, &dst_st->dptr,    &dst_st->linesize,
+        &fmt,          &src_size.width,   &src_size.height, &dir,
     };
     const uint32_t block_x = 16;
     const uint32_t block_y = 16;
@@ -1037,8 +1373,8 @@ static void mirror_cuda(Image image, Direction direction) {
     const int do_h = direction.horizontal ? 1 : 0;
     const int do_v = direction.vertical ? 1 : 0;
     void *params[] = {
-        &st->dptr, &st->linesize, &new_dptr, &st->linesize, &st->width,
-        &st->height, &do_h, &do_v,
+        &st->dptr,  &st->linesize, &new_dptr, &st->linesize,
+        &st->width, &st->height,   &do_h,     &do_v,
     };
     const uint32_t block_x = 32;
     const uint32_t block_y = 8;
@@ -1117,9 +1453,10 @@ static void stretch_and_replace_cuda(Image *pImage, RectangleSize size,
 
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
     void *params[] = {
-        &src->dptr, &src->linesize, &fmt, &dst->dptr, &dst->linesize, &fmt,
-        &src->width, &src->height, &dst->width, &dst->height, &interp,
-        &target.abs_black_threshold,
+        &src->dptr,   &src->linesize, &fmt,
+        &dst->dptr,   &dst->linesize, &fmt,
+        &src->width,  &src->height,   &dst->width,
+        &dst->height, &interp,        &target.abs_black_threshold,
     };
     const uint32_t block_x = 32;
     const uint32_t block_y = 8;
@@ -1130,8 +1467,8 @@ static void stretch_and_replace_cuda(Image *pImage, RectangleSize size,
                                block_y, 1, params);
   } else {
     void *params[] = {
-        &src->dptr, &src->linesize, &dst->dptr, &dst->linesize, &fmt,
-        &src->width, &src->height, &dst->width, &dst->height, &interp,
+        &src->dptr,  &src->linesize, &dst->dptr,  &dst->linesize, &fmt,
+        &src->width, &src->height,   &dst->width, &dst->height,   &interp,
     };
     const uint32_t block_x = 16;
     const uint32_t block_y = 16;
@@ -1165,11 +1502,11 @@ static void resize_and_replace_cuda(Image *pImage, RectangleSize size,
 
   RectangleSize stretch_size;
   if (horizontal_ratio < vertical_ratio) {
-    stretch_size =
-        (RectangleSize){size.width, (int32_t)(image_size.height * horizontal_ratio)};
+    stretch_size = (RectangleSize){
+        size.width, (int32_t)(image_size.height * horizontal_ratio)};
   } else if (vertical_ratio < horizontal_ratio) {
-    stretch_size =
-        (RectangleSize){(int32_t)(image_size.width * vertical_ratio), size.height};
+    stretch_size = (RectangleSize){(int32_t)(image_size.width * vertical_ratio),
+                                   size.height};
   } else {
     stretch_size = size;
   }
@@ -1234,13 +1571,13 @@ static void apply_masks_cuda(Image image, const Rectangle masks[],
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
     const uint8_t gray = pixel_grayscale(color);
     const bool pixel_black = gray < image.abs_black_threshold;
-    const uint8_t bit_value =
-        (fmt == UNPAPER_CUDA_FMT_MONOWHITE) ? (pixel_black ? 1u : 0u)
-                                            : (pixel_black ? 0u : 1u);
+    const uint8_t bit_value = (fmt == UNPAPER_CUDA_FMT_MONOWHITE)
+                                  ? (pixel_black ? 1u : 0u)
+                                  : (pixel_black ? 0u : 1u);
 
     void *params[] = {
-        &st->dptr, &st->linesize, &img_fmt, &img_w, &img_h, &rects_dptr,
-        &rect_count, &bit_value,
+        &st->dptr, &st->linesize, &img_fmt,    &img_w,
+        &img_h,    &rects_dptr,   &rect_count, &bit_value,
     };
     const uint32_t block_x = 32;
     const uint32_t block_y = 8;
@@ -1251,8 +1588,8 @@ static void apply_masks_cuda(Image image, const Rectangle masks[],
                                block_y, 1, params);
   } else {
     void *params[] = {
-        &st->dptr, &st->linesize, &img_fmt, &img_w, &img_h, &rects_dptr,
-        &rect_count, &r, &g, &b,
+        &st->dptr,   &st->linesize, &img_fmt, &img_w, &img_h,
+        &rects_dptr, &rect_count,   &r,       &g,     &b,
     };
     const uint32_t block_x = 16;
     const uint32_t block_y = 16;
@@ -1309,22 +1646,123 @@ static size_t detect_masks_cuda(Image image, MaskDetectionParameters params,
   }
 
   static const Rectangle invalid_mask = {{{-1, -1}, {-1, -1}}};
+  const RectangleSize image_size = size_of_image(image);
+
+  // Optimized path: compute integral once, download to CPU, iterate on CPU
+  // This avoids ~600 device syncs per image that were killing parallelism
+  image_ensure_cuda(&image);
+  ImageCudaState *st = image_cuda_state(image);
+
+  UnpaperCpuIntegral cpu_integral = {0};
+  bool use_integral = false;
+
+  if (st != NULL && st->dptr != 0) {
+    // Check format and determine processing path
+    const int format = image.frame->format;
+    bool is_grayscale =
+        (format == AV_PIX_FMT_GRAY8 || format == AV_PIX_FMT_MONOWHITE ||
+         format == AV_PIX_FMT_MONOBLACK);
+    bool is_rgb24 = (format == AV_PIX_FMT_RGB24);
+
+    // Create NPP context for integral computation
+    UnpaperNppContext *npp_ctx =
+        unpaper_npp_context_create(unpaper_cuda_get_current_stream());
+
+    if (npp_ctx != NULL) {
+      UnpaperNppIntegral gpu_integral = {0};
+      uint64_t gray_buffer = 0; // Temporary grayscale buffer for RGB
+
+      if (is_grayscale) {
+        // Direct integral computation for grayscale
+        if (unpaper_npp_integral_8u32s(st->dptr, st->width, st->height,
+                                       (size_t)st->linesize, npp_ctx,
+                                       &gpu_integral)) {
+          if (unpaper_npp_integral_download(
+                  &gpu_integral, &cpu_integral,
+                  unpaper_cuda_get_current_stream())) {
+            use_integral = true;
+          }
+          unpaper_npp_integral_free(gpu_integral.device_ptr);
+        }
+      } else if (is_rgb24) {
+        // Convert RGB24 to grayscale on GPU, then compute integral
+        // Allocate temporary grayscale buffer from scratch pool
+        size_t gray_step = (size_t)st->width;
+        // Align to 512 bytes for NPP
+        gray_step = (gray_step + 511) & ~(size_t)511;
+        size_t gray_bytes = gray_step * (size_t)st->height;
+        gray_buffer = cuda_mempool_scratch_global_acquire(gray_bytes);
+
+        if (gray_buffer != 0) {
+          // Convert RGB to grayscale using NPP
+          // Standard luminance coefficients: R=0.299, G=0.587, B=0.114
+          Npp32f coeffs[3] = {0.299f, 0.587f, 0.114f};
+          NppiSize roi = {st->width, st->height};
+          NppStreamContext *raw_ctx =
+              (NppStreamContext *)unpaper_npp_context_get_raw(npp_ctx);
+
+          NppStatus status = nppiColorToGray_8u_C3C1R_Ctx(
+              (const Npp8u *)st->dptr, st->linesize, // Source RGB
+              (Npp8u *)gray_buffer, (int)gray_step,  // Dest grayscale
+              roi, coeffs, *raw_ctx);
+
+          if (status == NPP_SUCCESS) {
+            // Now compute integral of the grayscale image
+            if (unpaper_npp_integral_8u32s(gray_buffer, st->width, st->height,
+                                           gray_step, npp_ctx, &gpu_integral)) {
+              if (unpaper_npp_integral_download(
+                      &gpu_integral, &cpu_integral,
+                      unpaper_cuda_get_current_stream())) {
+                use_integral = true;
+              }
+              unpaper_npp_integral_free(gpu_integral.device_ptr);
+            }
+          }
+          cuda_mempool_scratch_global_release(gray_buffer);
+        }
+      }
+      unpaper_npp_context_destroy(npp_ctx);
+    }
+  }
 
   size_t masks_count = 0;
-  for (size_t i = 0; i < points_count; i++) {
-    const bool valid = detect_mask_cuda(image, params, points[i], &masks[i]);
 
-    if (memcmp(&masks[i], &invalid_mask, sizeof(invalid_mask)) != 0) {
-      masks_count++;
+  if (use_integral) {
+    // Fast path: use pre-computed CPU integral (no GPU syncs in loop!)
+    for (size_t i = 0; i < points_count; i++) {
+      const bool valid = detect_mask_cuda_with_integral(
+          &cpu_integral, image_size, params, points[i], &masks[i]);
 
-      verboseLog(VERBOSE_NORMAL,
-                 "auto-masking (%d,%d): %d,%d,%d,%d%s\n", points[i].x,
-                 points[i].y, masks[i].vertex[0].x, masks[i].vertex[0].y,
-                 masks[i].vertex[1].x, masks[i].vertex[1].y,
-                 valid ? "" : " (invalid detection, using full page size)");
-    } else {
-      verboseLog(VERBOSE_NORMAL, "auto-masking (%d,%d): NO MASK FOUND\n",
-                 points[i].x, points[i].y);
+      if (memcmp(&masks[i], &invalid_mask, sizeof(invalid_mask)) != 0) {
+        masks_count++;
+        verboseLog(VERBOSE_NORMAL, "auto-masking (%d,%d): %d,%d,%d,%d%s\n",
+                   points[i].x, points[i].y, masks[i].vertex[0].x,
+                   masks[i].vertex[0].y, masks[i].vertex[1].x,
+                   masks[i].vertex[1].y,
+                   valid ? "" : " (invalid detection, using full page size)");
+      } else {
+        verboseLog(VERBOSE_NORMAL, "auto-masking (%d,%d): NO MASK FOUND\n",
+                   points[i].x, points[i].y);
+      }
+    }
+    unpaper_cpu_integral_free(&cpu_integral);
+  } else {
+    // Fallback path: original per-call method (slower but works for all
+    // formats)
+    for (size_t i = 0; i < points_count; i++) {
+      const bool valid = detect_mask_cuda(image, params, points[i], &masks[i]);
+
+      if (memcmp(&masks[i], &invalid_mask, sizeof(invalid_mask)) != 0) {
+        masks_count++;
+        verboseLog(VERBOSE_NORMAL, "auto-masking (%d,%d): %d,%d,%d,%d%s\n",
+                   points[i].x, points[i].y, masks[i].vertex[0].x,
+                   masks[i].vertex[0].y, masks[i].vertex[1].x,
+                   masks[i].vertex[1].y,
+                   valid ? "" : " (invalid detection, using full page size)");
+      } else {
+        verboseLog(VERBOSE_NORMAL, "auto-masking (%d,%d): NO MASK FOUND\n",
+                   points[i].x, points[i].y);
+      }
     }
   }
 
@@ -1381,6 +1819,83 @@ static Border detect_border_cuda(Image image, BorderScanParameters params,
       .bottom = image_size.height - outside_mask.vertex[1].y,
   };
 
+  // Try optimized integral-based approach (single GPU sync for all 4 edges)
+  ensure_kernels_loaded();
+  image_ensure_cuda(&image);
+  ImageCudaState *st = image_cuda_state(image);
+  if (st != NULL && st->dptr != 0) {
+    const int format = image.frame->format;
+    bool is_grayscale =
+        (format == AV_PIX_FMT_GRAY8 || format == AV_PIX_FMT_MONOWHITE ||
+         format == AV_PIX_FMT_MONOBLACK);
+    bool is_rgb24 = (format == AV_PIX_FMT_RGB24);
+
+    if (is_grayscale || is_rgb24) {
+      UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+      UnpaperNppContext *npp_ctx = unpaper_npp_context_create(stream);
+
+      if (npp_ctx != NULL) {
+        UnpaperCpuIntegral dark_integral = {0};
+        bool have_integral = false;
+
+        // Create dark pixel mask and compute its integral
+        UnpaperOpencvMask dark_mask = {0};
+        if (unpaper_opencv_extract_dark_mask(
+                st->dptr, st->width, st->height, (size_t)st->linesize,
+                (int)cuda_format_from_av(format), image.abs_black_threshold,
+                stream, &dark_mask)) {
+          // Compute integral of dark mask (values 0 or 255)
+          UnpaperNppIntegral gpu_integral = {0};
+          if (unpaper_npp_integral_8u32s(
+                  dark_mask.device_ptr, dark_mask.width, dark_mask.height,
+                  dark_mask.pitch_bytes, npp_ctx, &gpu_integral)) {
+            // Download integral to CPU for fast edge detection
+            if (unpaper_npp_integral_download(&gpu_integral, &dark_integral,
+                                              stream)) {
+              have_integral = true;
+            }
+            unpaper_npp_integral_free(gpu_integral.device_ptr);
+          }
+          unpaper_opencv_mask_free(&dark_mask);
+        }
+        unpaper_npp_context_destroy(npp_ctx);
+
+        if (have_integral) {
+          // Use integral-based edge detection (no GPU syncs in loop!)
+          if (params.scan_direction.horizontal) {
+            border.left += detect_border_edge_with_dark_integral(
+                &dark_integral, outside_mask,
+                (Delta){params.scan_step.horizontal, 0}, params.scan_size.width,
+                params.scan_threshold.horizontal);
+            border.right += detect_border_edge_with_dark_integral(
+                &dark_integral, outside_mask,
+                (Delta){-params.scan_step.horizontal, 0},
+                params.scan_size.width, params.scan_threshold.horizontal);
+          }
+          if (params.scan_direction.vertical) {
+            border.top += detect_border_edge_with_dark_integral(
+                &dark_integral, outside_mask,
+                (Delta){0, params.scan_step.vertical}, params.scan_size.height,
+                params.scan_threshold.vertical);
+            border.bottom += detect_border_edge_with_dark_integral(
+                &dark_integral, outside_mask,
+                (Delta){0, -params.scan_step.vertical}, params.scan_size.height,
+                params.scan_threshold.vertical);
+          }
+          unpaper_cpu_integral_free(&dark_integral);
+
+          verboseLog(VERBOSE_NORMAL,
+                     "border detected: (%d,%d,%d,%d) in [%d,%d,%d,%d]\n",
+                     border.left, border.top, border.right, border.bottom,
+                     outside_mask.vertex[0].x, outside_mask.vertex[0].y,
+                     outside_mask.vertex[1].x, outside_mask.vertex[1].y);
+          return border;
+        }
+      }
+    }
+  }
+
+  // Fallback to per-call GPU method (slower but works for all formats)
   if (params.scan_direction.horizontal) {
     border.left += detect_border_edge_cuda(
         image, outside_mask, (Delta){params.scan_step.horizontal, 0},
@@ -1407,6 +1922,9 @@ static Border detect_border_cuda(Image image, BorderScanParameters params,
   return border;
 }
 
+// GPU-parallel blackfilter: scan + wipe in two parallel GPU kernels
+// This replaces the sequential flood-fill approach with fully parallel
+// processing.
 static void blackfilter_cuda(Image image, BlackfilterParameters params) {
   if (image.frame == NULL) {
     return;
@@ -1425,30 +1943,199 @@ static void blackfilter_cuda(Image image, BlackfilterParameters params) {
     return;
   }
 
-  const size_t cap = (size_t)w * (size_t)h;
-  if (cap > (size_t)INT32_MAX) {
-    errOutput("blackfilter CUDA stack too large.");
-  }
-  const int stack_cap = (int)cap;
-  const size_t stack_bytes = cap * (sizeof(int32_t) * 2);
-  uint64_t stack_dptr = unpaper_cuda_malloc(stack_bytes);
+  // Compute integral image on GPU
+  const int format = image.frame->format;
+  bool is_grayscale =
+      (format == AV_PIX_FMT_GRAY8 || format == AV_PIX_FMT_MONOWHITE ||
+       format == AV_PIX_FMT_MONOBLACK);
+  bool is_rgb24 = (format == AV_PIX_FMT_RGB24);
 
+  UnpaperNppContext *npp_ctx =
+      unpaper_npp_context_create(unpaper_cuda_get_current_stream());
+  if (npp_ctx == NULL) {
+    return; // Can't do GPU blackfilter without NPP
+  }
+
+  UnpaperNppIntegral gpu_integral = {0};
+  uint64_t gray_buffer = 0;
+  bool have_integral = false;
+
+  if (is_grayscale) {
+    have_integral = unpaper_npp_integral_8u32s(st->dptr, st->width, st->height,
+                                               (size_t)st->linesize, npp_ctx,
+                                               &gpu_integral);
+  } else if (is_rgb24) {
+    // Convert RGB to grayscale first
+    size_t gray_step = ((size_t)st->width + 511) & ~(size_t)511;
+    size_t gray_bytes = gray_step * (size_t)st->height;
+    gray_buffer = cuda_mempool_scratch_global_acquire(gray_bytes);
+
+    if (gray_buffer != 0) {
+      Npp32f coeffs[3] = {0.299f, 0.587f, 0.114f};
+      NppiSize roi = {st->width, st->height};
+      NppStreamContext *raw_ctx =
+          (NppStreamContext *)unpaper_npp_context_get_raw(npp_ctx);
+
+      NppStatus status = nppiColorToGray_8u_C3C1R_Ctx(
+          (const Npp8u *)st->dptr, st->linesize, (Npp8u *)gray_buffer,
+          (int)gray_step, roi, coeffs, *raw_ctx);
+
+      if (status == NPP_SUCCESS) {
+        have_integral =
+            unpaper_npp_integral_8u32s(gray_buffer, st->width, st->height,
+                                       gray_step, npp_ctx, &gpu_integral);
+      }
+    }
+  }
+
+  if (!have_integral) {
+    if (gray_buffer != 0) {
+      cuda_mempool_scratch_global_release(gray_buffer);
+    }
+    unpaper_npp_context_destroy(npp_ctx);
+    return;
+  }
+
+  // Allocate buffers for scan results (rectangles to wipe)
+  // Max rectangles: ~1000 should be plenty for any document
+  const int max_rects = 1000;
+  const size_t rects_bytes = (size_t)max_rects * 4 * sizeof(int32_t);
+  const size_t count_bytes = sizeof(int32_t);
+  uint64_t rects_dptr = cuda_mempool_scratch_global_acquire(rects_bytes);
+  uint64_t count_dptr = cuda_mempool_scratch_global_acquire(count_bytes);
+
+  if (rects_dptr == 0 || count_dptr == 0) {
+    if (rects_dptr != 0)
+      cuda_mempool_scratch_global_release(rects_dptr);
+    if (count_dptr != 0)
+      cuda_mempool_scratch_global_release(count_dptr);
+    if (gray_buffer != 0)
+      cuda_mempool_scratch_global_release(gray_buffer);
+    unpaper_npp_integral_free(gpu_integral.device_ptr);
+    unpaper_npp_context_destroy(npp_ctx);
+    return;
+  }
+
+  // Zero the count
+  cudaStream_t cuda_stream = NULL;
+  UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+  if (stream != NULL) {
+    cuda_stream = (cudaStream_t)unpaper_cuda_stream_get_raw_handle(stream);
+  }
+  cudaMemsetAsync((void *)(uintptr_t)count_dptr, 0, count_bytes, cuda_stream);
+
+  const UnpaperCudaFormat fmt = cuda_format_from_av(format);
+  const int intensity = params.intensity > 0 ? (int)params.intensity : 0;
+
+  // Horizontal scan (if enabled)
   if (params.scan_direction.horizontal) {
-    blackfilter_scan_cuda(
-        image, params, (Delta){params.scan_step.horizontal, 0},
-        (RectangleSize){params.scan_size.width, (int32_t)params.scan_depth.vertical},
-        (Delta){0, (int32_t)params.scan_depth.vertical}, stack_dptr, stack_cap);
+    const int scan_w = params.scan_size.width;
+    const int scan_h = (int)params.scan_depth.vertical;
+    const int step_x = params.scan_step.horizontal;
+    const int num_stripes = (h - scan_h) / scan_h + 1;
+
+    for (int stripe = 0; stripe < num_stripes; stripe++) {
+      const int stripe_offset = stripe * scan_h;
+      if (stripe_offset + scan_h > h)
+        break;
+
+      const int num_positions = (w - scan_w) / step_x + 1;
+      const int block_size = 256;
+      const int grid_size = (num_positions + block_size - 1) / block_size;
+
+      void *scan_params[] = {&gpu_integral.device_ptr,
+                             &gpu_integral.step_bytes,
+                             &w,
+                             &h,
+                             &scan_w,
+                             &scan_h,
+                             &step_x,
+                             (int[]){0},
+                             &stripe_offset,
+                             &scan_h,
+                             &params.abs_threshold,
+                             &intensity,
+                             &rects_dptr,
+                             &count_dptr,
+                             &max_rects};
+      unpaper_cuda_launch_kernel(k_blackfilter_scan_parallel, grid_size, 1, 1,
+                                 block_size, 1, 1, scan_params);
+    }
   }
 
+  // Vertical scan (if enabled)
   if (params.scan_direction.vertical) {
-    blackfilter_scan_cuda(
-        image, params, (Delta){0, params.scan_step.vertical},
-        (RectangleSize){(int32_t)params.scan_depth.horizontal, params.scan_size.height},
-        (Delta){(int32_t)params.scan_depth.horizontal, 0}, stack_dptr,
-        stack_cap);
+    const int scan_w = (int)params.scan_depth.horizontal;
+    const int scan_h = params.scan_size.height;
+    const int step_y = params.scan_step.vertical;
+    const int num_stripes = (w - scan_w) / scan_w + 1;
+
+    for (int stripe = 0; stripe < num_stripes; stripe++) {
+      const int stripe_offset = stripe * scan_w;
+      if (stripe_offset + scan_w > w)
+        break;
+
+      const int num_positions = (h - scan_h) / step_y + 1;
+      const int block_size = 256;
+      const int grid_size = (num_positions + block_size - 1) / block_size;
+
+      void *scan_params[] = {&gpu_integral.device_ptr,
+                             &gpu_integral.step_bytes,
+                             &w,
+                             &h,
+                             &scan_w,
+                             &scan_h,
+                             (int[]){0},
+                             &step_y,
+                             &stripe_offset,
+                             &scan_w,
+                             &params.abs_threshold,
+                             &intensity,
+                             &rects_dptr,
+                             &count_dptr,
+                             &max_rects};
+      unpaper_cuda_launch_kernel(k_blackfilter_scan_parallel, grid_size, 1, 1,
+                                 block_size, 1, 1, scan_params);
+    }
   }
 
-  unpaper_cuda_free(stack_dptr);
+  // Download rect count to know how many rectangles to wipe
+  int rect_count = 0;
+  if (cuda_stream != NULL) {
+    cudaMemcpyAsync(&rect_count, (void *)(uintptr_t)count_dptr, sizeof(int),
+                    cudaMemcpyDeviceToHost, cuda_stream);
+    cudaStreamSynchronize(cuda_stream);
+  } else {
+    cudaMemcpy(&rect_count, (void *)(uintptr_t)count_dptr, sizeof(int),
+               cudaMemcpyDeviceToHost);
+  }
+
+  // Wipe dark pixels in all found rectangles
+  if (rect_count > 0) {
+    if (rect_count > max_rects)
+      rect_count = max_rects;
+
+    const uint32_t grid_x = ((uint32_t)w + 15) / 16;
+    const uint32_t grid_y = ((uint32_t)h + 15) / 16;
+    const int img_fmt = (int)fmt;
+
+    void *wipe_params[] = {
+        &st->dptr, &st->linesize, &img_fmt,    &w,
+        &h,        &rects_dptr,   &rect_count, &image.abs_black_threshold};
+    unpaper_cuda_launch_kernel(k_blackfilter_wipe_regions, grid_x, grid_y, 1,
+                               16, 16, 1, wipe_params);
+
+    st->cuda_dirty = true;
+    st->cpu_dirty = false;
+  }
+
+  // Cleanup
+  cuda_mempool_scratch_global_release(rects_dptr);
+  cuda_mempool_scratch_global_release(count_dptr);
+  if (gray_buffer != 0)
+    cuda_mempool_scratch_global_release(gray_buffer);
+  unpaper_npp_integral_free(gpu_integral.device_ptr);
+  unpaper_npp_context_destroy(npp_ctx);
 }
 
 static void blurfilter_cuda_fallback(Image image, BlurfilterParameters params,
@@ -1566,12 +2253,14 @@ static void blurfilter_cuda(Image image, BlurfilterParameters params,
   if (fmt == UNPAPER_CUDA_FMT_GRAY8 || fmt == UNPAPER_CUDA_FMT_Y400A ||
       fmt == UNPAPER_CUDA_FMT_RGB24) {
     UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+    // sync_after=true for single-image processing to ensure completion
+    // For batch processing, callers can use sync_after=false to defer sync
     if (unpaper_opencv_blurfilter(
             st->dptr, image.frame->width, image.frame->height,
             (size_t)st->linesize, (int)fmt, params.scan_size.width,
             params.scan_size.height, params.scan_step.horizontal,
             params.scan_step.vertical, abs_white_threshold, params.intensity,
-            stream)) {
+            stream, true)) {
       st->cuda_dirty = true;
       st->cpu_dirty = false;
       verboseLog(VERBOSE_NORMAL, " (OpenCV) done.\n");
@@ -1607,8 +2296,7 @@ static void noisefilter_cuda_custom(Image image, uint64_t intensity,
 
   const size_t labels_bytes = num_pixels * sizeof(uint32_t);
   const size_t counts_bytes = (num_pixels + 1) * sizeof(uint32_t);
-  const size_t total_bytes =
-      labels_bytes * 2 + counts_bytes + sizeof(uint32_t);
+  const size_t total_bytes = labels_bytes * 2 + counts_bytes + sizeof(uint32_t);
   size_t scratch_capacity = 0;
   const uint64_t scratch =
       unpaper_cuda_scratch_reserve(total_bytes, &scratch_capacity);
@@ -1621,11 +2309,11 @@ static void noisefilter_cuda_custom(Image image, uint64_t intensity,
   const uint64_t counts = labels_b + labels_bytes;
   const uint64_t changed = counts + counts_bytes;
 
-  void *params_build[] = {&st->dptr, &st->linesize, &img_fmt, &w, &h,
-                          &min_white_level, &labels_a};
-  unpaper_cuda_launch_kernel_on_stream(
-      stream, k_noisefilter_build_labels, grid2d_x, grid2d_y, 1, block2d_x,
-      block2d_y, 1, params_build);
+  void *params_build[] = {&st->dptr, &st->linesize,    &img_fmt, &w,
+                          &h,        &min_white_level, &labels_a};
+  unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_build_labels,
+                                       grid2d_x, grid2d_y, 1, block2d_x,
+                                       block2d_y, 1, params_build);
 
   size_t pinned_capacity = 0;
   int *changed_host = (int *)unpaper_cuda_stream_pinned_reserve(
@@ -1642,16 +2330,15 @@ static void noisefilter_cuda_custom(Image image, uint64_t intensity,
   for (int iter = 0; iter < max_iters; iter++) {
     unpaper_cuda_memset_d8(changed, 0, sizeof(int));
     void *params_prop[] = {&labels_in, &labels_out, &w, &h, &changed};
-    unpaper_cuda_launch_kernel_on_stream(
-        stream, k_noisefilter_propagate, grid2d_x, grid2d_y, 1, block2d_x,
-        block2d_y, 1, params_prop);
+    unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_propagate,
+                                         grid2d_x, grid2d_y, 1, block2d_x,
+                                         block2d_y, 1, params_prop);
 
     *changed_host = 0;
     if (changed_host == &changed_fallback) {
       unpaper_cuda_memcpy_d2h(changed_host, changed, sizeof(int));
     } else {
-      unpaper_cuda_memcpy_d2h_async(stream, changed_host, changed,
-                                    sizeof(int));
+      unpaper_cuda_memcpy_d2h_async(stream, changed_host, changed, sizeof(int));
       unpaper_cuda_stream_synchronize_on(stream);
     }
 
@@ -1669,15 +2356,14 @@ static void noisefilter_cuda_custom(Image image, uint64_t intensity,
 
   unpaper_cuda_memset_d8(counts, 0, counts_bytes);
   const uint32_t block1d = 256u;
-  const uint32_t grid1d =
-      (uint32_t)(((num_pixels + block1d - 1) / block1d));
+  const uint32_t grid1d = (uint32_t)(((num_pixels + block1d - 1) / block1d));
   const int num_pixels_i = (int)num_pixels;
   void *params_count[] = {&final_labels, &num_pixels_i, &counts};
   unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_count, grid1d, 1,
                                        1, block1d, 1, 1, params_count);
 
-  void *params_apply[] = {&st->dptr, &st->linesize, &img_fmt, &w, &h,
-                          &final_labels, &counts, &intensity};
+  void *params_apply[] = {&st->dptr, &st->linesize, &img_fmt, &w,
+                          &h,        &final_labels, &counts,  &intensity};
   unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_apply, grid2d_x,
                                        grid2d_y, 1, block2d_x, block2d_y, 1,
                                        params_apply);
@@ -1723,8 +2409,8 @@ static bool noisefilter_cuda_opencv(Image image, uint64_t intensity,
   // Run CCL and remove small components
   UnpaperOpencvCclStats stats = {0};
   bool ok = unpaper_opencv_cuda_ccl(mask.device_ptr, mask.width, mask.height,
-                                    mask.pitch_bytes, 255,
-                                    (uint32_t)intensity, stream, &stats);
+                                    mask.pitch_bytes, 255, (uint32_t)intensity,
+                                    stream, &stats);
 
   if (!ok) {
     unpaper_opencv_mask_free(&mask);
@@ -1737,8 +2423,8 @@ static bool noisefilter_cuda_opencv(Image image, uint64_t intensity,
   const int img_fmt = (int)fmt;
   const int mask_linesize = (int)mask.pitch_bytes;
   void *params[] = {
-      &st->dptr,   &st->linesize, &img_fmt,    &w,
-      &h,          &mask.device_ptr, &mask_linesize, &min_white_level,
+      &st->dptr, &st->linesize,    &img_fmt,       &w,
+      &h,        &mask.device_ptr, &mask_linesize, &min_white_level,
   };
 
   const uint32_t block_x = 16;
@@ -1848,12 +2534,14 @@ static void grayfilter_cuda(Image image, GrayfilterParameters params) {
   if (fmt == UNPAPER_CUDA_FMT_GRAY8 || fmt == UNPAPER_CUDA_FMT_Y400A ||
       fmt == UNPAPER_CUDA_FMT_RGB24) {
     UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+    // sync_after=true for single-image processing to ensure completion
+    // For batch processing, callers can use sync_after=false to defer sync
     if (unpaper_opencv_grayfilter(
             st->dptr, image.frame->width, image.frame->height,
             (size_t)st->linesize, (int)fmt, params.scan_size.width,
             params.scan_size.height, params.scan_step.horizontal,
             params.scan_step.vertical, image.abs_black_threshold,
-            params.abs_threshold, stream)) {
+            params.abs_threshold, stream, true)) {
       st->cuda_dirty = true;
       st->cpu_dirty = false;
       verboseLog(VERBOSE_NORMAL, " (OpenCV) done.\n");
@@ -1878,8 +2566,8 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
     if (deskew_scan_size == -1) {
       deskew_scan_size = mask_size.height;
     }
-    deskew_scan_size = min3(deskew_scan_size, CUDA_MAX_ROTATION_SCAN_SIZE,
-                            mask_size.height);
+    deskew_scan_size =
+        min3(deskew_scan_size, CUDA_MAX_ROTATION_SCAN_SIZE, mask_size.height);
   } else {
     if (deskew_scan_size == -1) {
       deskew_scan_size = mask_size.width;
@@ -1898,8 +2586,7 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
     return 0.0f;
   }
 
-  const size_t coord_count =
-      (size_t)rotations_count * (size_t)deskew_scan_size;
+  const size_t coord_count = (size_t)rotations_count * (size_t)deskew_scan_size;
   int *base_x_h = av_malloc_array(coord_count, sizeof(int));
   int *base_y_h = av_malloc_array(coord_count, sizeof(int));
   if (base_x_h == NULL || base_y_h == NULL) {
@@ -1922,18 +2609,18 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
 
     if (shift.vertical == 0) { // horizontal detection
       const int mid = mask_size.height / 2;
-      const int side_offset =
-          shift.horizontal > 0 ? nmask.vertex[0].x - outer_offset
-                               : nmask.vertex[1].x + outer_offset;
+      const int side_offset = shift.horizontal > 0
+                                  ? nmask.vertex[0].x - outer_offset
+                                  : nmask.vertex[1].x + outer_offset;
       X = (float)side_offset + (float)half * m;
       Y = (float)nmask.vertex[0].y + (float)mid - (float)half;
       stepX = -m;
       stepY = 1.0f;
     } else { // vertical detection
       const int mid = mask_size.width / 2;
-      const int side_offset =
-          shift.vertical > 0 ? nmask.vertex[0].x - outer_offset
-                             : nmask.vertex[1].x + outer_offset;
+      const int side_offset = shift.vertical > 0
+                                  ? nmask.vertex[0].x - outer_offset
+                                  : nmask.vertex[1].x + outer_offset;
       X = (float)nmask.vertex[0].x + (float)mid - (float)half;
       Y = (float)side_offset - ((float)half * m);
       stepX = 1.0f;
@@ -1997,8 +2684,7 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
   const size_t coord_bytes = coord_count * sizeof(int);
   uint64_t base_x_d = unpaper_cuda_malloc(coord_bytes);
   uint64_t base_y_d = unpaper_cuda_malloc(coord_bytes);
-  uint64_t peaks_d =
-      unpaper_cuda_malloc((size_t)rotations_count * sizeof(int));
+  uint64_t peaks_d = unpaper_cuda_malloc((size_t)rotations_count * sizeof(int));
 
   unpaper_cuda_memcpy_h2d(base_x_d, base_x_h, coord_bytes);
   unpaper_cuda_memcpy_h2d(base_y_d, base_y_h, coord_bytes);
@@ -2007,11 +2693,10 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
   const int scan_size = deskew_scan_size;
 
   void *params_k[] = {
-      &st->dptr,  &st->linesize, &src_fmt,    &src_w,   &src_h,
-      &base_x_d,  &base_y_d,     &scan_size,  &max_depth,
-      &shift_x,   &shift_y,      &mask_x0,    &mask_y0,
-      &mask_x1,   &mask_y1,      &max_blackness_abs,
-      &peaks_d,
+      &st->dptr,          &st->linesize, &src_fmt,   &src_w,     &src_h,
+      &base_x_d,          &base_y_d,     &scan_size, &max_depth, &shift_x,
+      &shift_y,           &mask_x0,      &mask_y0,   &mask_x1,   &mask_y1,
+      &max_blackness_abs, &peaks_d,
   };
 
   unpaper_cuda_launch_kernel(k_detect_edge_rotation_peaks,
@@ -2135,8 +2820,9 @@ static float detect_rotation_cuda(Image image, Rectangle mask,
   verboseLog(VERBOSE_NORMAL,
              "rotation average: %f  deviation: %f  rotation-scan-deviation "
              "(maximum): %f  [%d,%d,%d,%d]\n",
-             average, deviation, params.deskewScanDeviationRad, nmask.vertex[0].x,
-             nmask.vertex[0].y, nmask.vertex[1].x, nmask.vertex[1].y);
+             average, deviation, params.deskewScanDeviationRad,
+             nmask.vertex[0].x, nmask.vertex[0].y, nmask.vertex[1].x,
+             nmask.vertex[1].y);
 
   if (deviation <= params.deskewScanDeviationRad) {
     return average;
@@ -2214,18 +2900,22 @@ static void deskew_cuda(Image source, Rectangle mask, float radians,
   if (bytespp != 0) {
     const int img_fmt = (int)fmt;
     void *params_k[] = {
-        &src_st->dptr,     &src_st->linesize, &dst_st->dptr,
-        &dst_st->linesize, &img_fmt,          &src_w,
-        &src_h,            &dst_w,            &dst_h,
-        &src_center_x,     &src_center_y,     &dst_center_x,
-        &dst_center_y,     &cosval,           &sinval,
-        &interp,
+        &src_st->dptr, &src_st->linesize,
+        &dst_st->dptr, &dst_st->linesize,
+        &img_fmt,      &src_w,
+        &src_h,        &dst_w,
+        &dst_h,        &src_center_x,
+        &src_center_y, &dst_center_x,
+        &dst_center_y, &cosval,
+        &sinval,       &interp,
     };
 
     const uint32_t block_x = 16;
     const uint32_t block_y = 16;
-    const uint32_t grid_x = (uint32_t)((dst_w + (int)block_x - 1) / (int)block_x);
-    const uint32_t grid_y = (uint32_t)((dst_h + (int)block_y - 1) / (int)block_y);
+    const uint32_t grid_x =
+        (uint32_t)((dst_w + (int)block_x - 1) / (int)block_x);
+    const uint32_t grid_y =
+        (uint32_t)((dst_h + (int)block_y - 1) / (int)block_y);
     unpaper_cuda_launch_kernel(k_rotate_bytes, grid_x, grid_y, 1, block_x,
                                block_y, 1, params_k);
   } else {
@@ -2234,12 +2924,24 @@ static void deskew_cuda(Image source, Rectangle mask, float radians,
     const uint8_t abs_black_threshold = source.abs_black_threshold;
 
     void *params_k[] = {
-        &src_st->dptr,         &src_st->linesize, &src_fmt,
-        &dst_st->dptr,         &dst_st->linesize, &dst_fmt,
-        &src_w,                &src_h,            &dst_w,
-        &dst_h,                &src_center_x,     &src_center_y,
-        &dst_center_x,         &dst_center_y,     &cosval,
-        &sinval,               &interp,           &abs_black_threshold,
+        &src_st->dptr,
+        &src_st->linesize,
+        &src_fmt,
+        &dst_st->dptr,
+        &dst_st->linesize,
+        &dst_fmt,
+        &src_w,
+        &src_h,
+        &dst_w,
+        &dst_h,
+        &src_center_x,
+        &src_center_y,
+        &dst_center_x,
+        &dst_center_y,
+        &cosval,
+        &sinval,
+        &interp,
+        &abs_black_threshold,
     };
 
     const int bytes_per_row = (dst_w + 7) / 8;
@@ -2247,7 +2949,8 @@ static void deskew_cuda(Image source, Rectangle mask, float radians,
     const uint32_t block_y = 8;
     const uint32_t grid_x =
         (uint32_t)((bytes_per_row + (int)block_x - 1) / (int)block_x);
-    const uint32_t grid_y = (uint32_t)((dst_h + (int)block_y - 1) / (int)block_y);
+    const uint32_t grid_y =
+        (uint32_t)((dst_h + (int)block_y - 1) / (int)block_y);
     unpaper_cuda_launch_kernel(k_rotate_mono, grid_x, grid_y, 1, block_x,
                                block_y, 1, params_k);
   }

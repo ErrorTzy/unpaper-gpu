@@ -197,561 +197,201 @@ Files use SPDX headers. Add SPDX headers to new files and validate with `reuse l
 
 ---
 
-### GPU Decode/Encode Pipeline with nvJPEG (PR35-PR38)
+### GPU Batch Scaling Pipeline (PR36-PR42)
 
-**Problem**: Despite optimizations in PR34 (see /doc/CUDA_BACKEND_HISTORY.md), batch scaling is limited to 1.80x with 8 streams because CPU decode (FFmpeg) is slower than GPU processing:
+**Problem**: Despite nvJPEG GPU decode being fast (~15ms/image), batch scaling is limited to ~2x with 8 streams. Analysis reveals the root cause might be **excessive CUDA stream synchronization** during GPU processing, not decode/encode bottlenecks.
 
-| Stage | Time/image | Bottleneck? |
-|-------|------------|-------------|
-| FFmpeg decode (CPU) | 98ms | **YES - workers starve** |
-| GPU processing | 57ms (8 streams) | No |
-| H2D transfer | ~5-10ms | Adds latency |
+#### Root Cause Analysis
 
-#### Format Selection Analysis
+Profiling with 8 streams shows:
+- GPU utilization: only ~50% (should be >90% for good scaling)
+- Per-image timing variability: 1 worker = consistent 78ms; 8 workers = 54-306ms (4x variance!)
+- Optimal scaling at 3 workers (2.08x), **degradation** with more workers
 
-**Why JPEG (nvJPEG) is the optimal choice:**
+**The bottleneck**: 25 `cudaStreamSynchronize()` / `waitForCompletion()` calls in GPU processing code:
+- `opencv_bridge.cpp`: 14 sync points (filters, masks, CCL)
+- `opencv_ops.cpp`: 3 sync points (resize, deskew)
+- `backend_cuda.c`: 3 sync points (blackfilter)
+- `npp_integral.c`: 2 sync points
+- Other: 3 sync points
 
-1. **PDF Workflow Optimization**: PDFs internally store images as compressed streams. Most scanned PDFs use DCTDecode (JPEG). Direct extraction via `pdfimages -j` yields the original JPEG bytes without transcoding.
+Each sync blocks the CPU thread. With 8 workers hitting syncs, they serialize behind each other even though their GPU streams are independent.
 
-2. **GPU Acceleration**: nvJPEG uses CUDA for parallel JPEG decoding, significantly faster than CPU-based FFmpeg decode.
+#### Sync Point Categories
 
-3. **Performance Comparison**:
-   | Format | Library | Decode Time | GPU Accel? | In PDFs? |
-   |--------|---------|-------------|------------|----------|
-   | **JPEG** | nvJPEG | **15-25ms** | Yes (CUDA) | Yes (common) |
-   | JPEG 2000 | nvJPEG2000 | 20-30ms | Yes (CUDA) | Yes (archival) |
-   | TIFF | nvTIFF | 15-25ms | Yes (CUDA) | No |
-   | PNG | None | 50-80ms | **No** | No |
-   | PNM | None | ~5ms | **No** (trivial) | No |
+| Category | Count | Can Remove? | Example |
+|----------|-------|-------------|---------|
+| CPU needs intermediate GPU result | ~10 | No (need algorithm rewrite) | CCL component counting, filter tile selection |
+| Buffer lifetime management | ~5 | Yes (use events) | Temp buffer freed after scope |
+| Conservative/unnecessary | ~6 | Yes (same stream ordering) | Sync before NPP on same stream |
+| Thread handoff | ~1 | No | Decode→worker handoff |
+| Data transfer completion | ~3 | No | Upload/download must complete |
 
-4. **Library Maturity**:
-   - nvJPEG: Stable, part of CUDA Toolkit, extensive documentation
-   - nvImageCodec: Beta (v0.7), unified API but PNG/PNM still CPU-only
-   - Recommendation: Use nvJPEG directly for production stability
+#### Performance Requirements
 
-**Expected Performance with nvJPEG**:
-- Decode: **15-25ms/image** (vs FFmpeg 98ms = **4-6x faster**)
-- Eliminates CPU decode bottleneck
-- Good stream scaling possible (≥3.5x with 8 streams)
+**Single-Image Baseline (No Regression Gate)**
 
-#### Architecture: Per-Stream State Management
+All PRs must maintain single-image CUDA performance. Current baselines (A1-size 2480x3507):
 
-nvJPEG requires separate state objects per CUDA stream for concurrent decode:
+| Format | CUDA Time | Threshold |
+|--------|-----------|-----------|
+| PNG | ~545ms | ≤650ms |
+| JPEG (grayscale) | ~620ms | ≤700ms |
+| PBM (1-bit) | ~575ms | ≤650ms |
 
-```c
-// Thread-safety model (CRITICAL for stream scaling):
-// - nvjpegHandle_t: Thread-safe, ONE per process (shared)
-// - nvjpegJpegState_t: NOT thread-safe, ONE per stream
-// - nvjpegBufferDevice_t: NOT thread-safe, ONE per stream
-// - nvjpegBufferPinned_t: NOT thread-safe, TWO per stream (double-buffer)
+**Batch Scaling Targets**
 
-typedef struct {
-    nvjpegJpegState_t state;           // Decoder state (per-stream)
-    nvjpegBufferDevice_t dev_buffer;   // GPU output buffer (per-stream)
-    nvjpegBufferPinned_t pin_buffer[2]; // Pinned staging (double-buffer)
-    nvjpegJpegStream_t jpeg_stream;    // Bitstream parser (per-stream)
-    int current_pin_buffer;            // Toggle for double-buffering
-} NvJpegStreamState;
+| PR | Expected Scaling (8 streams) | GPU Utilization | Approach |
+|----|------------------------------|-----------------|----------|
+| PR36 | ≥2.5x | ~60% | Remove unnecessary syncs |
+| PR37 | ≥3.0x | ~70% | GPU-resident filter algorithms |
+| PR38 | ≥3.5x | ~75% | Batched nvJPEG decode |
+| PR39 | ≥4.0x | ~80% | Worker sync consolidation |
+| PR40 | ≥4.5x | ~85% | nvJPEG GPU encode |
+| PR41 | ≥6.0x | >95% | Batched GPU processing architecture |
 
-typedef struct {
-    nvjpegHandle_t handle;             // Global handle (one per process)
-    NvJpegStreamState *stream_states;  // Array[num_streams]
-    int num_streams;
-    pthread_mutex_t init_mutex;        // Protect lazy initialization
-} NvJpegContext;
-```
+**Scaling Cap Requirement**: When batch scaling plateaus (diminishing returns from adding more streams), GPU utilization must be ~100%. This proves the GPU is fully utilized, not blocked on CPU sync points.
 
-#### CRITICAL: Custom Allocator for Linear Scaling
+---
 
-**Problem**: Default nvJPEG uses `cudaMalloc()` internally, which is **globally serializing** - it blocks ALL threads/streams until complete. This prevents linear scaling even with per-stream state.
+**PR 36: Deferred Sync Architecture**
 
-**Solution**: Provide custom stream-ordered allocators via `nvjpegCreateEx()`:
+- Status: complete (partial scaling improvement)
+- Goal: Remove/defer ~10 unnecessary sync points to improve multi-stream scaling
+- Implemented:
+  - Removed syncs before NPP calls (lines 483, 711 in `opencv_bridge.cpp`) - NPP uses same stream, ordering is automatic
+  - Added `sync_after` parameter to `unpaper_opencv_grayfilter()` and `unpaper_opencv_blurfilter()` - let caller decide when to sync
+  - Added CUDA event API (`unpaper_cuda_event_create/destroy/record/sync/query`) for future deferred sync patterns
+  - Changed D2H memcpy in filters to use `unpaper_cuda_memcpy_d2h_async()` with stream parameter - critical fix to avoid device-wide synchronization from streamless cudaMemcpy
+  - Changed memset to `cudaMemsetAsync()` on stream - avoid device-wide sync
+  - Added memory pool usage for filter output buffers - avoid cudaMalloc/cudaFree serialization
+- Files: `opencv_bridge.cpp`, `opencv_bridge.h`, `cuda_runtime.c`, `cuda_runtime.h`, `backend_cuda.c`
+- Results:
+  - All pytest tests pass ✓
+  - **Single-image**: 580ms (≤650ms threshold) ✓
+  - **Batch scaling**: 1.24x with 8 streams (target was 2.5x) - partial improvement
+  - No change in output quality ✓
+- Analysis:
+  - Main bottleneck discovered: The ~10 sync points in filters are mostly unavoidable (need intermediate GPU results for tile/block coordinate download)
+  - Remaining ~15 sync points in other operations (masks, deskew, etc.) not yet addressed
+  - PR37 (GPU-resident filter algorithms) will eliminate the need to download tile/block coordinates by doing scan+wipe in a single kernel pass
 
-```c
-// Custom device allocator using cudaMallocAsync (CUDA 11.2+)
-// This is REQUIRED for linear stream scaling!
-static int nvjpeg_dev_malloc(void *ctx, void **ptr, size_t size, cudaStream_t stream) {
-    // Stream-ordered allocation - does NOT serialize across streams
-    return cudaMallocAsync(ptr, size, stream) == cudaSuccess ? 0 : -1;
-}
+---
 
-static int nvjpeg_dev_free(void *ctx, void *ptr, size_t size, cudaStream_t stream) {
-    return cudaFreeAsync(ptr, stream) == cudaSuccess ? 0 : -1;
-}
+**PR 37: GPU-Resident Filter Algorithms**
 
-// Custom pinned allocator (pinned memory is less critical but still helps)
-static int nvjpeg_pinned_malloc(void *ctx, void **ptr, size_t size, cudaStream_t stream) {
-    // Use async if available (CUDA 11.2+), else fall back to sync
-    cudaError_t err = cudaMallocHost(ptr, size);
-    return err == cudaSuccess ? 0 : -1;
-}
+- Status: planned
+- Goal: Eliminate D2H→CPU→H2D round-trips in grayfilter/blurfilter
+- Problem: Current flow: GPU kernel finds tiles → sync → download count → CPU loops → upload wipes
+- Approach:
+  - New `unpaper_grayfilter_scan_and_wipe` kernel that scans AND wipes in one pass
+  - New `unpaper_blurfilter_scan_and_wipe` kernel (same pattern)
+  - Eliminate 4 sync points per image (2 per filter)
+- Files: `cuda_kernels.cu`, `opencv_bridge.cpp`
+- Acceptance:
+  - All pytest tests pass
+  - **Single-image**: ≤650ms for PNG/PBM, ≤700ms for JPEG
+  - **Batch scaling**: 32 images, 8 streams achieves ≥3.0x speedup
+  - Filter output matches baseline (<0.1% pixel difference)
+  - GPU utilization increases to >70%
 
-static int nvjpeg_pinned_free(void *ctx, void *ptr, size_t size, cudaStream_t stream) {
-    return cudaFreeHost(ptr) == cudaSuccess ? 0 : -1;
-}
+---
 
-// Initialize nvJPEG with custom allocators
-nvjpegDevAllocatorV2_t dev_allocator = {
-    .dev_ctx = NULL,
-    .dev_malloc = nvjpeg_dev_malloc,
-    .dev_free = nvjpeg_dev_free
-};
+**PR 38: Batched nvJPEG Decode**
 
-nvjpegPinnedAllocatorV2_t pinned_allocator = {
-    .pinned_ctx = NULL,
-    .pinned_malloc = nvjpeg_pinned_malloc,
-    .pinned_free = nvjpeg_pinned_free
-};
+- Status: planned
+- Goal: Decode all batch images with single `nvjpegDecodeBatched()` call instead of per-image decode
+- Approach:
+  - Use `nvjpegDecodeBatchedInitialize()` + `nvjpegDecodeBatched()` API
+  - Collect all JPEG file data before starting batch
+  - Single sync at end of batch decode
+  - Alternative: phased API (`nvjpegDecodeJpegHost` → `nvjpegDecodeJpegTransferToDevice` → `nvjpegDecodeJpegDevice`) with overlap
+- Files: `nvjpeg_decode.c`, `decode_queue.c`
+- Acceptance:
+  - All pytest tests pass
+  - **Single-image**: ≤650ms for PNG/PBM, ≤700ms for JPEG
+  - **Batch scaling**: ≥3.5x scaling with 8 streams
+  - Decode phase 3x faster for 32 images vs per-image decode
+  - Graceful fallback if batched decode fails
 
-// MUST use nvjpegCreateExV2 with custom allocators!
-nvjpegCreateExV2(NVJPEG_BACKEND_GPU_HYBRID, &dev_allocator, &pinned_allocator,
-                  NVJPEG_FLAGS_DEFAULT, &handle);
+---
 
-// Also set memory padding to reduce reallocations
-nvjpegSetDeviceMemoryPadding(1024 * 1024, handle);  // 1MB padding
-nvjpegSetPinnedMemoryPadding(1024 * 1024, handle);
-```
+**PR 39: Worker Sync Consolidation**
 
-#### Scaling Analysis: Why This Enables ≥3.5x with 8 Streams
+- Status: planned
+- Goal: Reduce per-image syncs from ~8 to 1-2 by deferring all syncs to end of processing
+- Approach:
+  - Add `bool sync_after` parameter to all backend GPU functions (default true for compatibility)
+  - Modify `process_sheet()` to call all GPU operations with `sync_after=false`
+  - Single sync before D2H transfer for output
+- Files: `backend_cuda.c`, `backend.h`, `sheet_process.c`
+- Acceptance:
+  - All pytest tests pass
+  - **Single-image**: ≤650ms for PNG/PBM, ≤700ms for JPEG
+  - **Batch scaling**: ≥4.0x scaling with 8 streams
+  - GPU utilization reaches >80%
 
-| Factor | Without Custom Allocator | With Custom Allocator |
-|--------|--------------------------|----------------------|
-| Internal cudaMalloc | Serializes ALL streams | Stream-ordered, parallel |
-| 8 concurrent decodes | Effectively 1 stream | True 8-stream parallelism |
-| Expected scaling (8 streams) | **~1.5x** (serialized) | **≥3.5x** (target) |
+---
 
-**Why 3.5x and not 8x?** nvJPEG uses CUDA SMs for decode, which:
-- Competes with processing kernels for SM resources
-- Has diminishing returns as SM occupancy increases
-- Memory bandwidth becomes limiting factor at high parallelism
+**PR 40: nvJPEG GPU Encode**
 
-Expected scaling curve:
-- 1→4 streams: ~2.5-3x (SMs not saturated)
-- 4→8 streams: ~1.3-1.5x additional (diminishing returns)
-- **Total 8 streams: ≥3.5x** (our target)
+- Status: planned
+- Goal: Eliminate D2H transfer for JPEG output by encoding directly on GPU
+- Approach:
+  - Add `nvjpeg_encode_from_gpu()` using nvJPEG encoder API
+  - Add `--output-format=jpeg` CLI option
+  - Encoder state pool (same pattern as decoder)
+- Files: `nvjpeg_encode.c/.h`, `encode_queue.c`, `options.h`, `parse.c`, `file.c`
+- Acceptance:
+  - All pytest tests pass
+  - **Single-image**: ≤650ms for PNG/PBM, ≤700ms for JPEG
+  - **Batch scaling**: ≥4.5x scaling with 8 streams
+  - JPEG output quality matches ImageMagick (SSIM >0.99)
+  - No D2H transfer for JPEG→JPEG workflow
+  - GPU utilization reaches >85%
 
-#### Complete Bottleneck Checklist
+---
 
-Before claiming linear scaling, verify ALL of these are addressed:
+**PR 41: Batched GPU Processing Architecture**
 
-| # | Bottleneck | How to Verify | Solution |
-|---|------------|---------------|----------|
-| 1 | `cudaMalloc` in nvJPEG | Nsight Systems trace, look for `cudaMalloc` during decode | Custom allocator with `cudaMallocAsync` |
-| 2 | `cudaMalloc` in unpaper | Nsight trace | Use existing `cuda_mempool` |
-| 3 | Per-stream state sharing | Code review | Separate `NvJpegStreamState` per stream |
-| 4 | Global mutex in decode queue | Code review | Lock-free atomic acquire/release |
-| 5 | File I/O serialization | Profile with `strace` | Memory-map files or use async I/O |
-| 6 | CPU host phase contention | Profile CPU usage | Ensure num_decode_threads ≤ CPU cores |
-| 7 | Pinned memory allocation | Nsight trace for `cudaMallocHost` | Pre-allocate pinned buffers |
-| 8 | CUDA context switches | Nsight trace | All streams on same device |
+- Status: planned
+- Goal: Process all batch images as a GPU pipeline with minimal sync
+- Approach:
+  - Instead of N workers each processing 1 image with syncs
+  - Single control thread orchestrating N images across M streams
+  - Phase 1: All uploads (async); Phase 2: All processing (no sync); Phase 3: Single sync; Phase 4: All downloads
+- Files: `batch_worker.c`, `unpaper.c`
+- Acceptance:
+  - All pytest tests pass
+  - **Single-image**: ≤650ms for PNG/PBM, ≤700ms for JPEG
+  - **Batch scaling**: ≥6.0x scaling with 8 streams
+  - **GPU utilization >95%** when scaling plateaus (proves full GPU utilization)
 
-**Verification command**:
+---
+
+**PR 42+: PDF Integration**
+
+Once batch scaling is achieved, PDF workflow becomes straightforward via `pdfimages -j` for extraction and `img2pdf` for reassembly.
+
+#### Verification Commands
+
 ```bash
-# Profile with Nsight Systems to detect serialization
-nsys profile -o nvjpeg_scaling ./builddir-cuda/unpaper --batch --device=cuda \
+# Single-image regression test (must pass for every PR)
+python tools/bench_a1.py --devices cuda --iterations 5 --warmup 2
+# Expected: ≤650ms for PNG
+
+python tools/bench_a1.py --devices cuda --iterations 5 --warmup 2 --input /path/to/grayscale.jpg
+# Expected: ≤700ms for JPEG
+
+# Batch scaling benchmark
+python tools/bench_batch.py --device cuda --streams 1,2,4,8 --images 32
+
+# Profile with Nsight to verify sync reduction and GPU utilization
+nsys profile -o profile ./builddir-cuda/unpaper --batch --device=cuda \
     --cuda-streams=8 input-%d.jpg output-%d.pnm
 
-# Look for:
-# - cudaMalloc/cudaFree during decode (BAD - should use async)
-# - Long gaps between stream activity (BAD - serialization)
-# - Overlapping kernel execution across streams (GOOD)
+# Look for: fewer cudaStreamSynchronize gaps, overlapping kernel execution, high GPU utilization
 ```
-
-#### PR-by-PR Roadmap
-
----
-
-**PR 35: nvJPEG Build Integration + Core Infrastructure**
-
-- Status: completed
-- Scope:
-  - Add nvJPEG library detection to `meson.build`:
-    ```meson
-    # nvJPEG is part of CUDA Toolkit, no separate install needed
-    nvjpeg_dep = dependency('nvjpeg', required: cuda_enabled)
-    # Fallback: find library directly
-    if not nvjpeg_dep.found()
-      nvjpeg_dep = cc.find_library('nvjpeg',
-        dirs: cuda_libdir,
-        required: cuda_enabled)
-    endif
-    ```
-  - Create `imageprocess/nvjpeg_decode.c/.h` with core infrastructure:
-    - `NvJpegContext` global context with lazy initialization
-    - `NvJpegStreamState` per-stream state pool
-    - **CRITICAL: Custom stream-ordered allocators** (see "Custom Allocator for Linear Scaling" section above):
-      - `nvjpegDevAllocatorV2_t` using `cudaMallocAsync`/`cudaFreeAsync`
-      - `nvjpegPinnedAllocatorV2_t` for pinned memory
-      - Initialize with `nvjpegCreateExV2()` (NOT `nvjpegCreateSimple()`)
-      - Set memory padding: `nvjpegSetDeviceMemoryPadding(1MB)`
-    - Backend selection: `NVJPEG_BACKEND_GPU_HYBRID` for CUDA-based decode
-    - Memory pre-allocation to avoid runtime `cudaMalloc`:
-      ```c
-      // Pre-allocate device buffer for max expected image size
-      nvjpegBufferDeviceCreate(handle, &dev_buffer, NULL);
-      nvjpegStateAttachDeviceBuffer(state, dev_buffer);
-
-      // Pre-allocate pinned buffers (double-buffer for async)
-      nvjpegBufferPinnedCreate(handle, &pin_buffer[0], NULL);
-      nvjpegBufferPinnedCreate(handle, &pin_buffer[1], NULL);
-      nvjpegStateAttachPinnedBuffer(state, pin_buffer[0]);
-      ```
-  - Implement `nvjpeg_decode_to_gpu()` with multi-phase pipeline:
-    ```c
-    // Phase 1: Host-side JPEG parsing (synchronous)
-    nvjpegJpegStreamParse(handle, jpeg_data, jpeg_size, 0, 0, jpeg_stream);
-    nvjpegDecodeJpegHost(handle, decoder, state, decode_params, jpeg_stream);
-
-    // Phase 2: Transfer to device (async on stream)
-    nvjpegDecodeJpegTransferToDevice(handle, decoder, state, jpeg_stream, cuda_stream);
-
-    // Phase 3: GPU decode (async on stream)
-    nvjpegDecodeJpegDevice(handle, decoder, state, &output_image, cuda_stream);
-    ```
-  - Add unit tests for nvJPEG decode:
-    - Test grayscale JPEG decode (`NVJPEG_OUTPUT_Y`)
-    - Test RGB JPEG decode (`NVJPEG_OUTPUT_RGB` / `NVJPEG_OUTPUT_RGBI`)
-    - Test concurrent decode on multiple streams
-    - Verify output matches FFmpeg decode (pixel-level comparison)
-- Files:
-  - `meson.build` - nvJPEG dependency detection
-  - `imageprocess/nvjpeg_decode.c` - decode implementation
-  - `imageprocess/nvjpeg_decode.h` - public API
-  - `tests/nvjpeg_decode_test.c` - unit tests
-  - `tests/source_images/test_jpeg.jpg` - test JPEG image
-- Implementation notes:
-  - Use `nvjpegGetImageInfo()` to query image dimensions before decode
-  - Handle chroma subsampling: 4:4:4, 4:2:2, 4:2:0 supported
-  - nvJPEG supports baseline and progressive JPEG, 1-4 channels
-  - Error handling: check `nvjpegStatus_t` return codes, fall back to FFmpeg on failure
-- Acceptance:
-  - Build succeeds with nvJPEG linked (CUDA builds only)
-  - `nvjpeg_context_init()` creates global handle + stream state pool
-  - `nvjpeg_decode_to_gpu()` decodes JPEG directly to GPU memory
-  - Unit test passes: decoded image matches FFmpeg reference within tolerance
-  - **Custom allocator verified**: No `cudaMalloc` calls during decode (verify with `CUDA_LAUNCH_BLOCKING=1` or Nsight)
-  - **Parallel scaling test**: 4 concurrent decodes complete in <2x time of 1 decode (proves no serialization)
-
----
-
-**PR 36: Decode Queue GPU Integration**
-
-- Status: completed (infrastructure in place with per-stream CUDA streams, GPU decode path enabled but nvJPEG batch decode has allocator issues)
-- Scope:
-  - Extend `DecodedImage` struct to track GPU residency:
-    ```c
-    typedef struct {
-        AVFrame *frame;           // CPU frame (may be NULL for GPU-only)
-        int job_index;
-        int input_index;
-        bool valid;
-        bool uses_pinned_memory;
-        // NEW fields for GPU decode:
-        bool on_gpu;              // True if decoded directly to GPU
-        void *gpu_ptr;            // GPU memory pointer (if on_gpu)
-        size_t gpu_pitch;         // Row pitch in bytes
-        int gpu_width, gpu_height;
-        int gpu_format;           // NVJPEG_OUTPUT_* format
-    } DecodedImage;
-    ```
-  - Modify `decode_queue` producer to use nvJPEG for JPEG files:
-    ```c
-    // In producer_thread_fn():
-    const char *ext = strrchr(filename, '.');
-    if (ext && (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0)) {
-        // GPU decode path
-        NvJpegStreamState *nvstate = nvjpeg_acquire_stream_state();
-        if (nvjpeg_decode_to_gpu(filename, nvstate, cuda_stream, &slot->image)) {
-            slot->image.on_gpu = true;
-            // No CPU frame needed
-        }
-        nvjpeg_release_stream_state(nvstate);
-    } else {
-        // Fallback: FFmpeg decode (existing path)
-        decoded = decode_image_file(filename);
-        slot->image.on_gpu = false;
-    }
-    ```
-  - Modify `batch_worker` to handle GPU-decoded images:
-    ```c
-    // In batch_process_job():
-    if (decoded_images[i]->on_gpu) {
-        // Create Image struct pointing to GPU memory
-        Image input = create_image_from_gpu(
-            decoded_images[i]->gpu_ptr,
-            decoded_images[i]->gpu_pitch,
-            decoded_images[i]->gpu_width,
-            decoded_images[i]->gpu_height,
-            decoded_images[i]->gpu_format
-        );
-        // Mark as GPU-resident (skip image_ensure_cuda)
-        image_set_gpu_resident(&input, true);
-    } else {
-        // Existing path: upload to GPU
-        image_ensure_cuda(&input);
-    }
-    ```
-  - Add helper in `image_cuda.c`:
-    ```c
-    // Create Image from existing GPU memory (no allocation)
-    Image create_image_from_gpu(void *gpu_ptr, size_t pitch,
-                                 int width, int height, int format);
-
-    // Mark image as already on GPU (skip upload)
-    void image_set_gpu_resident(Image *img, bool resident);
-    ```
-  - nvJPEG stream state pool management:
-    - Pool size = num_streams (matches CUDA stream pool)
-    - Lock-free acquire/release with atomic operations
-    - Statistics: acquisitions, wait events, peak concurrent usage
-- Files:
-  - `lib/decode_queue.c/.h` - GPU decode path, DecodedImage extensions
-  - `lib/batch_worker.c` - handle GPU-decoded images
-  - `imageprocess/image_cuda.c` - `create_image_from_gpu()`, `image_set_gpu_resident()`
-  - `imageprocess/nvjpeg_decode.c` - stream state pool management
-- Implementation notes:
-  - nvJPEG output format must match unpaper's internal format:
-    - Grayscale: `NVJPEG_OUTPUT_Y` → `AV_PIX_FMT_GRAY8`
-    - Color: `NVJPEG_OUTPUT_RGBI` → `AV_PIX_FMT_RGB24` (interleaved)
-  - GPU memory ownership: decode queue owns GPU buffer until `decode_queue_release()`
-  - Handle mixed batches: some JPEG (GPU decode), some PNG (CPU decode)
-- Acceptance:
-  - ~~JPEG files decoded directly to GPU (verified via `--perf` output)~~ (nvJPEG allocator failure in batch mode)
-  - ~~No H2D transfer for JPEG input (verified via CUDA profiler)~~ (blocked by above)
-  - ~~Mixed JPEG+PNG batches work correctly~~ (blocked by above)
-  - ~~Batch benchmark shows improved scaling (target: ≥2.5x with 8 streams)~~ (blocked by above)
-  - All existing tests pass (no regression) ✓
-  - JPEG format comparison tests added (<10% dissimilarity) ✓
-- Implementation notes (PR36 completion):
-  - Infrastructure implemented and tested:
-    - `DecodedImage` struct extended with GPU fields
-    - `decode_jpeg_to_gpu()` function implemented
-    - `create_image_from_gpu()` helper implemented
-    - `image_is_gpu_resident()` and `image_set_gpu_resident()` implemented
-    - nvJPEG context initialization integrated into unpaper.c
-    - batch_worker updated to handle GPU-decoded images
-    - **Each NvJpegStreamState now has its own dedicated CUDA stream** for true parallel decode
-  - GPU decode path enabled in decode_queue.c, but nvJPEG decode fails with "Allocator failure" in batch mode
-  - Remaining issues to investigate:
-    - nvJPEG custom allocator not working correctly with nvjpegCreateExV2
-    - May need to use nvjpegCreateSimple or different allocator approach
-  - nvJPEG decode unit tests pass (concurrent decode verified)
-  - All 38 pytest tests pass (including 4 new JPEG comparison tests)
-
----
-
-**PR 37: nvJPEG Encode + GPU-Resident Output**
-
-- Status: planned
-- Scope:
-  - Add nvJPEG encode support in `imageprocess/nvjpeg_encode.c/.h`:
-    ```c
-    typedef struct {
-        nvjpegEncoderState_t state;
-        nvjpegEncoderParams_t params;
-    } NvJpegEncoderState;
-
-    // Encode from GPU memory to JPEG bytes
-    bool nvjpeg_encode_from_gpu(
-        const Image *img,           // GPU-resident image
-        int quality,                // JPEG quality (1-100)
-        uint8_t **jpeg_data,        // Output: JPEG bytes (host memory)
-        size_t *jpeg_size,          // Output: size in bytes
-        cudaStream_t stream         // CUDA stream for async
-    );
-    ```
-  - Implement encode pipeline:
-    ```c
-    // Setup encoder params
-    nvjpegEncoderParamsSetQuality(params, quality, stream);
-    nvjpegEncoderParamsSetSamplingFactors(params, NVJPEG_CSS_444, stream);
-
-    // Encode from GPU (async on stream)
-    nvjpegEncodeImage(handle, encoder_state, params,
-                      &nv_image, input_format, width, height, stream);
-
-    // Retrieve compressed data (requires sync)
-    nvjpegEncodeRetrieveBitstream(handle, encoder_state, jpeg_data, &jpeg_size, stream);
-    ```
-  - Extend `encode_queue` to support GPU-resident images:
-    ```c
-    typedef struct {
-        // Existing fields...
-        bool source_on_gpu;         // True if source is GPU-resident
-        void *gpu_ptr;              // GPU source pointer
-        size_t gpu_pitch;
-        // Output options:
-        bool encode_to_jpeg;        // Use nvJPEG encode
-        int jpeg_quality;
-    } EncodeJob;
-    ```
-  - Add JPEG output format option:
-    - CLI: `--output-format=pnm|jpeg` (default: pnm for compatibility)
-    - When `--output-format=jpeg`: use nvJPEG encode, skip D2H transfer
-  - Modify `saveImage()` to use nvJPEG when appropriate:
-    ```c
-    void saveImage(char *filename, Image input, int outputPixFmt) {
-        const char *ext = strrchr(filename, '.');
-        if (ext && strcasecmp(ext, ".jpg") == 0 && image_is_gpu_resident(&input)) {
-            // GPU-direct JPEG encode
-            nvjpeg_encode_from_gpu(&input, jpeg_quality, &data, &size, stream);
-            write_file(filename, data, size);
-            return;
-        }
-        // Existing path: D2H + PNM/FFmpeg encode
-    }
-    ```
-- Files:
-  - `imageprocess/nvjpeg_encode.c/.h` - encode implementation
-  - `lib/encode_queue.c/.h` - GPU-resident source support
-  - `lib/options.c/.h` - add `--output-format` option
-  - `file.c` - integrate nvJPEG encode path
-  - `parse.c` - parse `--output-format` option
-  - `doc/unpaper.1.rst` - document new option
-- Implementation notes:
-  - nvJPEG encode requires contiguous RGB or YUV input
-  - If internal format differs, convert on GPU before encode
-  - Quality parameter: default 90 for document scanning
-  - Encoder state pool: same pattern as decoder (per-stream)
-- Acceptance:
-  - JPEG output encoded directly from GPU memory
-  - No D2H transfer for JPEG→JPEG workflow (verified via profiler)
-  - Output JPEG visually identical to PNM→JPEG conversion
-  - `--output-format=jpeg` documented in man page
-  - A1 benchmark with JPEG output: no regression vs PNM output
-
----
-
-**PR 38: Full GPU Pipeline + Performance Validation**
-
-- Status: planned
-- Scope:
-  - Complete GPU-resident pipeline for JPEG→JPEG workflow:
-    ```
-    ┌─────────────────────────────────────────────────────────────┐
-    │  JPEG file ──> nvJPEG decode ──> GPU memory                │
-    │                                      │                      │
-    │                              GPU Processing                 │
-    │                       (filters, deskew, masks)              │
-    │                                      │                      │
-    │                                      ▼                      │
-    │  JPEG file <── nvJPEG encode <── GPU memory                │
-    │                                                             │
-    │  *** Image NEVER leaves GPU memory ***                     │
-    └─────────────────────────────────────────────────────────────┘
-    ```
-  - Optimize memory management:
-    - nvJPEG decode buffer pool (pre-allocated per stream)
-    - nvJPEG encode buffer pool (pre-allocated per stream)
-    - Zero runtime `cudaMalloc` for JPEG workflow
-  - Add comprehensive benchmarking:
-    - New benchmark: `tools/bench_jpeg_pipeline.py`
-    - Measure: decode time, process time, encode time, total time
-    - Compare: JPEG pipeline vs PNM pipeline vs FFmpeg baseline
-  - Batch scaling validation:
-    - Test with 50images
-    - Test with 1, 4, 8, 16 streams
-    - Verify near-linear scaling
-  - Profile with NVIDIA Nsight:
-    - Verify no unexpected sync points
-    - Verify concurrent kernel execution across streams
-    - Verify H2D/D2H transfers only for non-JPEG formats
-- Files:
-  - `unpaper.c` - integrate full pipeline, pool initialization
-  - `tools/bench_jpeg_pipeline.py` - JPEG-specific benchmark
-  - `tools/bench_batch.py` - add JPEG format option
-- Implementation notes:
-  - Memory budget for JPEG pipeline (auto-scaled):
-    - Decode buffers: num_streams × max_image_size
-    - Encode buffers: num_streams × max_jpeg_size (compressed, ~1/10 of raw)
-    - Total: ~40MB per stream for A1 images
-  - Handle decode/encode errors gracefully:
-    - nvJPEG error → fall back to FFmpeg path
-    - Log warning, continue processing
-- Acceptance:
-  - **Primary gate**: JPEG batch scaling ≥3.5x with 8 streams (vs 1 stream)
-  - **Secondary gate**: JPEG→JPEG workflow has zero H2D/D2H transfers
-  - Single image (A1 bench): <500ms total (decode+process+encode)
-  - Batch (50 images, 8 streams): <5s total (<100ms/image)
-  - All existing tests pass
-  - **Bottleneck verification** (all items from checklist above):
-    - Nsight trace shows NO `cudaMalloc`/`cudaFree` during steady-state processing
-    - Nsight trace shows overlapping kernel execution across streams
-    - No stream stalls >10ms waiting for other streams
-    - CPU utilization spread across multiple cores (not single-threaded)
-  - **Scaling regression test** added to CI:
-    ```bash
-    # This test MUST pass for PR to merge
-    python tools/bench_jpeg_pipeline.py --streams 1,4,8 --images 50
-    # Expected output:
-    # 1 stream:  X.XX img/s (baseline)
-    # 4 streams: Y.YY img/s (≥2.5x baseline)
-    # 8 streams: Z.ZZ img/s (≥3.5x baseline)  <-- PRIMARY GATE
-    ```
-
----
-
-#### Performance Targets Summary
-
-| Metric | Current | Target | Notes |
-|--------|---------|--------|-------|
-| Single image (A1) | 486ms | <500ms | No regression |
-| Batch scaling (8 streams) | 1.80x | **≥3.5x** | Primary goal |
-| JPEG decode | 98ms (FFmpeg) | **15-25ms** (nvJPEG) | 4-6x improvement |
-| JPEG encode | 34ms (direct PNM) | **10-15ms** (nvJPEG) | 2-3x improvement |
-| H2D transfer (JPEG) | 5-10ms | **0ms** | Eliminated |
-| D2H transfer (JPEG) | 5-10ms | **0ms** | Eliminated |
-
-#### Thread Safety & Concurrency Model
-
-```
-┌────────────────────────────────────────────────────────────────────┐
-│                     PROCESS-LEVEL (Shared)                         │
-├────────────────────────────────────────────────────────────────────┤
-│  nvjpegHandle_t (one per process, thread-safe)                    │
-│  NvJpegStreamState pool[num_streams] (pre-allocated)              │
-│  NvJpegEncoderState pool[num_streams] (pre-allocated)             │
-└────────────────────────────────────────────────────────────────────┘
-                              │
-          ┌───────────────────┼───────────────────┐
-          ▼                   ▼                   ▼
-┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
-│   Stream 0      │ │   Stream 1      │ │   Stream N      │
-├─────────────────┤ ├─────────────────┤ ├─────────────────┤
-│ NvJpegStreamState│ │ NvJpegStreamState│ │ NvJpegStreamState│
-│ - state         │ │ - state         │ │ - state         │
-│ - dev_buffer    │ │ - dev_buffer    │ │ - dev_buffer    │
-│ - pin_buffer[2] │ │ - pin_buffer[2] │ │ - pin_buffer[2] │
-│ - jpeg_stream   │ │ - jpeg_stream   │ │ - jpeg_stream   │
-├─────────────────┤ ├─────────────────┤ ├─────────────────┤
-│ NvJpegEncoder   │ │ NvJpegEncoder   │ │ NvJpegEncoder   │
-│ - enc_state     │ │ - enc_state     │ │ - enc_state     │
-│ - enc_params    │ │ - enc_params    │ │ - enc_params    │
-└─────────────────┘ └─────────────────┘ └─────────────────┘
-```
-
-**Key invariants**:
-1. Each CUDA stream has dedicated nvJPEG state (no sharing)
-2. Double-buffered pinned memory enables async H2D overlap
-3. Stream state acquired atomically before decode/encode
-4. No cross-stream resource sharing (eliminates sync points)
-
-#### Future: PDF Integration (PR39+)
-
-Once JPEG pipeline is complete, PDF workflow becomes straightforward:
-
-```bash
-# Extract JPEGs from PDF (zero-transcode, uses embedded JPEG directly)
-pdfimages -j input.pdf page
-
-# Process with unpaper (full GPU pipeline)
-unpaper --batch --device=cuda --output-format=jpeg page-*.jpg output-%d.jpg
-
-# Reassemble PDF (optional)
-img2pdf output-*.jpg -o output.pdf
-```
-
-For programmatic PDF handling, consider libpoppler or MuPDF integration in future PRs.
 
 ---
 
