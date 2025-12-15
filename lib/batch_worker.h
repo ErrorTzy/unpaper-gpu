@@ -13,6 +13,7 @@
 
 // Forward declarations
 struct ThreadPool;
+struct UnpaperCudaStream;
 
 // Batch worker context - shared state for all workers
 typedef struct {
@@ -21,6 +22,7 @@ typedef struct {
   const SheetProcessConfig *config; // Sheet processing configuration
   pthread_mutex_t progress_mutex;   // Protects progress updates
   bool perf_enabled;                // Enable per-job performance output
+  bool use_stream_pool;             // Use CUDA stream pool for GPU batch processing
 } BatchWorkerContext;
 
 // Per-job context passed to worker function
@@ -39,6 +41,9 @@ void batch_worker_cleanup(BatchWorkerContext *ctx);
 // Set the sheet processing configuration
 void batch_worker_set_config(BatchWorkerContext *ctx,
                              const SheetProcessConfig *config);
+
+// Enable CUDA stream pooling for GPU batch processing
+void batch_worker_enable_stream_pool(BatchWorkerContext *ctx, bool enable);
 
 // Process all jobs in the queue using the thread pool
 // Returns number of failed jobs (0 = all succeeded)

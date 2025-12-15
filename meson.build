@@ -40,6 +40,7 @@ unpaper_sources = [
     'imageprocess/blit.c',
     'imageprocess/backend.c',
     'imageprocess/cuda_mempool.c',
+    'imageprocess/cuda_stream_pool.c',
     'imageprocess/deskew.c',
     'imageprocess/interpolate.c',
     'imageprocess/fill.c',

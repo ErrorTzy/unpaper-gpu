@@ -21,6 +21,7 @@
 #include "imageprocess/blit.h"
 #include "imageprocess/backend.h"
 #include "imageprocess/cuda_mempool.h"
+#include "imageprocess/cuda_stream_pool.h"
 #include "imageprocess/deskew.h"
 #include "imageprocess/filters.h"
 #include "imageprocess/image.h"
@@ -1198,10 +1199,12 @@ int main(int argc, char *argv[]) {
 
     // Parallel batch processing when parallelism > 1
     if (batch_queue.parallelism > 1) {
-      // Initialize GPU memory pool for CUDA batch processing
-      // Pool eliminates per-image cudaMalloc overhead for homogeneous batches
+      // Initialize GPU memory pool and stream pool for CUDA batch processing
+      // Memory pool eliminates per-image cudaMalloc overhead
+      // Stream pool enables concurrent GPU operations across multiple jobs
 #ifdef UNPAPER_WITH_CUDA
-      bool pool_active = false;
+      bool mempool_active = false;
+      bool streampool_active = false;
       if (options.device == UNPAPER_DEVICE_CUDA) {
         // Estimate buffer size: A1 image is ~26MB (2500x3500 RGB24)
         // Use 8 buffers for triple-buffered 4-stream operation
@@ -1209,7 +1212,7 @@ int main(int argc, char *argv[]) {
         const size_t buffer_size = 32 * 1024 * 1024;  // 32MB covers A1 and larger
 
         if (cuda_mempool_global_init(buffer_count, buffer_size)) {
-          pool_active = true;
+          mempool_active = true;
           verboseLog(VERBOSE_NORMAL,
                      "GPU memory pool: %zu buffers x %zu bytes (%.1f MB)\n",
                      buffer_count, buffer_size,
@@ -1217,6 +1220,18 @@ int main(int argc, char *argv[]) {
         } else {
           verboseLog(VERBOSE_NORMAL,
                      "GPU memory pool initialization failed, using direct allocation\n");
+        }
+
+        // Initialize stream pool for concurrent GPU operations
+        // Use 4 streams for good parallelism without excessive resource usage
+        const size_t stream_count = 4;
+        if (cuda_stream_pool_global_init(stream_count)) {
+          streampool_active = true;
+          verboseLog(VERBOSE_NORMAL, "GPU stream pool: %zu streams\n",
+                     stream_count);
+        } else {
+          verboseLog(VERBOSE_NORMAL,
+                     "GPU stream pool initialization failed, using default stream\n");
         }
       }
 #endif
@@ -1239,6 +1254,10 @@ int main(int argc, char *argv[]) {
       BatchWorkerContext worker_ctx;
       batch_worker_init(&worker_ctx, &options, &batch_queue);
       batch_worker_set_config(&worker_ctx, &config);
+#ifdef UNPAPER_WITH_CUDA
+      // Enable stream pooling if the stream pool was initialized
+      batch_worker_enable_stream_pool(&worker_ctx, streampool_active);
+#endif
 
       // Process all jobs in parallel
       int failed = batch_process_parallel(&worker_ctx, pool);
@@ -1248,12 +1267,22 @@ int main(int argc, char *argv[]) {
       threadpool_destroy(pool);
 
 #ifdef UNPAPER_WITH_CUDA
-      // Print GPU memory pool statistics and cleanup
-      if (pool_active) {
+      // Print GPU pool statistics and cleanup
+      if (mempool_active || streampool_active) {
         if (options.perf) {
-          cuda_mempool_global_print_stats();
+          if (mempool_active) {
+            cuda_mempool_global_print_stats();
+          }
+          if (streampool_active) {
+            cuda_stream_pool_global_print_stats();
+          }
         }
-        cuda_mempool_global_cleanup();
+        if (streampool_active) {
+          cuda_stream_pool_global_cleanup();
+        }
+        if (mempool_active) {
+          cuda_mempool_global_cleanup();
+        }
       }
 #endif
 

@@ -239,11 +239,19 @@ Files use SPDX headers. Add SPDX headers to new files and validate with `reuse l
 
 **PR 22: GPU batch - multi-stream pipeline infrastructure**
 
-- Status: not started
+- Status: complete
 - Scope:
   - Create stream pool: N `UnpaperCudaStream` instances (default N=4)
   - Associate each in-flight job with a stream
   - Stream synchronization points before download and stream reuse
+- Results:
+  - Stream pool (`imageprocess/cuda_stream_pool.c`, `imageprocess/cuda_stream_pool.h`)
+  - Lock-free fast path acquire with atomic operations
+  - Blocking wait with condition variable when all streams busy
+  - Stream synchronization before release to ensure work completion
+  - Integration with batch worker via `batch_worker_enable_stream_pool()`
+  - Statistics: total acquisitions, wait events (contention), peak concurrent usage
+  - All CPU (24 tests) and CUDA (9 tests + 34 pytest) pass
 - Acceptance:
   - Infrastructure supports concurrent GPU operations across streams
   - No correctness issues from stream interleaving

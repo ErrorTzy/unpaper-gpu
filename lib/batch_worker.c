@@ -10,12 +10,18 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef UNPAPER_WITH_CUDA
+#include "imageprocess/cuda_runtime.h"
+#include "imageprocess/cuda_stream_pool.h"
+#endif
+
 void batch_worker_init(BatchWorkerContext *ctx, const Options *options,
                        BatchQueue *queue) {
   ctx->options = options;
   ctx->queue = queue;
   ctx->perf_enabled = options->perf;
   ctx->config = NULL;
+  ctx->use_stream_pool = false;
   pthread_mutex_init(&ctx->progress_mutex, NULL);
 }
 
@@ -26,6 +32,10 @@ void batch_worker_cleanup(BatchWorkerContext *ctx) {
 void batch_worker_set_config(BatchWorkerContext *ctx,
                              const SheetProcessConfig *config) {
   ctx->config = config;
+}
+
+void batch_worker_enable_stream_pool(BatchWorkerContext *ctx, bool enable) {
+  ctx->use_stream_pool = enable;
 }
 
 bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
@@ -54,8 +64,31 @@ static void batch_worker_fn(void *arg, int thread_id) {
   BatchJobContext *job_ctx = (BatchJobContext *)arg;
   BatchWorkerContext *ctx = job_ctx->ctx;
 
+#ifdef UNPAPER_WITH_CUDA
+  UnpaperCudaStream *stream = NULL;
+
+  // Acquire a stream from the pool for this job
+  if (ctx->use_stream_pool && cuda_stream_pool_global_active()) {
+    stream = cuda_stream_pool_global_acquire();
+    if (stream != NULL) {
+      // Set this stream as current for all CUDA operations in this job
+      unpaper_cuda_set_current_stream(stream);
+    }
+  }
+#endif
+
   // Process the job
   bool success = batch_process_job(ctx, job_ctx->job_index);
+
+#ifdef UNPAPER_WITH_CUDA
+  // Release the stream back to the pool
+  if (stream != NULL) {
+    // Synchronize and release - the pool will sync internally
+    cuda_stream_pool_global_release(stream);
+    // Reset to default stream
+    unpaper_cuda_set_current_stream(NULL);
+  }
+#endif
 
   // Update progress with thread safety
   pthread_mutex_lock(&ctx->progress_mutex);
