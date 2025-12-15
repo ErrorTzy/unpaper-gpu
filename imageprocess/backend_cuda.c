@@ -6,6 +6,8 @@
 
 #include <math.h>
 #include <inttypes.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include <libavutil/frame.h>
@@ -34,7 +36,9 @@ typedef struct {
 
 extern const char unpaper_cuda_kernels_ptx[];
 
-static void *cuda_module;
+// Thread-safe kernel loading with double-checked locking
+static _Atomic(void *) cuda_module = NULL;
+static pthread_mutex_t cuda_module_mutex = PTHREAD_MUTEX_INITIALIZER;
 static void *k_wipe_rect_bytes;
 static void *k_wipe_rect_mono;
 static void *k_copy_rect_to_bytes;
@@ -62,61 +66,75 @@ static void *k_rotate_bytes;
 static void *k_rotate_mono;
 
 static void ensure_kernels_loaded(void) {
-  if (cuda_module != NULL) {
+  // Fast path: already loaded
+  if (atomic_load_explicit(&cuda_module, memory_order_acquire) != NULL) {
     return;
   }
 
-  cuda_module = unpaper_cuda_module_load_ptx(unpaper_cuda_kernels_ptx);
+  // Slow path: load with mutex protection
+  pthread_mutex_lock(&cuda_module_mutex);
+
+  // Double-check after acquiring lock
+  if (atomic_load_explicit(&cuda_module, memory_order_relaxed) != NULL) {
+    pthread_mutex_unlock(&cuda_module_mutex);
+    return;
+  }
+
+  void *module = unpaper_cuda_module_load_ptx(unpaper_cuda_kernels_ptx);
   k_wipe_rect_bytes =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_wipe_rect_bytes");
+      unpaper_cuda_module_get_function(module, "unpaper_wipe_rect_bytes");
   k_wipe_rect_mono =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_wipe_rect_mono");
+      unpaper_cuda_module_get_function(module, "unpaper_wipe_rect_mono");
   k_copy_rect_to_bytes =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_copy_rect_to_bytes");
+      unpaper_cuda_module_get_function(module, "unpaper_copy_rect_to_bytes");
   k_copy_rect_to_mono =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_copy_rect_to_mono");
+      unpaper_cuda_module_get_function(module, "unpaper_copy_rect_to_mono");
   k_mirror_bytes =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_mirror_bytes");
+      unpaper_cuda_module_get_function(module, "unpaper_mirror_bytes");
   k_mirror_mono =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_mirror_mono");
+      unpaper_cuda_module_get_function(module, "unpaper_mirror_mono");
   k_rotate90_bytes =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_rotate90_bytes");
+      unpaper_cuda_module_get_function(module, "unpaper_rotate90_bytes");
   k_rotate90_mono =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_rotate90_mono");
+      unpaper_cuda_module_get_function(module, "unpaper_rotate90_mono");
   k_stretch_bytes =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_stretch_bytes");
+      unpaper_cuda_module_get_function(module, "unpaper_stretch_bytes");
   k_stretch_mono =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_stretch_mono");
+      unpaper_cuda_module_get_function(module, "unpaper_stretch_mono");
   k_count_brightness_range = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_count_brightness_range");
+      module, "unpaper_count_brightness_range");
   k_sum_lightness_rect = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_sum_lightness_rect");
+      module, "unpaper_sum_lightness_rect");
   k_sum_grayscale_rect = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_sum_grayscale_rect");
+      module, "unpaper_sum_grayscale_rect");
   k_sum_darkness_inverse_rect = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_sum_darkness_inverse_rect");
+      module, "unpaper_sum_darkness_inverse_rect");
   k_apply_masks_bytes =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_apply_masks_bytes");
+      unpaper_cuda_module_get_function(module, "unpaper_apply_masks_bytes");
   k_apply_masks_mono =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_apply_masks_mono");
+      unpaper_cuda_module_get_function(module, "unpaper_apply_masks_mono");
   k_noisefilter_build_labels = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_noisefilter_build_labels");
+      module, "unpaper_noisefilter_build_labels");
   k_noisefilter_propagate = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_noisefilter_propagate");
+      module, "unpaper_noisefilter_propagate");
   k_noisefilter_count = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_noisefilter_count");
+      module, "unpaper_noisefilter_count");
   k_noisefilter_apply = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_noisefilter_apply");
+      module, "unpaper_noisefilter_apply");
   k_noisefilter_apply_mask = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_noisefilter_apply_mask");
+      module, "unpaper_noisefilter_apply_mask");
   k_blackfilter_floodfill_rect = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_blackfilter_floodfill_rect");
+      module, "unpaper_blackfilter_floodfill_rect");
   k_detect_edge_rotation_peaks = unpaper_cuda_module_get_function(
-      cuda_module, "unpaper_detect_edge_rotation_peaks");
+      module, "unpaper_detect_edge_rotation_peaks");
   k_rotate_bytes =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_rotate_bytes");
+      unpaper_cuda_module_get_function(module, "unpaper_rotate_bytes");
   k_rotate_mono =
-      unpaper_cuda_module_get_function(cuda_module, "unpaper_rotate_mono");
+      unpaper_cuda_module_get_function(module, "unpaper_rotate_mono");
+
+  // Publish the module pointer last (release semantics)
+  atomic_store_explicit(&cuda_module, module, memory_order_release);
+  pthread_mutex_unlock(&cuda_module_mutex);
 }
 
 static inline uint8_t pixel_grayscale(Pixel pixel) {

@@ -7,8 +7,10 @@
 #include "imageprocess/npp_wrapper.h"
 #include "imageprocess/npp_integral.h"
 
+#include <atomic>
 #include <cstring>
 #include <exception>
+#include <mutex>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -21,9 +23,11 @@ extern "C" {
 extern const char unpaper_cuda_kernels_ptx[];
 }
 
-// Kernel handles for blurfilter
-static void *g_cuda_module = nullptr;
+// Kernel handles for blurfilter and grayfilter (thread-safe initialization)
+static std::atomic<void *> g_cuda_module{nullptr};
 static void *g_blurfilter_scan_kernel = nullptr;
+static void *g_grayfilter_scan_kernel = nullptr;
+static std::mutex g_kernel_load_mutex;
 
 // Output structure for blurfilter scan kernel (must match cuda_kernels.cu)
 struct BlurfilterBlock {
@@ -31,13 +35,39 @@ struct BlurfilterBlock {
   int y;
 };
 
-static void ensure_blurfilter_kernel_loaded() {
-  if (g_cuda_module != nullptr) {
+// Output structure for grayfilter scan kernel (must match cuda_kernels.cu)
+struct GrayfilterTile {
+  int x;
+  int y;
+};
+
+static void ensure_filter_kernels_loaded() {
+  // Fast path: already loaded
+  if (g_cuda_module.load(std::memory_order_acquire) != nullptr) {
     return;
   }
-  g_cuda_module = unpaper_cuda_module_load_ptx(unpaper_cuda_kernels_ptx);
+
+  // Slow path: load with mutex protection
+  std::lock_guard<std::mutex> lock(g_kernel_load_mutex);
+
+  // Double-check after acquiring lock
+  if (g_cuda_module.load(std::memory_order_relaxed) != nullptr) {
+    return;
+  }
+
+  void *module = unpaper_cuda_module_load_ptx(unpaper_cuda_kernels_ptx);
   g_blurfilter_scan_kernel =
-      unpaper_cuda_module_get_function(g_cuda_module, "unpaper_blurfilter_scan");
+      unpaper_cuda_module_get_function(module, "unpaper_blurfilter_scan");
+  g_grayfilter_scan_kernel =
+      unpaper_cuda_module_get_function(module, "unpaper_grayfilter_scan");
+
+  // Publish the module pointer last (release semantics)
+  g_cuda_module.store(module, std::memory_order_release);
+}
+
+// Legacy function for backwards compatibility
+static void ensure_blurfilter_kernel_loaded() {
+  ensure_filter_kernels_loaded();
 }
 
 // OpenCV defines HAVE_OPENCV_* in opencv_modules.hpp if modules are present
@@ -369,6 +399,13 @@ bool unpaper_opencv_grayfilter(uint64_t src_device, int width, int height,
     return true; // Nothing to do
   }
 
+  // Calculate number of tiles
+  const int tiles_per_row = (width - tile_width) / step_x + 1;
+  const int tiles_per_col = (height - tile_height) / step_y + 1;
+  if (tiles_per_row <= 0 || tiles_per_col <= 0) {
+    return true;
+  }
+
   try {
     cv::cuda::Stream cv_stream = get_cv_stream(stream);
 
@@ -408,46 +445,138 @@ bool unpaper_opencv_grayfilter(uint64_t src_device, int width, int height,
     cv::cuda::threshold(gray, dark_mask, static_cast<double>(black_threshold),
                         255.0, cv::THRESH_BINARY_INV, cv_stream);
 
-    // Compute integral images on CPU (OpenCV CUDA integral is limited)
-    cv::Mat gray_host, dark_mask_host;
-    gray.download(gray_host, cv_stream);
-    dark_mask.download(dark_mask_host, cv_stream);
+    // Sync before NPP integral (NPP needs data to be ready)
     cv_stream.waitForCompletion();
 
-    cv::Mat gray_integral, dark_integral;
-    cv::integral(gray_host, gray_integral, CV_32S);
-    cv::integral(dark_mask_host, dark_integral, CV_32S);
-
-    // Scan tiles and collect those that need wiping
-    std::vector<cv::Rect> tiles_to_wipe;
-    const int tile_pixels = tile_width * tile_height;
-
-    for (int y = 0; y <= height - tile_height; y += step_y) {
-      for (int x = 0; x <= width - tile_width; x += step_x) {
-        int x1 = x + tile_width - 1;
-        int y1 = y + tile_height - 1;
-
-        // Count dark pixels in tile using integral image
-        int64_t dark_sum = integral_rect_sum(dark_integral, x, y, x1, y1);
-        int64_t dark_count = dark_sum / 255; // Each dark pixel contributes 255
-
-        if (dark_count == 0) {
-          // No black pixels, check average lightness
-          int64_t lightness_sum = integral_rect_sum(gray_integral, x, y, x1, y1);
-          uint8_t avg_lightness =
-              static_cast<uint8_t>(lightness_sum / tile_pixels);
-          uint8_t inverse_lightness = 255 - avg_lightness;
-
-          if (inverse_lightness < gray_threshold) {
-            tiles_to_wipe.push_back(cv::Rect(x, y, tile_width, tile_height));
-          }
-        }
-      }
+    // Initialize NPP if needed
+    if (!unpaper_npp_init()) {
+      fprintf(stderr, "NPP init failed in grayfilter\n");
+      return false;
     }
 
-    // Wipe collected tiles on GPU
+    // Create NPP context for stream
+    UnpaperNppContext *npp_ctx = unpaper_npp_context_create(stream);
+
+    // Compute GPU integrals for both gray and dark_mask (no CPU download!)
+    UnpaperNppIntegral gray_integral, dark_integral;
+
+    bool gray_integral_ok = unpaper_npp_integral_8u32s(
+        reinterpret_cast<uint64_t>(gray.data), width, height,
+        gray.step, npp_ctx, &gray_integral);
+
+    if (!gray_integral_ok) {
+      if (npp_ctx != nullptr) unpaper_npp_context_destroy(npp_ctx);
+      fprintf(stderr, "NPP gray integral failed in grayfilter\n");
+      return false;
+    }
+
+    bool dark_integral_ok = unpaper_npp_integral_8u32s(
+        reinterpret_cast<uint64_t>(dark_mask.data), width, height,
+        dark_mask.step, npp_ctx, &dark_integral);
+
+    if (npp_ctx != nullptr) {
+      unpaper_npp_context_destroy(npp_ctx);
+    }
+
+    if (!dark_integral_ok) {
+      unpaper_npp_integral_free(gray_integral.device_ptr);
+      fprintf(stderr, "NPP dark integral failed in grayfilter\n");
+      return false;
+    }
+
+    // Load GPU scan kernel
+    ensure_filter_kernels_loaded();
+    if (g_grayfilter_scan_kernel == nullptr) {
+      fprintf(stderr, "Failed to load grayfilter scan kernel\n");
+      unpaper_npp_integral_free(gray_integral.device_ptr);
+      unpaper_npp_integral_free(dark_integral.device_ptr);
+      return false;
+    }
+
+    // Allocate GPU output buffers for kernel
+    int max_tiles = tiles_per_row * tiles_per_col;
+    uint64_t out_tiles_device =
+        unpaper_cuda_malloc(static_cast<size_t>(max_tiles) * sizeof(GrayfilterTile));
+    uint64_t out_count_device = unpaper_cuda_malloc(sizeof(int));
+
+    if (out_tiles_device == 0 || out_count_device == 0) {
+      fprintf(stderr, "GPU malloc failed for grayfilter output\n");
+      unpaper_npp_integral_free(gray_integral.device_ptr);
+      unpaper_npp_integral_free(dark_integral.device_ptr);
+      if (out_tiles_device != 0) unpaper_cuda_free(out_tiles_device);
+      if (out_count_device != 0) unpaper_cuda_free(out_count_device);
+      return false;
+    }
+
+    // Initialize count to 0
+    int zero = 0;
+    unpaper_cuda_memcpy_h2d(out_count_device, &zero, sizeof(int));
+
+    // Launch GPU scan kernel
+    int gray_step = static_cast<int>(gray_integral.step_bytes);
+    int dark_step = static_cast<int>(dark_integral.step_bytes);
+    int gray_thresh_int = static_cast<int>(gray_threshold);
+
+    void *kernel_args[] = {
+        &gray_integral.device_ptr,
+        &dark_integral.device_ptr,
+        &gray_step,
+        &dark_step,
+        &width,
+        &height,
+        &tile_width,
+        &tile_height,
+        &step_x,
+        &step_y,
+        &gray_thresh_int,
+        &out_tiles_device,
+        &out_count_device,
+        &max_tiles,
+    };
+
+    // Grid/block dimensions: one thread per potential tile position
+    const int threads_per_block = 16;
+    uint32_t grid_x = static_cast<uint32_t>(
+        (tiles_per_row + threads_per_block - 1) / threads_per_block);
+    uint32_t grid_y = static_cast<uint32_t>(
+        (tiles_per_col + threads_per_block - 1) / threads_per_block);
+
+    unpaper_cuda_launch_kernel_on_stream(
+        stream, g_grayfilter_scan_kernel, grid_x, grid_y, 1,
+        threads_per_block, threads_per_block, 1, kernel_args);
+
+    // Sync stream to ensure kernel is complete
+    if (stream != nullptr) {
+      unpaper_cuda_stream_synchronize_on(stream);
+    } else {
+      unpaper_cuda_stream_synchronize();
+    }
+
+    // Download only the count and tile coordinates (small data!)
+    int tile_count = 0;
+    unpaper_cuda_memcpy_d2h(&tile_count, out_count_device, sizeof(int));
+
+    // Free integral buffers (no longer needed)
+    unpaper_npp_integral_free(gray_integral.device_ptr);
+    unpaper_npp_integral_free(dark_integral.device_ptr);
+
+    // Download tile coordinates if any found
+    std::vector<GrayfilterTile> tiles_to_wipe;
+    if (tile_count > 0) {
+      tiles_to_wipe.resize(static_cast<size_t>(tile_count));
+      unpaper_cuda_memcpy_d2h(
+          tiles_to_wipe.data(), out_tiles_device,
+          static_cast<size_t>(tile_count) * sizeof(GrayfilterTile));
+    }
+
+    // Free GPU output buffers
+    unpaper_cuda_free(out_tiles_device);
+    unpaper_cuda_free(out_count_device);
+
+    // Wipe collected tiles on GPU using OpenCV
     for (const auto &tile : tiles_to_wipe) {
-      cv::cuda::GpuMat roi = src(tile);
+      cv::cuda::GpuMat roi =
+          src(cv::Rect(tile.x, tile.y, tile_width, tile_height));
       if (cv_type == CV_8UC1) {
         roi.setTo(cv::Scalar(255), cv_stream);
       } else if (cv_type == CV_8UC2) {

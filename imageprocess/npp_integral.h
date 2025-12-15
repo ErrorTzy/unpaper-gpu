@@ -18,8 +18,8 @@ extern "C" {
 // Result of integral image computation
 typedef struct {
   uint64_t device_ptr;  // GPU memory pointer to integral image (int32)
-  int width;            // Width of integral image (same as input)
-  int height;           // Height of integral image (same as input)
+  int width;            // Width of integral image (input_width + 1 for padding)
+  int height;           // Height of integral image (input_height + 1 for padding)
   size_t step_bytes;    // Bytes per row (pitch)
   size_t total_bytes;   // Total buffer size
 } UnpaperNppIntegral;
@@ -28,9 +28,9 @@ typedef struct {
 // Input: 8-bit single-channel image on GPU
 // Output: 32-bit signed integral image on GPU
 //
-// Note: NPP integral output dimensions are the same as input (width x height),
-// unlike OpenCV which produces (width+1) x (height+1). The first row/column
-// are implicitly zero in the standard integral sum formula.
+// Note: The output is padded to (width+1) x (height+1) to support the standard
+// integral sum formula for tiles at the image boundary. The input is
+// automatically zero-padded before computing the integral.
 //
 // Parameters:
 //   src_device   - GPU pointer to source image (8-bit)

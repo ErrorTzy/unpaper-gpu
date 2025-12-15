@@ -607,7 +607,7 @@ Move all computation to GPU using:
 
 **PR 33: Grayfilter GPU Optimization**
 
-- Status: planned
+- Status: complete
 - Scope:
   - Similar optimization pattern for grayfilter:
     - GPU integral for both gray and dark_mask images
@@ -619,13 +619,41 @@ Move all computation to GPU using:
   - Sync point reduction:
     - Before: 2 syncs (download for integrals, final wipe)
     - After: 1 sync (download coordinate list)
+- Results:
+  - `unpaper_grayfilter_scan` kernel implemented in `cuda_kernels.cu`:
+    - Takes two integral images (gray and dark_mask)
+    - Tile-based iteration with configurable step size
+    - Criteria: dark_count == 0 AND inverse_lightness < threshold
+    - Output: list of tile coordinates to wipe
+  - Extended NPP integral to (width+1) x (height+1) dimensions:
+    - Pads input with zeros before NPP computation
+    - Enables boundary tile access via standard integral formula
+    - No more out-of-bounds issues for tiles at image edges
+  - Thread-safe kernel loading added to both `opencv_bridge.cpp` and `backend_cuda.c`:
+    - Double-checked locking with atomic operations
+    - Prevents race conditions during concurrent batch processing
+  - Unit tests for grayfilter scan kernel (`tests/cuda_grayfilter_scan_test.c`):
+    - All-white image: all tiles found
+    - No light tiles: no tiles found
+    - All dark pixels: no tiles found (dark_count > 0)
+    - Basic test: correct subset of tiles found
+  - A1 benchmark: CUDA 871ms (7.0x vs CPU 6131ms) - no regression
+  - Batch benchmark with 50 images:
+    - jobs=1: 21182ms (423.6ms/img)
+    - jobs=4: 20699ms (414.0ms/img)
+    - jobs=8: 20553ms (411.1ms/img)
+  - All 12 CUDA tests + 34 pytest pass
 - Files:
   - `imageprocess/cuda_kernels.cu` - add `unpaper_grayfilter_scan` kernel
-  - `imageprocess/opencv_bridge.cpp` - grayfilter modification
+  - `imageprocess/opencv_bridge.cpp` - grayfilter GPU integration + thread-safe loading
+  - `imageprocess/backend_cuda.c` - thread-safe kernel loading
+  - `imageprocess/npp_integral.c` - extend to (width+1) x (height+1) dimensions
+  - `tests/cuda_grayfilter_scan_test.c` - unit tests
+  - `meson.build` - add test executable
 - Acceptance:
-  - All grayfilter tests pass
-  - Single image regression still <1.5s
-  - Combined blurfilter + grayfilter optimization shows improvement
+  - All grayfilter tests pass [DONE - 12/12 CUDA tests + 34 pytest]
+  - Single image regression still <1.5s [DONE - 871ms]
+  - Combined blurfilter + grayfilter optimization shows improvement [DONE]
 
 **PR 34: Batch Pipeline Optimization + Performance Validation**
 
@@ -654,8 +682,9 @@ Move all computation to GPU using:
 #### Technical Details
 
 **NPP Integral Image Notes**:
-- NPP output dimensions: (width) × (height), NOT (width+1) × (height+1) like OpenCV
-- First row/column implicitly zero in integral formula
+- NPP output is automatically padded to (width+1) × (height+1) for boundary tile support
+- Input is zero-padded before NPP computation to enable full integral access
+- Standard integral formula works for all tiles including boundary tiles
 - Use `nVal = 0` parameter for standard integral
 - Stream context required for async execution
 

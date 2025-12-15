@@ -1378,12 +1378,16 @@ extern "C" __global__ void unpaper_blackfilter_floodfill_rect(
 // Output is a list of block coordinates to wipe.
 
 // Helper: compute sum from NPP integral image for rectangle (x0,y0) to (x1,y1)
-// NPP format: I[y,x] = sum of pixels from (0,0) to (x-1,y-1)
+// NPP format: I[y,x] = sum of pixels from (0,0) to (x-1,y-1) EXCLUSIVE
+// First row (y=0) and first column (x=0) are always zero.
 // Sum of rect (x0,y0)-(x1,y1) = I[y1+1,x1+1] - I[y0,x1+1] - I[y1+1,x0] + I[y0,x0]
+//
+// IMPORTANT: The integral image is now (img_w+1) x (img_h+1) due to padding.
+// This ensures all boundary accesses are valid for tiles within the original image.
 static __device__ __forceinline__ int64_t npp_integral_rect_sum(
     const int32_t *integral, int integral_step_i32, int img_w, int img_h,
     int x0, int y0, int x1, int y1) {
-  // Clamp coordinates
+  // Clamp coordinates to original image bounds
   if (x0 < 0) x0 = 0;
   if (y0 < 0) y0 = 0;
   if (x1 >= img_w) x1 = img_w - 1;
@@ -1392,24 +1396,18 @@ static __device__ __forceinline__ int64_t npp_integral_rect_sum(
     return 0;
   }
 
-  // Get corner values, handling boundary cases
+  // With padded integral (img_w+1 x img_h+1), all accesses are now valid:
+  // - y1+1 <= img_h (since y1 <= img_h-1), integral height = img_h+1, valid
+  // - x1+1 <= img_w (since x1 <= img_w-1), integral width = img_w+1, valid
+
   // Bottom-right: I[y1+1, x1+1]
-  int64_t br = 0;
-  if (y1 + 1 < img_h && x1 + 1 < img_w) {
-    br = integral[(y1 + 1) * integral_step_i32 + (x1 + 1)];
-  }
+  int64_t br = integral[(y1 + 1) * integral_step_i32 + (x1 + 1)];
 
   // Top-right: I[y0, x1+1]
-  int64_t tr = 0;
-  if (x1 + 1 < img_w) {
-    tr = integral[y0 * integral_step_i32 + (x1 + 1)];
-  }
+  int64_t tr = integral[y0 * integral_step_i32 + (x1 + 1)];
 
   // Bottom-left: I[y1+1, x0]
-  int64_t bl = 0;
-  if (y1 + 1 < img_h) {
-    bl = integral[(y1 + 1) * integral_step_i32 + x0];
-  }
+  int64_t bl = integral[(y1 + 1) * integral_step_i32 + x0];
 
   // Top-left: I[y0, x0]
   int64_t tl = integral[y0 * integral_step_i32 + x0];
@@ -1535,6 +1533,106 @@ extern "C" __global__ void unpaper_blurfilter_scan(
     if (idx < max_blocks) {
       out_blocks[idx].x = x0;
       out_blocks[idx].y = y0;
+    }
+  }
+}
+
+// Output structure for grayfilter tile coordinates
+typedef struct {
+  int x;
+  int y;
+} UnpaperGrayfilterTile;
+
+/**
+ * GPU kernel for grayfilter tile detection.
+ *
+ * Grayfilter identifies tiles that have:
+ * 1. No dark pixels (dark_count == 0)
+ * 2. High average lightness (inverse_lightness < gray_threshold)
+ *
+ * These tiles are wiped to white to remove light gray artifacts.
+ *
+ * Unlike blurfilter, grayfilter:
+ * - Uses step-based positioning (not block-aligned grid)
+ * - Uses two integrals (gray sum + dark pixel count)
+ * - Has no neighbor isolation check
+ *
+ * @param gray_integral   GPU integral of grayscale image (NPP format)
+ * @param dark_integral   GPU integral of dark mask (pixels <= black_threshold -> 255)
+ * @param gray_step       Bytes per row of gray integral image
+ * @param dark_step       Bytes per row of dark integral image
+ * @param img_w, img_h    Original image dimensions
+ * @param tile_w, tile_h  Tile size
+ * @param step_x, step_y  Step size for tile positions
+ * @param gray_threshold  Inverse lightness threshold (255 - avg_lightness must be < this)
+ * @param out_tiles       Output: tile coordinates to wipe
+ * @param out_count       Output: number of tiles found (atomic counter)
+ * @param max_tiles       Maximum tiles to output
+ */
+extern "C" __global__ void unpaper_grayfilter_scan(
+    const int32_t *gray_integral,  // GPU integral of grayscale image
+    const int32_t *dark_integral,  // GPU integral of dark mask
+    int gray_step,                 // Bytes per row of gray integral
+    int dark_step,                 // Bytes per row of dark integral
+    int img_w, int img_h,          // Original image dimensions
+    int tile_w, int tile_h,        // Tile size
+    int step_x, int step_y,        // Step size
+    int gray_threshold,            // Inverse lightness threshold (use int for alignment)
+    UnpaperGrayfilterTile *out_tiles, // Output: tile coordinates
+    int *out_count,                // Output: number of tiles found (atomic)
+    int max_tiles) {               // Maximum tiles to output
+  // Calculate number of tile positions in each dimension
+  // Tiles are placed at positions: 0, step_x, 2*step_x, ... while x + tile_w <= img_w
+  const int tiles_per_row = (img_w - tile_w) / step_x + 1;
+  const int tiles_per_col = (img_h - tile_h) / step_y + 1;
+
+  // Calculate which tile this thread processes
+  const int tx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int ty = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+
+  if (tx >= tiles_per_row || ty >= tiles_per_col) {
+    return;
+  }
+
+  // Calculate tile position in pixels
+  const int x0 = tx * step_x;
+  const int y0 = ty * step_y;
+  const int x1 = x0 + tile_w - 1;
+  const int y1 = y0 + tile_h - 1;
+
+  // Verify tile is within image bounds
+  if (x1 >= img_w || y1 >= img_h) {
+    return;
+  }
+
+  const int gray_step_i32 = gray_step / (int)sizeof(int32_t);
+  const int dark_step_i32 = dark_step / (int)sizeof(int32_t);
+  const int64_t tile_pixels = (int64_t)tile_w * (int64_t)tile_h;
+
+  // Count dark pixels using dark integral
+  // In the dark mask, each dark pixel contributes 255 to the sum
+  int64_t dark_sum = npp_integral_rect_sum(dark_integral, dark_step_i32, img_w,
+                                           img_h, x0, y0, x1, y1);
+  int64_t dark_count = dark_sum / 255;
+
+  // If there are any dark pixels, this tile doesn't match grayfilter criteria
+  if (dark_count != 0) {
+    return;
+  }
+
+  // No dark pixels - check average lightness
+  int64_t lightness_sum = npp_integral_rect_sum(gray_integral, gray_step_i32,
+                                                 img_w, img_h, x0, y0, x1, y1);
+  uint8_t avg_lightness = (uint8_t)(lightness_sum / tile_pixels);
+  uint8_t inverse_lightness = 255 - avg_lightness;
+
+  // Wipe if inverse_lightness is below threshold (tile is very light)
+  if (inverse_lightness < gray_threshold) {
+    // Add tile to output list atomically
+    int idx = atomicAdd(out_count, 1);
+    if (idx < max_tiles) {
+      out_tiles[idx].x = x0;
+      out_tiles[idx].y = y0;
     }
   }
 }
