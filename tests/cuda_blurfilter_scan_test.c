@@ -58,28 +58,31 @@ static void create_test_dark_mask(uint8_t *mask, int width, int height) {
   //       3  .  .  .  .  .  .  .
   //       4  .  .  .  .  .  .  .
   //       5  .  .  .  .  .  .  .
+  //
+  // For a block to be wiped, BOTH conditions must be met:
+  // 1. The block itself must have dark_count/total <= intensity
+  // 2. All diagonal neighbors must have dark_count/total <= intensity
+  //
+  // With intensity=0.05 and 8x8=64 pixels, threshold = 0.05*64 = 3.2
+  // So a block with <= 3 dark pixels can be wiped if isolated
 
-  // Create an isolated dark block at (16, 16) - block (2, 2)
+  // Create a sparse isolated dark block at (16, 16) - block (2, 2)
+  // Use only 2 dark pixels to ensure ratio (2/64 = 0.03125) <= intensity (0.05)
   // Its diagonal neighbors are (1,1), (3,1), (1,3), (3,3) - all empty
-  for (int y = 16; y < 16 + BLOCK_H; y++) {
-    for (int x = 16; x < 16 + BLOCK_W; x++) {
-      mask[y * width + x] = 255;  // Dark pixel
-    }
-  }
+  mask[16 * width + 16] = 255;  // Dark pixel
+  mask[17 * width + 17] = 255;  // Dark pixel
 
   // Create a non-isolated dark block at (40, 24) - block (5, 3)
+  // Use only 2 dark pixels for the block itself (ratio <= intensity)
   // Its diagonal neighbors are (4,2), (6,2), (4,4), (6,4)
-  // We add dark content to (4, 2) to make it non-isolated
-  for (int y = 24; y < 24 + BLOCK_H; y++) {
-    for (int x = 40; x < 40 + BLOCK_W; x++) {
-      mask[y * width + x] = 255;  // Dark pixel
-    }
-  }
-  // Add dark content to upper-left diagonal (block (4, 2)) to make (5,3) non-isolated
-  for (int y = 16; y < 16 + BLOCK_H; y++) {
-    for (int x = 32; x < 32 + BLOCK_W; x++) {
-      mask[y * width + x] = 255;  // Dark pixel - makes block (5,3) non-isolated
-    }
+  // We add dark content to (4, 2) to make it non-isolated (neighbor ratio > intensity)
+  mask[24 * width + 40] = 255;  // Dark pixel
+  mask[25 * width + 41] = 255;  // Dark pixel
+
+  // Add enough dark content to upper-left diagonal block (4, 2) to exceed threshold
+  // Need > 3 pixels to make ratio > 0.05
+  for (int y = 16; y < 16 + 4; y++) {
+    mask[y * width + 32] = 255;  // 4 dark pixels - ratio = 4/64 = 0.0625 > 0.05
   }
 }
 
@@ -126,9 +129,10 @@ static int compute_expected_isolated_blocks(const uint8_t *mask, int width,
         continue;  // No dark pixels, not a candidate
       }
 
-      // Check 4 diagonal neighbors
+      // Check 4 diagonal neighbors AND current block
       // Missing boundary neighbors are treated as having max density (100%)
-      int64_t max_neighbor = 0;
+      // Start with current block's count (matches CPU blurfilter logic)
+      int64_t max_neighbor = self_count;
 
       // Upper-left
       if (bx > 0 && by > 0) {

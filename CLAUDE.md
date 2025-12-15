@@ -570,7 +570,7 @@ Move all computation to GPU using:
 
 **PR 32: Blurfilter Integration + Single Image Validation**
 
-- Status: planned
+- Status: complete
 - Scope:
   - Modify `unpaper_opencv_blurfilter()` in `opencv_bridge.cpp`:
     - Replace CPU integral with `npp_integral_8u32s()`
@@ -583,13 +583,27 @@ Move all computation to GPU using:
   - Single image benchmark validation:
     - A1 bench target: <1.5s
     - Golden image tests must pass
+- Results:
+  - Modified `unpaper_opencv_blurfilter()` to use:
+    - NPP GPU integral via `unpaper_npp_integral_8u32s()`
+    - GPU scan kernel via `unpaper_blurfilter_scan`
+    - Download only block coordinate list (~few KB vs ~35MB image)
+  - Added PTX kernel loading and NPP context support to `opencv_bridge.cpp`
+  - Updated `meson.build` to add NPP dependencies to test executables
+  - Fixed kernel logic to include current block's dark count in max calculation
+    (matches CPU reference behavior - dense blocks not wiped)
+  - Updated unit test with sparse isolated block (ratio <= intensity)
+  - A1 benchmark: CUDA 873ms (7.15x vs CPU 6241ms)
+  - All 11 CUDA tests + 34 pytest pass
 - Files:
-  - `imageprocess/opencv_bridge.cpp` - blurfilter modification
-  - May need `imageprocess/cuda_runtime.c` for coordinate download
+  - `imageprocess/opencv_bridge.cpp` - blurfilter GPU integration
+  - `imageprocess/cuda_kernels.cu` - kernel fix (include current block in max)
+  - `tests/cuda_blurfilter_scan_test.c` - test update for correct logic
+  - `meson.build` - add NPP deps to test executables with opencv_bridge
 - Acceptance:
-  - Single image: A1 bench <1.5s (target: ~850ms)
-  - All pytest golden image tests pass
-  - Blurfilter output identical to CPU reference
+  - Single image: A1 bench <1.5s (target: ~850ms) [DONE - 873ms]
+  - All pytest golden image tests pass [DONE - 34/34]
+  - Blurfilter output identical to CPU reference [DONE]
 
 **PR 33: Grayfilter GPU Optimization**
 

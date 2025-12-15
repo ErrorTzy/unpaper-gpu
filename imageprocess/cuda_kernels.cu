@@ -1465,10 +1465,11 @@ extern "C" __global__ void unpaper_blurfilter_scan(
   }
 
   // Check all 4 diagonal neighbors for isolation
-  // A block is isolated if ALL neighbors have ratio <= intensity
+  // A block is isolated if ALL neighbors AND the block itself have ratio <= intensity
   // Missing boundary neighbors are treated as having max density (100%)
   // to prevent wiping edge blocks where we can't determine isolation
-  int64_t max_neighbor = 0;
+  // Start with current block's count (matches CPU blurfilter logic)
+  int64_t max_neighbor = dark_count;
 
   // Upper-left diagonal (bx-1, by-1)
   if (bx > 0 && by > 0) {

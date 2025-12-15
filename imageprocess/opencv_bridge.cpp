@@ -4,6 +4,8 @@
 
 #include "imageprocess/opencv_bridge.h"
 #include "imageprocess/cuda_kernels_format.h"
+#include "imageprocess/npp_wrapper.h"
+#include "imageprocess/npp_integral.h"
 
 #include <cstring>
 #include <exception>
@@ -13,6 +15,30 @@
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/core/cuda_stream_accessor.hpp>
 #include <cuda_runtime.h>
+
+// PTX kernel for GPU-accelerated blurfilter scan
+extern "C" {
+extern const char unpaper_cuda_kernels_ptx[];
+}
+
+// Kernel handles for blurfilter
+static void *g_cuda_module = nullptr;
+static void *g_blurfilter_scan_kernel = nullptr;
+
+// Output structure for blurfilter scan kernel (must match cuda_kernels.cu)
+struct BlurfilterBlock {
+  int x;
+  int y;
+};
+
+static void ensure_blurfilter_kernel_loaded() {
+  if (g_cuda_module != nullptr) {
+    return;
+  }
+  g_cuda_module = unpaper_cuda_module_load_ptx(unpaper_cuda_kernels_ptx);
+  g_blurfilter_scan_kernel =
+      unpaper_cuda_module_get_function(g_cuda_module, "unpaper_blurfilter_scan");
+}
 
 // OpenCV defines HAVE_OPENCV_* in opencv_modules.hpp if modules are present
 // (defined without a value, so use #ifdef)
@@ -470,6 +496,13 @@ bool unpaper_opencv_blurfilter(uint64_t src_device, int width, int height,
     return true; // Nothing to do
   }
 
+  // Calculate number of blocks
+  const int blocks_per_row = width / block_width;
+  const int blocks_per_col = height / block_height;
+  if (blocks_per_row == 0 || blocks_per_col == 0) {
+    return true;
+  }
+
   try {
     cv::cuda::Stream cv_stream = get_cv_stream(stream);
 
@@ -508,83 +541,117 @@ bool unpaper_opencv_blurfilter(uint64_t src_device, int width, int height,
     cv::cuda::threshold(gray, dark_mask, static_cast<double>(white_threshold),
                         255.0, cv::THRESH_BINARY_INV, cv_stream);
 
-    // Download and compute integral
-    cv::Mat dark_mask_host;
-    dark_mask.download(dark_mask_host, cv_stream);
+    // Sync before NPP integral (NPP needs data to be ready)
     cv_stream.waitForCompletion();
 
-    cv::Mat integral_img;
-    cv::integral(dark_mask_host, integral_img, CV_32S);
-
-    // Calculate number of blocks per row
-    const int blocks_per_row = width / block_width;
-    if (blocks_per_row == 0) {
-      return true;
+    // Compute integral on GPU using NPP (no CPU download!)
+    // Initialize NPP if needed
+    if (!unpaper_npp_init()) {
+      fprintf(stderr, "NPP init failed in blurfilter\n");
+      return false;
     }
 
-    const int64_t total_pixels_in_block =
-        static_cast<int64_t>(block_width) * static_cast<int64_t>(block_height);
+    // Create NPP context for stream
+    UnpaperNppContext *npp_ctx = unpaper_npp_context_create(stream);
 
-    // Allocate count arrays for 3 rows of blocks (prev, cur, next)
-    // Include boundary blocks (index 0 and blocks_per_row+1) set to max
-    std::vector<int64_t> prev_counts(blocks_per_row + 2, total_pixels_in_block);
-    std::vector<int64_t> cur_counts(blocks_per_row + 2, total_pixels_in_block);
-    std::vector<int64_t> next_counts(blocks_per_row + 2, total_pixels_in_block);
+    // Compute GPU integral directly on dark_mask
+    UnpaperNppIntegral npp_integral;
+    bool integral_ok = unpaper_npp_integral_8u32s(
+        reinterpret_cast<uint64_t>(dark_mask.data), width, height,
+        dark_mask.step, npp_ctx, &npp_integral);
 
-    std::vector<cv::Rect> blocks_to_wipe;
-
-    // Initialize cur_counts for first row
-    for (int block = 0; block < blocks_per_row; block++) {
-      int x0 = block * block_width;
-      int x1 = x0 + block_width - 1;
-      int64_t dark_sum = integral_rect_sum(integral_img, x0, 0, x1, block_height - 1);
-      cur_counts[block + 1] = dark_sum / 255;
+    if (npp_ctx != nullptr) {
+      unpaper_npp_context_destroy(npp_ctx);
     }
 
-    // Process rows
-    const int max_top = height - block_height;
-    for (int top = 0; top <= max_top; top += block_height) {
-      // Compute next row counts
-      int next_top = top + step_y;
-      if (next_top <= max_top) {
-        for (int block = 0; block < blocks_per_row; block++) {
-          int x0 = block * block_width;
-          int x1 = x0 + block_width - 1;
-          int y0 = next_top;
-          int y1 = y0 + block_height - 1;
-          int64_t dark_sum = integral_rect_sum(integral_img, x0, y0, x1, y1);
-          next_counts[block + 1] = dark_sum / 255;
-        }
-      } else {
-        std::fill(next_counts.begin(), next_counts.end(), total_pixels_in_block);
-      }
-
-      // Check each block in current row
-      for (int block = 0; block < blocks_per_row; block++) {
-        int64_t max_neighbor = std::max({
-            prev_counts[block], prev_counts[block + 2],
-            next_counts[block], next_counts[block + 2],
-            cur_counts[block]  // Left neighbor contributes to isolation check
-        });
-
-        // Block is isolated if max neighbor ratio is below intensity
-        float ratio = static_cast<float>(max_neighbor) /
-                      static_cast<float>(total_pixels_in_block);
-        if (ratio <= intensity) {
-          int x = block * block_width;
-          blocks_to_wipe.push_back(cv::Rect(x, top, block_width, block_height));
-          cur_counts[block + 1] = total_pixels_in_block; // Mark as wiped
-        }
-      }
-
-      // Rotate arrays
-      std::swap(prev_counts, cur_counts);
-      std::swap(cur_counts, next_counts);
+    if (!integral_ok) {
+      fprintf(stderr, "NPP integral failed in blurfilter\n");
+      return false;
     }
 
-    // Wipe collected blocks on GPU
+    // Load GPU scan kernel
+    ensure_blurfilter_kernel_loaded();
+    if (g_blurfilter_scan_kernel == nullptr) {
+      fprintf(stderr, "Failed to load blurfilter scan kernel\n");
+      unpaper_npp_integral_free(npp_integral.device_ptr);
+      return false;
+    }
+
+    // Allocate GPU output buffers for kernel
+    int max_blocks = blocks_per_row * blocks_per_col;
+    uint64_t out_blocks_device =
+        unpaper_cuda_malloc(static_cast<size_t>(max_blocks) * sizeof(BlurfilterBlock));
+    uint64_t out_count_device = unpaper_cuda_malloc(sizeof(int));
+
+    if (out_blocks_device == 0 || out_count_device == 0) {
+      fprintf(stderr, "GPU malloc failed for blurfilter output\n");
+      unpaper_npp_integral_free(npp_integral.device_ptr);
+      if (out_blocks_device != 0) unpaper_cuda_free(out_blocks_device);
+      if (out_count_device != 0) unpaper_cuda_free(out_count_device);
+      return false;
+    }
+
+    // Initialize count to 0
+    int zero = 0;
+    unpaper_cuda_memcpy_h2d(out_count_device, &zero, sizeof(int));
+
+    // Launch GPU scan kernel
+    int integral_step = static_cast<int>(npp_integral.step_bytes);
+    void *kernel_args[] = {
+        &npp_integral.device_ptr,
+        &integral_step,
+        &width,
+        &height,
+        &block_width,
+        &block_height,
+        &intensity,
+        &out_blocks_device,
+        &out_count_device,
+        &max_blocks,
+    };
+
+    // Grid/block dimensions: one thread per potential block position
+    const int threads_per_block = 16;
+    uint32_t grid_x = static_cast<uint32_t>(
+        (blocks_per_row + threads_per_block - 1) / threads_per_block);
+    uint32_t grid_y = static_cast<uint32_t>(
+        (blocks_per_col + threads_per_block - 1) / threads_per_block);
+
+    unpaper_cuda_launch_kernel_on_stream(
+        stream, g_blurfilter_scan_kernel, grid_x, grid_y, 1,
+        threads_per_block, threads_per_block, 1, kernel_args);
+
+    // Sync stream to ensure kernel is complete
+    if (stream != nullptr) {
+      unpaper_cuda_stream_synchronize_on(stream);
+    } else {
+      unpaper_cuda_stream_synchronize();
+    }
+
+    // Download only the count and block coordinates (small data!)
+    int block_count = 0;
+    unpaper_cuda_memcpy_d2h(&block_count, out_count_device, sizeof(int));
+
+    // Free integral buffer (no longer needed)
+    unpaper_npp_integral_free(npp_integral.device_ptr);
+
+    // Download block coordinates if any found
+    std::vector<BlurfilterBlock> blocks_to_wipe;
+    if (block_count > 0) {
+      blocks_to_wipe.resize(static_cast<size_t>(block_count));
+      unpaper_cuda_memcpy_d2h(
+          blocks_to_wipe.data(), out_blocks_device,
+          static_cast<size_t>(block_count) * sizeof(BlurfilterBlock));
+    }
+
+    // Free GPU output buffers
+    unpaper_cuda_free(out_blocks_device);
+    unpaper_cuda_free(out_count_device);
+
+    // Wipe collected blocks on GPU using OpenCV
     for (const auto &block : blocks_to_wipe) {
-      cv::cuda::GpuMat roi = src(block);
+      cv::cuda::GpuMat roi =
+          src(cv::Rect(block.x, block.y, block_width, block_height));
       if (cv_type == CV_8UC1) {
         roi.setTo(cv::Scalar(255), cv_stream);
       } else if (cv_type == CV_8UC2) {
