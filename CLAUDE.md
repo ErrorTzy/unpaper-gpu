@@ -258,11 +258,21 @@ Files use SPDX headers. Add SPDX headers to new files and validate with `reuse l
 
 **PR 23: GPU batch - decode/upload overlap (producer-consumer)**
 
-- Status: not started
+- Status: complete
 - Scope:
   - Producer thread: decode images (FFmpeg) -> queue decoded frames
   - Consumer (GPU): upload -> process -> download
   - Use pinned host memory for async H2D; double/triple buffering
+- Results:
+  - Decode queue (`lib/decode_queue.c`, `lib/decode_queue.h`)
+  - Producer thread runs ahead, decoding images before workers need them
+  - Bounded queue depth (2x parallelism) to control memory usage
+  - Pinned memory support for CUDA builds (async H2D transfers)
+  - Lock-free fast path for slot acquisition with atomic operations
+  - Blocking wait with condition variables when queue full/empty
+  - Integration with batch worker via `batch_worker_set_decode_queue()`
+  - Statistics: images decoded/consumed, producer/consumer waits, pinned allocations
+  - All CPU (24 tests) and CUDA (9 tests + 34 pytest) pass
 - Acceptance:
   - Decode latency hidden behind GPU processing
   - Memory bounded by queue size x image size

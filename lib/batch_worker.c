@@ -3,9 +3,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "lib/batch_worker.h"
+#include "lib/decode_queue.h"
 #include "lib/threadpool.h"
 #include "sheet_process.h"
 
+#include <libavutil/frame.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,6 +24,7 @@ void batch_worker_init(BatchWorkerContext *ctx, const Options *options,
   ctx->perf_enabled = options->perf;
   ctx->config = NULL;
   ctx->use_stream_pool = false;
+  ctx->decode_queue = NULL;
   pthread_mutex_init(&ctx->progress_mutex, NULL);
 }
 
@@ -38,6 +41,11 @@ void batch_worker_enable_stream_pool(BatchWorkerContext *ctx, bool enable) {
   ctx->use_stream_pool = enable;
 }
 
+void batch_worker_set_decode_queue(BatchWorkerContext *ctx,
+                                   DecodeQueue *decode_queue) {
+  ctx->decode_queue = decode_queue;
+}
+
 bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
   if (!ctx->config) {
     fprintf(stderr, "Batch worker config not set\n");
@@ -52,7 +60,35 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
   SheetProcessState state;
   sheet_process_state_init(&state, ctx->config, job);
 
+  // Get pre-decoded images from queue if available
+  DecodedImage *decoded_images[BATCH_MAX_FILES_PER_SHEET] = {NULL};
+  if (ctx->decode_queue != NULL) {
+    for (int i = 0; i < job->input_count; i++) {
+      if (job->input_files[i] != NULL) {
+        DecodedImage *decoded = decode_queue_get(ctx->decode_queue,
+                                                 (int)job_index, i);
+        if (decoded != NULL && decoded->valid && decoded->frame != NULL) {
+          decoded_images[i] = decoded;
+          // Transfer frame to state (clone to avoid double-free)
+          AVFrame *frame_copy = av_frame_clone(decoded->frame);
+          if (frame_copy) {
+            sheet_process_state_set_decoded(&state, frame_copy, i);
+          }
+        }
+      }
+    }
+  }
+
   bool success = process_sheet(&state, ctx->config);
+
+  // Release decoded images back to queue
+  if (ctx->decode_queue != NULL) {
+    for (int i = 0; i < BATCH_MAX_FILES_PER_SHEET; i++) {
+      if (decoded_images[i] != NULL) {
+        decode_queue_release(ctx->decode_queue, decoded_images[i]);
+      }
+    }
+  }
 
   sheet_process_state_cleanup(&state);
 

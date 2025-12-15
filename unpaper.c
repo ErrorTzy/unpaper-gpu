@@ -31,6 +31,7 @@
 #include "imageprocess/pixel.h"
 #include "lib/batch.h"
 #include "lib/batch_worker.h"
+#include "lib/decode_queue.h"
 #include "lib/options.h"
 #include "lib/perf.h"
 #include "lib/physical.h"
@@ -1241,9 +1242,32 @@ int main(int argc, char *argv[]) {
       sheet_process_config_init(&config, &options, preMasks, preMaskCount, points,
                                 pointCount, middleWipe, blackfilterExclude, 0);
 
+      // Create decode queue for pre-decoded image pipeline
+      // Queue depth = 2x parallelism for good overlap (decode ahead while processing)
+      const size_t decode_queue_depth = (size_t)batch_queue.parallelism * 2;
+      bool use_pinned_memory = false;
+#ifdef UNPAPER_WITH_CUDA
+      use_pinned_memory = (options.device == UNPAPER_DEVICE_CUDA);
+#endif
+      DecodeQueue *decode_queue = decode_queue_create(decode_queue_depth, use_pinned_memory);
+      if (decode_queue) {
+        verboseLog(VERBOSE_NORMAL, "Decode queue: %zu slots%s\n",
+                   decode_queue_depth, use_pinned_memory ? " (pinned memory)" : "");
+        // Start producer thread
+        if (!decode_queue_start_producer(decode_queue, &batch_queue, &options)) {
+          verboseLog(VERBOSE_NORMAL, "Failed to start decode producer, falling back to inline decode\n");
+          decode_queue_destroy(decode_queue);
+          decode_queue = NULL;
+        }
+      }
+
       // Create thread pool
       ThreadPool *pool = threadpool_create(batch_queue.parallelism);
       if (!pool) {
+        if (decode_queue) {
+          decode_queue_stop_producer(decode_queue);
+          decode_queue_destroy(decode_queue);
+        }
         errOutput("Failed to create thread pool");
       }
 
@@ -1254,6 +1278,7 @@ int main(int argc, char *argv[]) {
       BatchWorkerContext worker_ctx;
       batch_worker_init(&worker_ctx, &options, &batch_queue);
       batch_worker_set_config(&worker_ctx, &config);
+      batch_worker_set_decode_queue(&worker_ctx, decode_queue);
 #ifdef UNPAPER_WITH_CUDA
       // Enable stream pooling if the stream pool was initialized
       batch_worker_enable_stream_pool(&worker_ctx, streampool_active);
@@ -1265,6 +1290,15 @@ int main(int argc, char *argv[]) {
       // Cleanup
       batch_worker_cleanup(&worker_ctx);
       threadpool_destroy(pool);
+
+      // Cleanup decode queue
+      if (decode_queue) {
+        decode_queue_stop_producer(decode_queue);
+        if (options.perf) {
+          decode_queue_print_stats(decode_queue);
+        }
+        decode_queue_destroy(decode_queue);
+      }
 
 #ifdef UNPAPER_WITH_CUDA
       // Print GPU pool statistics and cleanup

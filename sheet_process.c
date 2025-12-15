@@ -51,6 +51,12 @@ void sheet_process_state_init(SheetProcessState *state,
     state->output_files[i] = job->output_files[i];
   }
 
+  // Initialize pre-decoded frames
+  for (int i = 0; i < BATCH_MAX_FILES_PER_SHEET; i++) {
+    state->decoded_frames[i] = NULL;
+  }
+  state->use_decoded_frames = false;
+
   // Copy initial points
   state->point_count = config->initial_point_count;
   for (size_t i = 0; i < config->initial_point_count; i++) {
@@ -74,9 +80,26 @@ void sheet_process_state_init(SheetProcessState *state,
                      config->options->device == UNPAPER_DEVICE_CUDA);
 }
 
+void sheet_process_state_set_decoded(SheetProcessState *state,
+                                     AVFrame *frame, int input_index) {
+  if (!state || input_index < 0 || input_index >= BATCH_MAX_FILES_PER_SHEET) {
+    return;
+  }
+  state->decoded_frames[input_index] = frame;
+  state->use_decoded_frames = true;
+}
+
 void sheet_process_state_cleanup(SheetProcessState *state) {
   free_image(&state->sheet);
   free_image(&state->page);
+
+  // Free any remaining pre-decoded frames
+  for (int i = 0; i < BATCH_MAX_FILES_PER_SHEET; i++) {
+    if (state->decoded_frames[i] != NULL) {
+      av_frame_free(&state->decoded_frames[i]);
+      state->decoded_frames[i] = NULL;
+    }
+  }
 }
 
 // coerce_size is already declared in primitives.h
@@ -94,9 +117,48 @@ bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
   enum AVPixelFormat output_pixel_format = options->output_pixel_format;
 
   for (int j = 0; j < state->input_count; j++) {
-    if (state->input_files[j] != NULL) {
-      loadImage(state->input_files[j], &state->page, options->sheet_background,
-                options->abs_black_threshold);
+    if (state->input_files[j] != NULL ||
+        (state->use_decoded_frames && state->decoded_frames[j] != NULL)) {
+      // Use pre-decoded frame if available, otherwise decode from file
+      if (state->use_decoded_frames && state->decoded_frames[j] != NULL) {
+        // Create image from pre-decoded frame
+        AVFrame *decoded = state->decoded_frames[j];
+        Rectangle area = rectangle_from_size(
+            POINT_ORIGIN,
+            (RectangleSize){.width = decoded->width, .height = decoded->height});
+
+        switch (decoded->format) {
+        case AV_PIX_FMT_Y400A:
+        case AV_PIX_FMT_GRAY8:
+        case AV_PIX_FMT_RGB24:
+        case AV_PIX_FMT_MONOBLACK:
+        case AV_PIX_FMT_MONOWHITE:
+          state->page = create_image(size_of_rectangle(area), decoded->format, false,
+                                     options->sheet_background, options->abs_black_threshold);
+          av_frame_free(&state->page.frame);
+          state->page.frame = av_frame_clone(decoded);
+          break;
+        case AV_PIX_FMT_PAL8: {
+          state->page = create_image(size_of_rectangle(area), AV_PIX_FMT_RGB24, false,
+                                     options->sheet_background, options->abs_black_threshold);
+          const uint32_t *palette = (const uint32_t *)decoded->data[1];
+          scan_rectangle(area) {
+            const uint8_t palette_index = decoded->data[0][decoded->linesize[0] * y + x];
+            set_pixel(state->page, (Point){x, y},
+                      pixel_from_value(palette[palette_index]));
+          }
+        } break;
+        default:
+          state->page = EMPTY_IMAGE;
+          break;
+        }
+        // Clear the decoded frame pointer (ownership moved)
+        state->decoded_frames[j] = NULL;
+      } else {
+        // Load from file
+        loadImage(state->input_files[j], &state->page, options->sheet_background,
+                  options->abs_black_threshold);
+      }
 
       if (output_pixel_format == AV_PIX_FMT_NONE && state->page.frame != NULL) {
         output_pixel_format = state->page.frame->format;

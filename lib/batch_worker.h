@@ -14,6 +14,7 @@
 // Forward declarations
 struct ThreadPool;
 struct UnpaperCudaStream;
+struct DecodeQueue;
 
 // Batch worker context - shared state for all workers
 typedef struct {
@@ -23,6 +24,7 @@ typedef struct {
   pthread_mutex_t progress_mutex;   // Protects progress updates
   bool perf_enabled;                // Enable per-job performance output
   bool use_stream_pool;             // Use CUDA stream pool for GPU batch processing
+  struct DecodeQueue *decode_queue; // Pre-decode queue for async decode (optional)
 } BatchWorkerContext;
 
 // Per-job context passed to worker function
@@ -44,6 +46,10 @@ void batch_worker_set_config(BatchWorkerContext *ctx,
 
 // Enable CUDA stream pooling for GPU batch processing
 void batch_worker_enable_stream_pool(BatchWorkerContext *ctx, bool enable);
+
+// Set decode queue for pre-decoded image pipeline
+void batch_worker_set_decode_queue(BatchWorkerContext *ctx,
+                                   struct DecodeQueue *decode_queue);
 
 // Process all jobs in the queue using the thread pool
 // Returns number of failed jobs (0 = all succeeded)
