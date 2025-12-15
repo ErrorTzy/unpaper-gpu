@@ -107,6 +107,7 @@ if have_cuda
         'imageprocess/cuda_runtime.c',
         'imageprocess/npp_wrapper.c',
         'imageprocess/npp_integral.c',
+        'imageprocess/nvjpeg_decode.c',
         'imageprocess/opencv_bridge.cpp',
         'imageprocess/opencv_ops.cpp',
     ]
@@ -131,7 +132,21 @@ if have_cuda
         '/usr/local/cuda/lib64',
         '/usr/lib/x86_64-linux-gnu'
     ], required : true)
-    unpaper_deps += [nppc_dep, nppist_dep]
+    nppicc_dep = cc.find_library('nppicc', dirs : [
+        '/usr/local/cuda-13.0/lib64',
+        '/usr/local/cuda/lib64',
+        '/usr/lib/x86_64-linux-gnu'
+    ], required : true)
+    unpaper_deps += [nppc_dep, nppist_dep, nppicc_dep]
+
+    # Link nvJPEG library for GPU JPEG decode/encode
+    # nvJPEG is part of CUDA Toolkit, no separate install needed
+    nvjpeg_dep = cc.find_library('nvjpeg', dirs : [
+        '/usr/local/cuda-13.0/lib64',
+        '/usr/local/cuda/lib64',
+        '/usr/lib/x86_64-linux-gnu'
+    ], required : true)
+    unpaper_deps += [nvjpeg_dep]
 endif
 
 if have_cuda
@@ -476,4 +491,20 @@ if have_cuda
     )
 
     test('cuda grayfilter scan', cuda_grayfilter_scan_test)
+
+    nvjpeg_decode_test = executable(
+        'nvjpeg_decode_test',
+        [
+            'tests/nvjpeg_decode_test.c',
+            'imageprocess/cuda_runtime.c',
+            'imageprocess/nvjpeg_decode.c',
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('nvjpeg decode', nvjpeg_decode_test,
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
 endif
