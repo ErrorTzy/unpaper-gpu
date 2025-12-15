@@ -4,6 +4,7 @@
 
 #include "lib/batch_worker.h"
 #include "lib/decode_queue.h"
+#include "lib/gpu_monitor.h"
 #include "lib/threadpool.h"
 #include "sheet_process.h"
 
@@ -102,6 +103,9 @@ static void batch_worker_fn(void *arg, int thread_id) {
 
 #ifdef UNPAPER_WITH_CUDA
   UnpaperCudaStream *stream = NULL;
+  void *ev_start = NULL;
+  void *ev_stop = NULL;
+  size_t gpu_job_id = 0;
 
   // Acquire a stream from the pool for this job
   if (ctx->use_stream_pool && cuda_stream_pool_global_active()) {
@@ -109,6 +113,14 @@ static void batch_worker_fn(void *arg, int thread_id) {
     if (stream != NULL) {
       // Set this stream as current for all CUDA operations in this job
       unpaper_cuda_set_current_stream(stream);
+
+      // Record GPU job start for occupancy monitoring
+      if (gpu_monitor_global_active()) {
+        gpu_job_id = gpu_monitor_global_job_start();
+
+        // Start GPU timing events for this job
+        unpaper_cuda_event_pair_start_on(stream, &ev_start, &ev_stop);
+      }
     }
   }
 #endif
@@ -119,6 +131,18 @@ static void batch_worker_fn(void *arg, int thread_id) {
 #ifdef UNPAPER_WITH_CUDA
   // Release the stream back to the pool
   if (stream != NULL) {
+    double gpu_time_ms = 0.0;
+
+    // Stop GPU timing and get elapsed time
+    if (ev_start != NULL && ev_stop != NULL) {
+      gpu_time_ms = unpaper_cuda_event_pair_stop_ms_on(stream, &ev_start, &ev_stop);
+    }
+
+    // Record GPU job end with timing
+    if (gpu_monitor_global_active() && gpu_job_id > 0) {
+      gpu_monitor_global_job_end(gpu_job_id, gpu_time_ms);
+    }
+
     // Synchronize and release - the pool will sync internally
     cuda_stream_pool_global_release(stream);
     // Reset to default stream

@@ -32,6 +32,7 @@
 #include "lib/batch.h"
 #include "lib/batch_worker.h"
 #include "lib/decode_queue.h"
+#include "lib/gpu_monitor.h"
 #include "lib/options.h"
 #include "lib/perf.h"
 #include "lib/physical.h"
@@ -1234,6 +1235,12 @@ int main(int argc, char *argv[]) {
           verboseLog(VERBOSE_NORMAL,
                      "GPU stream pool initialization failed, using default stream\n");
         }
+
+        // Initialize GPU monitor for concurrent job tracking and occupancy stats
+        if (gpu_monitor_global_init()) {
+          verboseLog(VERBOSE_NORMAL, "GPU occupancy monitoring enabled\n");
+          gpu_monitor_global_batch_start();
+        }
       }
 #endif
 
@@ -1303,6 +1310,11 @@ int main(int argc, char *argv[]) {
 #ifdef UNPAPER_WITH_CUDA
       // Print GPU pool statistics and cleanup
       if (mempool_active || streampool_active) {
+        // Mark end of batch for GPU monitor
+        if (gpu_monitor_global_active()) {
+          gpu_monitor_global_batch_end();
+        }
+
         if (options.perf) {
           if (mempool_active) {
             cuda_mempool_global_print_stats();
@@ -1310,6 +1322,14 @@ int main(int argc, char *argv[]) {
           if (streampool_active) {
             cuda_stream_pool_global_print_stats();
           }
+          // Print GPU occupancy statistics
+          if (gpu_monitor_global_active()) {
+            gpu_monitor_global_print_stats();
+          }
+        }
+        // Cleanup in reverse order of initialization
+        if (gpu_monitor_global_active()) {
+          gpu_monitor_global_cleanup();
         }
         if (streampool_active) {
           cuda_stream_pool_global_cleanup();

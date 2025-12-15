@@ -279,11 +279,21 @@ Files use SPDX headers. Add SPDX headers to new files and validate with `reuse l
 
 **PR 24: GPU batch - concurrent multi-image GPU processing**
 
-- Status: not started
+- Status: complete
 - Scope:
   - Process multiple images concurrently using different streams
   - Work scheduling to balance load across streams
   - GPU occupancy monitoring
+- Results:
+  - GPU monitor module (`lib/gpu_monitor.c`, `lib/gpu_monitor.h`)
+  - Concurrent job tracking with atomic counters for lock-free updates
+  - Per-job GPU timing via CUDA events (start/stop pairs)
+  - Memory usage monitoring via `cudaMemGetInfo()`
+  - Statistics: total/peak/average concurrent jobs, GPU time (total/avg/min/max)
+  - Peak concurrent jobs matches stream pool size (4 streams -> 4 concurrent)
+  - Integration with batch worker via global GPU monitor
+  - Batch start/end markers for accurate memory delta tracking
+  - All CPU (24 tests) and CUDA (9 tests + 34 pytest) pass
 - Acceptance:
   - GPU utilization increases during batch processing
   - NVIDIA Nsight shows concurrent kernel execution
