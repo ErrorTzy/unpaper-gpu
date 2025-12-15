@@ -24,9 +24,12 @@ typedef struct {
   int linesize;
   bool cpu_dirty;
   bool cuda_dirty;
+  bool from_external;  // True if GPU memory was allocated externally (e.g., nvJPEG)
 } ImageCudaState;
 
 #if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+#include <cuda_runtime_api.h>  // for cudaFree
+
 static void image_cuda_state_free(void *opaque, uint8_t *data) {
   (void)opaque;
   if (data == NULL) {
@@ -34,8 +37,13 @@ static void image_cuda_state_free(void *opaque, uint8_t *data) {
   }
   ImageCudaState *st = (ImageCudaState *)data;
   if (st->dptr != 0) {
-    // Use pool release (falls back to cudaFree if no pool active)
-    cuda_mempool_global_release(st->dptr);
+    if (st->from_external) {
+      // External memory (e.g., nvJPEG) - use direct cudaFree
+      cudaFree((void *)(uintptr_t)st->dptr);
+    } else {
+      // Pool-allocated memory - use pool release (falls back to cudaFree if no pool active)
+      cuda_mempool_global_release(st->dptr);
+    }
     st->dptr = 0;
   }
   av_free(st);
@@ -74,6 +82,7 @@ static ImageCudaState *image_cuda_state_get(Image *image, bool create) {
   st->linesize = 0;
   st->cpu_dirty = true;
   st->cuda_dirty = false;
+  st->from_external = false;
   return st;
 }
 #endif
@@ -171,7 +180,13 @@ void image_ensure_cuda(Image *image) {
   }
 
   if (st->cpu_dirty) {
-    unpaper_cuda_memcpy_h2d(st->dptr, image->frame->data[0], bytes);
+    // Use async copy on current stream to avoid blocking other workers
+    // This is critical for stream parallelism - synchronous cudaMemcpy would
+    // serialize all streams because it operates on the default stream!
+    UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+    unpaper_cuda_memcpy_h2d_async(stream, st->dptr, image->frame->data[0], bytes);
+    // Sync only this stream to ensure copy is complete before processing
+    unpaper_cuda_stream_synchronize_on(stream);
     st->cpu_dirty = false;
     st->cuda_dirty = false;
   }
@@ -264,11 +279,167 @@ void image_ensure_cpu(Image *image) {
       errOutput("%s", unpaper_cuda_init_status_string(init_status));
     }
 
-    unpaper_cuda_memcpy_d2h(image->frame->data[0], st->dptr, bytes);
+    // Use async copy on current stream to avoid blocking other workers
+    // This is critical for stream parallelism - blocking cudaMemcpy would
+    // serialize all streams!
+    UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+    unpaper_cuda_memcpy_d2h_async(stream, image->frame->data[0], st->dptr, bytes);
+    // Sync only this stream to ensure copy is complete
+    unpaper_cuda_stream_synchronize_on(stream);
     st->cuda_dirty = false;
     st->cpu_dirty = false;
   }
 #else
   (void)image;
+#endif
+}
+
+Image create_image_from_gpu(void *gpu_ptr, size_t pitch, int width, int height,
+                            int pixel_format, Pixel background,
+                            uint8_t abs_black_threshold) {
+  Image result = EMPTY_IMAGE;
+
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+  if (gpu_ptr == NULL || width <= 0 || height <= 0) {
+    return result;
+  }
+
+  // Validate pixel format
+  switch (pixel_format) {
+  case AV_PIX_FMT_GRAY8:
+  case AV_PIX_FMT_RGB24:
+    break;
+  default:
+    errOutput("create_image_from_gpu: unsupported pixel format %d", pixel_format);
+    return result;
+  }
+
+  // Create AVFrame for metadata and CPU buffer
+  AVFrame *frame = av_frame_alloc();
+  if (frame == NULL) {
+    return result;
+  }
+
+  frame->width = width;
+  frame->height = height;
+  frame->format = pixel_format;
+
+  // Allocate CPU buffer to match the GPU buffer layout
+  // CRITICAL: The CPU buffer linesize MUST match the GPU pitch for correct
+  // data transfer in image_ensure_cpu. av_frame_get_buffer uses its own
+  // alignment which may not match nvJPEG's pitch.
+
+  // Manually allocate the data buffer with the exact size we need
+  size_t buffer_size = pitch * (size_t)height;
+  uint8_t *buffer = av_malloc(buffer_size);
+  if (buffer == NULL) {
+    av_frame_free(&frame);
+    return result;
+  }
+
+  // Set up the frame data to use our buffer
+  frame->data[0] = buffer;
+  frame->linesize[0] = (int)pitch;
+
+  // Create a buffer reference so AVFrame will free the memory
+  frame->buf[0] = av_buffer_create(buffer, buffer_size, NULL, NULL, 0);
+  if (frame->buf[0] == NULL) {
+    av_free(buffer);
+    av_frame_free(&frame);
+    return result;
+  }
+
+  // Create CUDA state and attach GPU pointer
+  ImageCudaState *st = av_mallocz(sizeof(*st));
+  if (st == NULL) {
+    av_frame_free(&frame);
+    errOutput("create_image_from_gpu: unable to allocate CUDA state");
+    return result;
+  }
+
+  frame->opaque_ref = av_buffer_create((uint8_t *)st, sizeof(*st),
+                                        image_cuda_state_free, NULL, 0);
+  if (frame->opaque_ref == NULL) {
+    av_free(st);
+    av_frame_free(&frame);
+    errOutput("create_image_from_gpu: unable to create CUDA state buffer");
+    return result;
+  }
+
+  // Set GPU state - transfer ownership of gpu_ptr
+  st->dptr = (uint64_t)(uintptr_t)gpu_ptr;
+  st->bytes = pitch * (size_t)height;
+  st->format = pixel_format;
+  st->width = width;
+  st->height = height;
+  st->linesize = (int)pitch;
+  // GPU has valid data, CPU buffer is uninitialized
+  // cuda_dirty=true means GPU has new data that needs download to CPU
+  // cpu_dirty=false means CPU data doesn't need upload to GPU
+  st->cpu_dirty = false;
+  st->cuda_dirty = true;  // GPU has valid data that needs to be downloaded when CPU is needed
+  st->from_external = true;  // Mark as external memory (not from pool)
+
+  result.frame = frame;
+  result.background = background;
+  result.abs_black_threshold = abs_black_threshold;
+
+#else
+  (void)gpu_ptr;
+  (void)pitch;
+  (void)width;
+  (void)height;
+  (void)pixel_format;
+  (void)background;
+  (void)abs_black_threshold;
+  errOutput("create_image_from_gpu: CUDA support not available");
+#endif
+
+  return result;
+}
+
+bool image_is_gpu_resident(Image *image) {
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+  if (image == NULL || image->frame == NULL) {
+    return false;
+  }
+
+  ImageCudaState *st = image_cuda_state_get(image, false);
+  if (st == NULL) {
+    return false;
+  }
+
+  // GPU is resident if we have GPU memory and it's not marked dirty
+  // (meaning GPU is current, not CPU)
+  return (st->dptr != 0) && !st->cuda_dirty;
+#else
+  (void)image;
+  return false;
+#endif
+}
+
+void image_set_gpu_resident(Image *image, bool resident) {
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+  if (image == NULL || image->frame == NULL) {
+    return;
+  }
+
+  ImageCudaState *st = image_cuda_state_get(image, resident);
+  if (st == NULL) {
+    return;
+  }
+
+  if (resident) {
+    // Mark GPU as current - image_ensure_cuda will skip upload
+    st->cuda_dirty = false;
+    st->cpu_dirty = false;  // CPU might be stale but that's okay
+  } else {
+    // Mark CPU as current - next image_ensure_cuda will upload
+    st->cpu_dirty = true;
+    st->cuda_dirty = false;
+  }
+#else
+  (void)image;
+  (void)resident;
 #endif
 }

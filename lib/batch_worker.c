@@ -6,6 +6,7 @@
 #include "lib/decode_queue.h"
 #include "lib/encode_queue.h"
 #include "lib/gpu_monitor.h"
+#include "lib/logging.h"
 #include "lib/threadpool.h"
 #include "sheet_process.h"
 
@@ -17,6 +18,7 @@
 #ifdef UNPAPER_WITH_CUDA
 #include "imageprocess/cuda_runtime.h"
 #include "imageprocess/cuda_stream_pool.h"
+#include "imageprocess/image.h"
 #endif
 
 void batch_worker_init(BatchWorkerContext *ctx, const Options *options,
@@ -80,12 +82,36 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
       if (job->input_files[i] != NULL) {
         DecodedImage *decoded = decode_queue_get(ctx->decode_queue,
                                                  (int)job_index, i);
-        if (decoded != NULL && decoded->valid && decoded->frame != NULL) {
+        if (decoded != NULL && decoded->valid) {
           decoded_images[i] = decoded;
-          // Transfer frame to state (clone to avoid double-free)
-          AVFrame *frame_copy = av_frame_clone(decoded->frame);
-          if (frame_copy) {
-            sheet_process_state_set_decoded(&state, frame_copy, i);
+
+#ifdef UNPAPER_WITH_CUDA
+          // Check if image was decoded directly to GPU
+          if (decoded->on_gpu && decoded->gpu_ptr != NULL) {
+            // Create Image from GPU memory (ownership transfers to Image)
+            Image gpu_image = create_image_from_gpu(
+                decoded->gpu_ptr,
+                decoded->gpu_pitch,
+                decoded->gpu_width,
+                decoded->gpu_height,
+                decoded->gpu_format,
+                ctx->options->sheet_background,
+                ctx->options->abs_black_threshold);
+
+            if (gpu_image.frame != NULL) {
+              // Transfer GPU pointer ownership - don't free in decode_queue_release
+              decoded->gpu_ptr = NULL;
+              decoded->on_gpu = false;
+              sheet_process_state_set_gpu_decoded_image(&state, gpu_image, i);
+            }
+          } else
+#endif
+          if (decoded->frame != NULL) {
+            // CPU-decoded frame - clone and transfer
+            AVFrame *frame_copy = av_frame_clone(decoded->frame);
+            if (frame_copy) {
+              sheet_process_state_set_decoded(&state, frame_copy, i);
+            }
           }
         }
       }

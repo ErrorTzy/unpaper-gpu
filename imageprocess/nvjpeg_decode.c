@@ -597,6 +597,16 @@ bool nvjpeg_decode_to_gpu(const uint8_t *jpeg_data, size_t jpeg_size,
     return false;
   }
 
+  // Synchronize to ensure decode is complete before another thread uses the data
+  // This is necessary since the producer thread and worker threads are different
+  cudaError_t sync_err = cudaStreamSynchronize(cuda_stream);
+  if (sync_err != cudaSuccess) {
+    verboseLog(VERBOSE_DEBUG, "nvjpeg: stream sync failed\n");
+    cudaFreeAsync(output_ptr, cuda_stream);
+    atomic_fetch_add(&g_nvjpeg_ctx.fallback_decodes, 1);
+    return false;
+  }
+
   // Fill output structure
   out->gpu_ptr = output_ptr;
   out->pitch = pitch;

@@ -58,6 +58,12 @@ void sheet_process_state_init(SheetProcessState *state,
   }
   state->use_decoded_frames = false;
 
+  // Initialize GPU-decoded images
+  for (int i = 0; i < BATCH_MAX_FILES_PER_SHEET; i++) {
+    state->gpu_decoded_images[i] = EMPTY_IMAGE;
+  }
+  state->use_gpu_decoded_images = false;
+
   // Copy initial points
   state->point_count = config->initial_point_count;
   for (size_t i = 0; i < config->initial_point_count; i++) {
@@ -94,6 +100,15 @@ void sheet_process_state_set_decoded(SheetProcessState *state,
   state->use_decoded_frames = true;
 }
 
+void sheet_process_state_set_gpu_decoded_image(SheetProcessState *state,
+                                                Image image, int input_index) {
+  if (!state || input_index < 0 || input_index >= BATCH_MAX_FILES_PER_SHEET) {
+    return;
+  }
+  state->gpu_decoded_images[input_index] = image;
+  state->use_gpu_decoded_images = true;
+}
+
 void sheet_process_state_set_encode_queue(SheetProcessState *state,
                                           struct EncodeQueue *encode_queue,
                                           int job_index) {
@@ -115,6 +130,13 @@ void sheet_process_state_cleanup(SheetProcessState *state) {
       state->decoded_frames[i] = NULL;
     }
   }
+
+  // Free any remaining GPU-decoded images
+  for (int i = 0; i < BATCH_MAX_FILES_PER_SHEET; i++) {
+    if (state->gpu_decoded_images[i].frame != NULL) {
+      free_image(&state->gpu_decoded_images[i]);
+    }
+  }
 }
 
 // coerce_size is already declared in primitives.h
@@ -133,9 +155,15 @@ bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
 
   for (int j = 0; j < state->input_count; j++) {
     if (state->input_files[j] != NULL ||
-        (state->use_decoded_frames && state->decoded_frames[j] != NULL)) {
-      // Use pre-decoded frame if available, otherwise decode from file
-      if (state->use_decoded_frames && state->decoded_frames[j] != NULL) {
+        (state->use_decoded_frames && state->decoded_frames[j] != NULL) ||
+        (state->use_gpu_decoded_images && state->gpu_decoded_images[j].frame != NULL)) {
+
+      // Priority: GPU-decoded images > CPU-decoded frames > file load
+      if (state->use_gpu_decoded_images && state->gpu_decoded_images[j].frame != NULL) {
+        // Use GPU-decoded image directly (already GPU-resident)
+        state->page = state->gpu_decoded_images[j];
+        state->gpu_decoded_images[j] = EMPTY_IMAGE;  // Transfer ownership
+      } else if (state->use_decoded_frames && state->decoded_frames[j] != NULL) {
         // Create image from pre-decoded frame
         AVFrame *decoded = state->decoded_frames[j];
         Rectangle area = rectangle_from_size(

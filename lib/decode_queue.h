@@ -22,6 +22,14 @@ typedef struct {
   int input_index;          // Which input within the job (0 or 1)
   bool valid;               // True if decoding succeeded
   bool uses_pinned_memory;  // True if frame data is in pinned memory
+  // GPU decode fields (PR36+)
+  bool on_gpu;              // True if decoded directly to GPU via nvJPEG
+  void *gpu_ptr;            // GPU memory pointer (if on_gpu)
+  size_t gpu_pitch;         // Row pitch in bytes
+  int gpu_width;            // Image width in pixels
+  int gpu_height;           // Image height in pixels
+  int gpu_channels;         // Number of channels (1 for gray, 3 for RGB)
+  int gpu_format;           // AVPixelFormat equivalent (AV_PIX_FMT_GRAY8 or AV_PIX_FMT_RGB24)
 } DecodedImage;
 
 // Decode queue - bounded queue of pre-decoded images
@@ -35,6 +43,10 @@ typedef struct {
   size_t consumer_waits;      // Times consumer waited (queue empty)
   size_t pinned_allocations;  // Pinned memory allocations
   size_t peak_queue_depth;    // Maximum queue occupancy observed
+  // GPU decode stats (PR36+)
+  size_t gpu_decodes;         // Images decoded via nvJPEG to GPU
+  size_t cpu_decodes;         // Images decoded via FFmpeg to CPU
+  size_t gpu_decode_failures; // nvJPEG failures (fell back to CPU)
 } DecodeQueueStats;
 
 // Create a decode queue
@@ -52,6 +64,12 @@ DecodeQueue *decode_queue_create_parallel(size_t queue_depth, bool use_pinned_me
 
 // Destroy the decode queue and free all resources
 void decode_queue_destroy(DecodeQueue *queue);
+
+// Enable GPU decode using nvJPEG for JPEG files
+// Must be called before start_producer
+// When enabled, JPEG files will be decoded directly to GPU memory,
+// eliminating the H2D transfer for JPEG inputs.
+void decode_queue_enable_gpu_decode(DecodeQueue *queue, bool enable);
 
 // Start the producer thread
 // - queue: The decode queue

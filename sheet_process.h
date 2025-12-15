@@ -52,6 +52,11 @@ typedef struct {
   struct AVFrame *decoded_frames[BATCH_MAX_FILES_PER_SHEET];
   bool use_decoded_frames;
 
+  // GPU-decoded images (optional, for nvJPEG decode integration)
+  // If set, process_sheet uses these directly (already GPU-resident)
+  Image gpu_decoded_images[BATCH_MAX_FILES_PER_SHEET];
+  bool use_gpu_decoded_images;
+
   // Sheet identification
   int sheet_nr;
 
@@ -104,6 +109,12 @@ void sheet_process_state_cleanup(SheetProcessState *state);
 // input_index: Which input (0 or 1)
 void sheet_process_state_set_decoded(SheetProcessState *state,
                                      struct AVFrame *frame, int input_index);
+
+// Set a GPU-decoded image for an input (for nvJPEG decode integration)
+// image: Image created from GPU memory (ownership transferred to state)
+// input_index: Which input (0 or 1)
+void sheet_process_state_set_gpu_decoded_image(SheetProcessState *state,
+                                                Image image, int input_index);
 
 // Set encode queue for async encoding (optional)
 // If set, process_sheet will submit encoded frames to this queue

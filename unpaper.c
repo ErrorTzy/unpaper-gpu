@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <libavutil/avutil.h>
 
@@ -22,6 +23,7 @@
 #include "imageprocess/backend.h"
 #include "imageprocess/cuda_mempool.h"
 #include "imageprocess/cuda_stream_pool.h"
+#include "imageprocess/nvjpeg_decode.h"
 #include "imageprocess/deskew.h"
 #include "imageprocess/filters.h"
 #include "imageprocess/image.h"
@@ -1248,9 +1250,10 @@ int main(int argc, char *argv[]) {
           auto_stream_count = 4 * tier;
           if (auto_stream_count > 32) auto_stream_count = 32;
 
-          // Scale buffers: 2x streams for double-buffering
-          auto_buffer_count = auto_stream_count * 2;
-          if (auto_buffer_count > 64) auto_buffer_count = 64;
+          // Scale buffers: 3x streams for triple-buffering (decode+process+encode)
+          // 2x was insufficient - peak usage exceeded pool size causing cudaMalloc fallback
+          auto_buffer_count = auto_stream_count * 3;
+          if (auto_buffer_count > 96) auto_buffer_count = 96;
 
           verboseLog(VERBOSE_NORMAL,
                      "GPU auto-tune: %zu GB VRAM -> tier %zu -> %zu streams, %zu buffers\n",
@@ -1260,8 +1263,8 @@ int main(int argc, char *argv[]) {
         // Override auto-tuned stream count if --cuda-streams specified
         if (options.cuda_streams > 0) {
           auto_stream_count = (size_t)options.cuda_streams;
-          auto_buffer_count = auto_stream_count * 2;
-          if (auto_buffer_count > 64) auto_buffer_count = 64;
+          auto_buffer_count = auto_stream_count * 3;  // 3x for triple-buffering
+          if (auto_buffer_count > 96) auto_buffer_count = 96;
           verboseLog(VERBOSE_NORMAL,
                      "GPU manual override: %zu streams, %zu buffers\n",
                      auto_stream_count, auto_buffer_count);
@@ -1307,6 +1310,24 @@ int main(int argc, char *argv[]) {
                      "GPU integral pool initialization failed, using direct allocation\n");
         }
 
+        // Scratch buffer pool for temporary GPU allocations
+        // Largest user is blackfilter stack: w*h*8 bytes = ~70MB for A1 images
+        // Use 80MB buffers to handle A1-sized images with some margin
+        // Need 2x streams since some operations need multiple scratch buffers
+        // (e.g., grayfilter needs 2 integrals + mask buffer concurrently)
+        const size_t scratch_buffer_size = 80 * 1024 * 1024;
+        const size_t scratch_buffer_count = auto_stream_count * 2;
+        const size_t total_scratch_pool_size = scratch_buffer_count * scratch_buffer_size;
+        if (cuda_mempool_scratch_global_init(scratch_buffer_count, scratch_buffer_size)) {
+          verboseLog(VERBOSE_NORMAL,
+                     "GPU scratch pool: %zu buffers x %zu bytes (%.1f MB total)\n",
+                     scratch_buffer_count, scratch_buffer_size,
+                     (double)total_scratch_pool_size / (1024.0 * 1024.0));
+        } else {
+          verboseLog(VERBOSE_NORMAL,
+                     "GPU scratch pool initialization failed, using direct allocation\n");
+        }
+
         // Initialize stream pool for concurrent GPU operations
         if (cuda_stream_pool_global_init(auto_stream_count)) {
           streampool_active = true;
@@ -1343,20 +1364,46 @@ int main(int argc, char *argv[]) {
       }
       // Scale decode threads with CUDA stream count to keep GPU fed
       // High-end GPUs need parallel decode to prevent starvation
+      // Also consider available CPU cores for multi-core systems
       if (options.device == UNPAPER_DEVICE_CUDA && auto_stream_count > 4) {
-        num_decode_threads = (int)(auto_stream_count / 4);  // 1 decode thread per 4 streams
+        // Get CPU core count for scaling
+        long cpu_cores = sysconf(_SC_NPROCESSORS_ONLN);
+        if (cpu_cores < 1) cpu_cores = 8;
+
+        // Scale decode threads aggressively to saturate I/O
+        // Use 1 decode thread per stream to avoid worker starvation
+        int stream_based = (int)auto_stream_count;  // 1:1 with streams
+        int cpu_max = (int)(cpu_cores * 3 / 4);  // Use up to 3/4 of CPU cores for decode
+        num_decode_threads = (stream_based < cpu_max) ? stream_based : cpu_max;
+
         if (num_decode_threads < 2) num_decode_threads = 2;
-        if (num_decode_threads > 8) num_decode_threads = 8;
+        if (num_decode_threads > 20) num_decode_threads = 20;
       }
 #endif
       DecodeQueue *decode_queue = (num_decode_threads > 1)
           ? decode_queue_create_parallel(decode_queue_depth, use_pinned_memory, num_decode_threads)
           : decode_queue_create(decode_queue_depth, use_pinned_memory);
       if (decode_queue) {
+#ifdef UNPAPER_WITH_CUDA
+        // Enable GPU decode for JPEG files when using CUDA
+        if (options.device == UNPAPER_DEVICE_CUDA) {
+          // Initialize nvJPEG context with streams matching decode threads
+          int nvjpeg_streams = num_decode_threads > 1 ? num_decode_threads : 4;
+          if (nvjpeg_context_init(nvjpeg_streams)) {
+            decode_queue_enable_gpu_decode(decode_queue, true);
+            verboseLog(VERBOSE_NORMAL, "nvJPEG GPU decode: enabled (%d streams)\n", nvjpeg_streams);
+          } else {
+            verboseLog(VERBOSE_NORMAL, "nvJPEG GPU decode: unavailable, using CPU decode\n");
+          }
+        }
+#endif
         verboseLog(VERBOSE_NORMAL, "Decode queue: %zu slots%s%s\n",
                    decode_queue_depth,
                    use_pinned_memory ? " (pinned memory)" : "",
                    num_decode_threads > 1 ? ", parallel decode" : "");
+        if (num_decode_threads > 1) {
+          verboseLog(VERBOSE_NORMAL, "Decode threads: %d\n", num_decode_threads);
+        }
         // Start producer thread
         if (!decode_queue_start_producer(decode_queue, &batch_queue, &options)) {
           verboseLog(VERBOSE_NORMAL, "Failed to start decode producer, falling back to inline decode\n");
@@ -1375,13 +1422,22 @@ int main(int argc, char *argv[]) {
       }
 #endif
       // Scale encoder threads with parallelism to avoid I/O bottleneck on fast GPUs
-      // Base 2 threads, scale up to 8 for high-parallelism GPU batches
+      // Also consider available CPU cores for multi-core systems
       int num_encoder_threads = 2;
 #ifdef UNPAPER_WITH_CUDA
       if (options.device == UNPAPER_DEVICE_CUDA && batch_queue.parallelism >= 8) {
-        num_encoder_threads = batch_queue.parallelism / 4;
+        // Get CPU core count for scaling
+        long cpu_cores = sysconf(_SC_NPROCESSORS_ONLN);
+        if (cpu_cores < 1) cpu_cores = 8;
+
+        // Scale encoder threads aggressively to saturate I/O
+        // Use 1 encoder per stream to avoid output bottleneck
+        int parallel_based = batch_queue.parallelism;  // 1:1 with workers
+        int cpu_max = (int)(cpu_cores * 3 / 4);  // Use up to 3/4 of CPU cores for encode
+        num_encoder_threads = (parallel_based < cpu_max) ? parallel_based : cpu_max;
+
         if (num_encoder_threads < 2) num_encoder_threads = 2;
-        if (num_encoder_threads > 8) num_encoder_threads = 8;
+        if (num_encoder_threads > 20) num_encoder_threads = 20;
       }
 #endif
       EncodeQueue *encode_queue = encode_queue_create(encode_queue_depth, num_encoder_threads);
@@ -1439,6 +1495,13 @@ int main(int argc, char *argv[]) {
         }
         decode_queue_destroy(decode_queue);
       }
+#ifdef UNPAPER_WITH_CUDA
+      // Cleanup nvJPEG context
+      if (options.perf) {
+        nvjpeg_print_stats();
+      }
+      nvjpeg_context_cleanup();
+#endif
 
       // Cleanup encode queue - wait for all pending encodes to complete
       if (encode_queue) {
@@ -1483,6 +1546,8 @@ int main(int argc, char *argv[]) {
         if (integralpool_active) {
           cuda_mempool_integral_global_cleanup();
         }
+        // Scratch pool cleanup (safe to call even if not initialized)
+        cuda_mempool_scratch_global_cleanup();
         if (mempool_active) {
           cuda_mempool_global_cleanup();
         }
