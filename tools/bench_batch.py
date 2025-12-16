@@ -32,11 +32,38 @@ import time
 from pathlib import Path
 
 
-def create_test_images(source_image: Path, output_dir: Path, count: int) -> list[Path]:
-    """Create multiple copies of a source image for testing."""
+def create_test_images(source_image: Path, output_dir: Path, count: int,
+                       output_format: str = "png") -> list[Path]:
+    """Create multiple copies of a source image for testing.
+
+    Args:
+        source_image: Source image to copy/convert
+        output_dir: Directory to create images in
+        count: Number of images to create
+        output_format: Output format ("png" or "jpg")
+    """
     images = []
+    ext = "jpg" if output_format == "jpg" else "png"
+
+    # If converting to JPEG, use PIL
+    if output_format == "jpg" and source_image.suffix.lower() != ".jpg":
+        try:
+            from PIL import Image
+            src_img = Image.open(source_image)
+            if src_img.mode == "RGBA":
+                src_img = src_img.convert("RGB")
+            for i in range(1, count + 1):
+                dest = output_dir / f"input{i:04d}.{ext}"
+                src_img.save(dest, "JPEG", quality=95)
+                images.append(dest)
+            return images
+        except ImportError:
+            print("WARNING: PIL not available, falling back to PNG", file=sys.stderr)
+            ext = "png"
+
+    # Simple copy for same format or PNG fallback
     for i in range(1, count + 1):
-        dest = output_dir / f"input{i:04d}.png"
+        dest = output_dir / f"input{i:04d}.{ext}"
         shutil.copy(source_image, dest)
         images.append(dest)
     return images
@@ -97,8 +124,21 @@ def run_sequential(binary: Path, input_pattern: str, output_pattern: str,
 def run_batch(binary: Path, input_pattern: str, output_pattern: str,
               jobs: int, device: str = "cpu", streams: int | None = None,
               decode_mode: str | None = None,
-              decode_chunk_size: int | None = None) -> float:
-    """Run unpaper in batch mode with specified parallelism."""
+              decode_chunk_size: int | None = None,
+              no_processing: bool = False) -> float:
+    """Run unpaper in batch mode with specified parallelism.
+
+    Args:
+        binary: Path to unpaper binary
+        input_pattern: Input file pattern with %d placeholder
+        output_pattern: Output file pattern with %d placeholder
+        jobs: Number of parallel workers
+        device: Device to use (cpu or cuda)
+        streams: Number of CUDA streams (None = auto)
+        decode_mode: Decode mode (auto, batched, per-image)
+        decode_chunk_size: Batch decode chunk size
+        no_processing: If True, disable all processing filters (decode-only test)
+    """
     # Remove existing output files
     output_dir = Path(output_pattern).parent
     for f in output_dir.glob("output*.pbm"):
@@ -128,6 +168,15 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
     if decode_chunk_size is not None:
         cmd.insert(4, f"--decode-chunk-size={decode_chunk_size}")
 
+    # Disable all processing filters for decode-only benchmarks (PR36C)
+    if no_processing:
+        cmd.extend([
+            "--no-blackfilter", "--no-grayfilter", "--no-blurfilter",
+            "--no-noisefilter", "--no-deskew", "--no-mask-scan",
+            "--no-mask-center", "--no-border", "--no-border-scan",
+            "--no-border-align", "--layout=none"
+        ])
+
     proc = subprocess.run(
         cmd,
         stdout=subprocess.DEVNULL,
@@ -152,7 +201,8 @@ def bench_configuration(binary: Path, input_pattern: str, output_pattern: str,
                         iterations: int, device: str = "cpu",
                         streams: int | None = None,
                         decode_mode: str | None = None,
-                        decode_chunk_size: int | None = None) -> tuple[float, float]:
+                        decode_chunk_size: int | None = None,
+                        no_processing: bool = False) -> tuple[float, float]:
     """Benchmark a specific configuration and return mean/stdev."""
     samples = []
 
@@ -162,7 +212,7 @@ def bench_configuration(binary: Path, input_pattern: str, output_pattern: str,
                 elapsed = run_sequential(binary, input_pattern, output_pattern, count, device)
             else:
                 elapsed = run_batch(binary, input_pattern, output_pattern, jobs, device, streams,
-                                    decode_mode, decode_chunk_size)
+                                    decode_mode, decode_chunk_size, no_processing)
 
             if i >= warmup:
                 samples.append(elapsed)
@@ -251,7 +301,18 @@ def main() -> int:
     parser.add_argument(
         "--verify-batch-scaling",
         action="store_true",
-        help="Verify ≥3x scaling improvement with batched decode vs per-image (PR36C)",
+        help="Verify ≥3x scaling with 8 streams vs 1 stream using batched decode, "
+             "JPEG input, processing disabled (PR36C acceptance criteria)",
+    )
+    parser.add_argument(
+        "--jpeg",
+        action="store_true",
+        help="Use JPEG format for test images (converts PNG source to JPEG)",
+    )
+    parser.add_argument(
+        "--no-processing",
+        action="store_true",
+        help="Disable all processing filters (decode-only benchmark)",
     )
 
     args = parser.parse_args()
@@ -304,13 +365,14 @@ def main() -> int:
             print()
 
             # Create test images (reuse if same count)
-            print(f"Creating {image_count} test images...", end=" ", flush=True)
-            for f in tmpdir.glob("input*.png"):
+            img_format = "jpg" if args.jpeg else "png"
+            print(f"Creating {image_count} test images ({img_format.upper()})...", end=" ", flush=True)
+            for f in tmpdir.glob("input*.*"):
                 f.unlink()
-            create_test_images(args.source, tmpdir, image_count)
+            create_test_images(args.source, tmpdir, image_count, img_format)
             print("done")
 
-            input_pattern = str(tmpdir / "input%04d.png")
+            input_pattern = str(tmpdir / f"input%04d.{img_format}")
             output_pattern = str(tmpdir / "output%04d.pbm")
 
             results = []
@@ -320,7 +382,8 @@ def main() -> int:
                 print("Sequential CPU (no batch)...", end=" ", flush=True)
                 mean, stdev = bench_configuration(
                     binary, input_pattern, output_pattern, image_count,
-                    None, args.warmup, args.iterations, "cpu"
+                    None, args.warmup, args.iterations, "cpu",
+                    no_processing=args.no_processing
                 )
                 print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
                 results.append(("sequential-cpu", mean, stdev, "cpu"))
@@ -338,7 +401,8 @@ def main() -> int:
                         print(f"Batch {device_label} (jobs={threads})...", end=" ", flush=True)
                         mean, stdev = bench_configuration(
                             binary, input_pattern, output_pattern, image_count,
-                            threads, args.warmup, args.iterations, device
+                            threads, args.warmup, args.iterations, device,
+                            no_processing=args.no_processing
                         )
                         print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
                         results.append((config_name, mean, stdev, device))
@@ -354,7 +418,8 @@ def main() -> int:
                         print(f"    CUDA (streams={streams}, jobs={jobs})...", end=" ", flush=True)
                         mean, stdev = bench_configuration(
                             binary, input_pattern, output_pattern, image_count,
-                            jobs, args.warmup, args.iterations, device, streams
+                            jobs, args.warmup, args.iterations, device, streams,
+                            no_processing=args.no_processing
                         )
                         print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
                         results.append((config_name, mean, stdev, device))
@@ -371,7 +436,8 @@ def main() -> int:
                         print(f"    CUDA (decode-mode={mode})...", end=" ", flush=True)
                         mean, stdev = bench_configuration(
                             binary, input_pattern, output_pattern, image_count,
-                            jobs, args.warmup, args.iterations, device, streams, mode
+                            jobs, args.warmup, args.iterations, device, streams, mode,
+                            no_processing=args.no_processing
                         )
                         print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
                         results.append((config_name, mean, stdev, device))
@@ -533,42 +599,66 @@ def main() -> int:
             print("  *** SOME TARGETS FAILED ***")
             return 1
 
-    # Verify batch scaling (PR36C): batched should be ≥3x faster than per-image
-    if args.verify_batch_scaling and decode_modes:
+    # Verify batch scaling (PR36C): 8 streams vs 1 stream with batched decode
+    # This tests that nvjpegDecodeBatched achieves near-linear scaling
+    # Requirements: JPEG input, processing disabled, batched decode mode
+    if args.verify_batch_scaling:
         print(f"\n{'='*70}")
-        print("Batch Decode Scaling Verification (PR36C Target: ≥3x)")
+        print("Batch Decode Stream Scaling Verification (PR36C Target: ≥3x)")
         print(f"{'='*70}")
+        print(f"  Test: 8 streams vs 1 stream, batched decode, JPEG input, no processing")
+        print()
+
+        if not args.jpeg:
+            print("  WARNING: --jpeg not specified. For accurate nvJPEG testing, use --jpeg")
+        if not args.no_processing:
+            print("  WARNING: --no-processing not specified. For decode-only test, use --no-processing")
+
+        if "cuda" not in devices:
+            print("  ERROR: --verify-batch-scaling requires --devices=cuda")
+            return 1
 
         passed = True
         for count in image_counts:
-            per_image_result = all_results.get((count, "cuda-per-image"))
-            batched_result = all_results.get((count, "cuda-batched"))
+            # Run 1 stream test
+            print(f"\n  Testing {count} images...")
+            print(f"    1 stream (batched)...", end=" ", flush=True)
+            mean_1s, stdev_1s = bench_configuration(
+                binary, input_pattern, output_pattern, count,
+                jobs=8, warmup=args.warmup, iterations=args.iterations,
+                device="cuda", streams=1, decode_mode="batched",
+                no_processing=True
+            )
+            print(f"{mean_1s:.0f}ms")
 
-            if not per_image_result or not batched_result:
-                print(f"  {count} images: SKIP (missing per-image or batched results)")
-                print(f"    Hint: Run with --decode-mode=per-image,batched")
+            # Run 8 streams test
+            print(f"    8 streams (batched)...", end=" ", flush=True)
+            mean_8s, stdev_8s = bench_configuration(
+                binary, input_pattern, output_pattern, count,
+                jobs=8, warmup=args.warmup, iterations=args.iterations,
+                device="cuda", streams=8, decode_mode="batched",
+                no_processing=True
+            )
+            print(f"{mean_8s:.0f}ms")
+
+            if mean_1s <= 0 or mean_8s <= 0:
+                print(f"    SKIP (invalid timing data)")
                 continue
 
-            per_image_time = per_image_result[0]
-            batched_time = batched_result[0]
-
-            if per_image_time <= 0 or batched_time <= 0:
-                print(f"  {count} images: SKIP (invalid timing data)")
-                continue
-
-            speedup = per_image_time / batched_time
+            speedup = mean_1s / mean_8s
             target = 3.0
             status = "PASS" if speedup >= target else "FAIL"
             passed = passed and (speedup >= target)
 
-            print(f"  {count} images: batched={batched_time:.0f}ms, per-image={per_image_time:.0f}ms "
-                  f"-> {speedup:.2f}x (target: {target:.0f}x) [{status}]")
+            print(f"    Result: 1 stream={mean_1s:.0f}ms, 8 streams={mean_8s:.0f}ms "
+                  f"-> {speedup:.2f}x speedup (target: ≥{target:.0f}x) [{status}]")
 
         print()
         if passed:
-            print("  *** BATCH SCALING TARGET ACHIEVED ***")
+            print("  *** BATCH SCALING TARGET ACHIEVED (≥3x with 8 streams) ***")
         else:
             print("  *** BATCH SCALING BELOW TARGET ***")
+            print("  Note: Actual scaling depends on GPU, image size, and I/O bandwidth.")
             return 1
 
     return 0

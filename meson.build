@@ -542,4 +542,20 @@ if have_cuda
 
     test('nvjpeg encode', nvjpeg_encode_test,
          env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+
+    test(
+        'gpu jpeg pipeline',
+        python,
+        args: [
+            '-m', 'pytest',
+            '--basetemp=' + meson.current_build_dir() + '/test_output_gpu/',
+            meson.project_source_root() + '/tests/gpu_jpeg_pipeline_tests.py'
+        ],
+        env: [
+            'TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/',
+            'TEST_GOLDEN_DIR=' + meson.project_source_root() + '/tests/golden_images/',
+            'TEST_UNPAPER_BINARY=' + unpaper.full_path(),
+        ],
+        timeout : -1,
+    )
 endif
