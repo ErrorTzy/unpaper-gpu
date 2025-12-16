@@ -1308,8 +1308,10 @@ int main(int argc, char *argv[]) {
     // Start batch-level performance timing
     batch_perf_start(&batch_perf);
 
-    // Parallel batch processing when parallelism > 1
-    if (batch_queue.parallelism > 1) {
+    // Batch processing with decode queue (works for any parallelism >= 1)
+    // The old sequential path (parallelism == 1) doesn't support GPU pipeline
+    // or nvJPEG decode, so we always use the batch processing path.
+    if (batch_queue.parallelism >= 1) {
       // Initialize GPU memory pool and stream pool for CUDA batch processing
       // Memory pool eliminates per-image cudaMalloc overhead
       // Stream pool enables concurrent GPU operations across multiple jobs
