@@ -507,4 +507,20 @@ if have_cuda
 
     test('nvjpeg decode', nvjpeg_decode_test,
          env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+
+    nvjpeg_batched_test = executable(
+        'nvjpeg_batched_test',
+        [
+            'tests/nvjpeg_batched_test.c',
+            'imageprocess/cuda_runtime.c',
+            'imageprocess/nvjpeg_decode.c',
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('nvjpeg batched decode', nvjpeg_batched_test,
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
 endif

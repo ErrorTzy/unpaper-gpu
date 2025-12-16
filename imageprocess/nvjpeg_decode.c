@@ -656,6 +656,525 @@ bool nvjpeg_decode_file_to_gpu(const char *filename, UnpaperCudaStream *stream,
   return result;
 }
 
+// ============================================================================
+// Batched Decode API (PR36A)
+// ============================================================================
+// This uses nvjpegDecodeBatched() for efficient parallel decoding.
+// Key performance benefits:
+// - Single cudaStreamSynchronize per batch (not per image)
+// - nvJPEG internal GPU parallelism for batch sizes >50
+// - Pre-allocated buffer pool eliminates runtime cudaMalloc
+
+// Batched decoder context (singleton, separate from per-image decoder)
+typedef struct {
+  // Pre-allocated output buffer pool
+  void **gpu_buffers;       // Array of GPU buffer pointers
+  size_t *buffer_pitches;   // Pitch for each buffer (aligned)
+  int max_batch_size;       // Number of buffers allocated
+  int max_width;            // Maximum image width
+  int max_height;           // Maximum image height
+  NvJpegOutputFormat format; // Output format for all decodes
+  size_t buffer_size;       // Size of each buffer in bytes
+
+  // For true batched API (may not be available on all systems)
+  nvjpegJpegState_t batch_state;  // Dedicated state for batched decode
+  cudaStream_t batch_stream;      // Dedicated CUDA stream
+  bool batched_api_available;     // True if nvjpegDecodeBatched works
+
+  // Statistics
+  size_t total_batch_calls;
+  size_t total_images_decoded;
+  size_t failed_decodes;
+  size_t max_batch_size_used;
+
+  bool initialized;
+} NvJpegBatchedContext;
+
+static NvJpegBatchedContext g_batched_ctx = {0};
+static pthread_mutex_t g_batched_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+bool nvjpeg_batched_init(int max_batch_size, int max_width, int max_height,
+                         NvJpegOutputFormat format) {
+  pthread_mutex_lock(&g_batched_mutex);
+
+  // Already initialized?
+  if (g_batched_ctx.initialized) {
+    // Check if configuration matches
+    if (g_batched_ctx.max_batch_size >= max_batch_size &&
+        g_batched_ctx.max_width >= max_width &&
+        g_batched_ctx.max_height >= max_height &&
+        g_batched_ctx.format == format) {
+      pthread_mutex_unlock(&g_batched_mutex);
+      return true;
+    }
+    // Configuration changed, need to reinitialize
+    pthread_mutex_unlock(&g_batched_mutex);
+    nvjpeg_batched_cleanup();
+    pthread_mutex_lock(&g_batched_mutex);
+  }
+
+  // Require base context to be initialized
+  if (!g_nvjpeg_ctx.initialized) {
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg_batched: base context not initialized\n");
+    pthread_mutex_unlock(&g_batched_mutex);
+    return false;
+  }
+
+  // Cap batch size
+  if (max_batch_size > NVJPEG_MAX_BATCH_SIZE) {
+    max_batch_size = NVJPEG_MAX_BATCH_SIZE;
+  }
+  if (max_batch_size < 1) {
+    max_batch_size = 1;
+  }
+
+  nvjpegStatus_t status;
+  g_batched_ctx.batched_api_available = false;
+
+  // Create dedicated CUDA stream for batched operations
+  cudaError_t cuda_err = cudaStreamCreate(&g_batched_ctx.batch_stream);
+  if (cuda_err != cudaSuccess) {
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg_batched: failed to create CUDA stream: %s\n",
+               cudaGetErrorString(cuda_err));
+    pthread_mutex_unlock(&g_batched_mutex);
+    return false;
+  }
+
+  // Try to create state and initialize for batched decoding
+  // Note: nvjpegDecodeBatched may not be supported on all systems/images
+  status = nvjpegJpegStateCreate(g_nvjpeg_ctx.handle, &g_batched_ctx.batch_state);
+  if (status == NVJPEG_STATUS_SUCCESS) {
+    nvjpegOutputFormat_t nvfmt = to_nvjpeg_format(format);
+    // Note: max_cpu_threads must be >= 1 (documentation says deprecated but 0 causes INVALID_PARAMETER)
+    status = nvjpegDecodeBatchedInitialize(g_nvjpeg_ctx.handle,
+                                           g_batched_ctx.batch_state,
+                                           max_batch_size, 1, nvfmt);
+    if (status == NVJPEG_STATUS_SUCCESS) {
+      g_batched_ctx.batched_api_available = true;
+      verboseLog(VERBOSE_DEBUG,
+                 "nvjpeg_batched: true batched API available\n");
+    } else {
+      // Batched API not available, cleanup state but continue
+      // We'll use concurrent single-image decodes instead
+      verboseLog(VERBOSE_DEBUG,
+                 "nvjpeg_batched: batched API not available (%s), "
+                 "using concurrent single-image fallback\n",
+                 nvjpeg_status_string(status));
+      nvjpegJpegStateDestroy(g_batched_ctx.batch_state);
+      g_batched_ctx.batch_state = NULL;
+    }
+  } else {
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg_batched: failed to create batch state: %s\n",
+               nvjpeg_status_string(status));
+    g_batched_ctx.batch_state = NULL;
+  }
+
+  // Calculate buffer size with 256-byte pitch alignment
+  int channels = format_channels(format);
+  size_t pitch = (size_t)max_width * (size_t)channels;
+  pitch = (pitch + 255) & ~(size_t)255;  // Align to 256 bytes
+  size_t buffer_size = pitch * (size_t)max_height;
+
+  // Allocate buffer pool
+  g_batched_ctx.gpu_buffers = calloc((size_t)max_batch_size, sizeof(void *));
+  g_batched_ctx.buffer_pitches = calloc((size_t)max_batch_size, sizeof(size_t));
+
+  if (g_batched_ctx.gpu_buffers == NULL ||
+      g_batched_ctx.buffer_pitches == NULL) {
+    verboseLog(VERBOSE_DEBUG, "nvjpeg_batched: failed to allocate buffer arrays\n");
+    free(g_batched_ctx.gpu_buffers);
+    free(g_batched_ctx.buffer_pitches);
+    if (g_batched_ctx.batch_state != NULL) {
+      nvjpegJpegStateDestroy(g_batched_ctx.batch_state);
+      g_batched_ctx.batch_state = NULL;
+    }
+    cudaStreamDestroy(g_batched_ctx.batch_stream);
+    g_batched_ctx.batch_stream = NULL;
+    pthread_mutex_unlock(&g_batched_mutex);
+    return false;
+  }
+
+  // Pre-allocate GPU buffers for output
+  for (int i = 0; i < max_batch_size; i++) {
+    cuda_err = cudaMalloc(&g_batched_ctx.gpu_buffers[i], buffer_size);
+    if (cuda_err != cudaSuccess) {
+      verboseLog(VERBOSE_DEBUG,
+                 "nvjpeg_batched: failed to allocate GPU buffer %d: %s\n", i,
+                 cudaGetErrorString(cuda_err));
+      // Free already allocated buffers
+      for (int j = 0; j < i; j++) {
+        cudaFree(g_batched_ctx.gpu_buffers[j]);
+      }
+      free(g_batched_ctx.gpu_buffers);
+      free(g_batched_ctx.buffer_pitches);
+      if (g_batched_ctx.batch_state != NULL) {
+        nvjpegJpegStateDestroy(g_batched_ctx.batch_state);
+        g_batched_ctx.batch_state = NULL;
+      }
+      cudaStreamDestroy(g_batched_ctx.batch_stream);
+      g_batched_ctx.batch_stream = NULL;
+      pthread_mutex_unlock(&g_batched_mutex);
+      return false;
+    }
+    g_batched_ctx.buffer_pitches[i] = pitch;
+  }
+
+  // Store configuration
+  g_batched_ctx.max_batch_size = max_batch_size;
+  g_batched_ctx.max_width = max_width;
+  g_batched_ctx.max_height = max_height;
+  g_batched_ctx.format = format;
+  g_batched_ctx.buffer_size = buffer_size;
+
+  // Reset statistics
+  g_batched_ctx.total_batch_calls = 0;
+  g_batched_ctx.total_images_decoded = 0;
+  g_batched_ctx.failed_decodes = 0;
+  g_batched_ctx.max_batch_size_used = 0;
+
+  g_batched_ctx.initialized = true;
+
+  verboseLog(VERBOSE_DEBUG,
+             "nvjpeg_batched: initialized with batch_size=%d, max=%dx%d, "
+             "buffer_size=%zu bytes\n",
+             max_batch_size, max_width, max_height, buffer_size);
+
+  pthread_mutex_unlock(&g_batched_mutex);
+  return true;
+}
+
+// Fallback: decode images using concurrent single-image nvjpegDecode calls
+static int decode_batch_fallback(const uint8_t *const *jpeg_data,
+                                 const size_t *jpeg_sizes, int batch_size,
+                                 NvJpegDecodedImage *outputs) {
+  int success_count = 0;
+  int channels = format_channels(g_batched_ctx.format);
+  nvjpegOutputFormat_t nvfmt = to_nvjpeg_format(g_batched_ctx.format);
+
+  for (int i = 0; i < batch_size; i++) {
+    outputs[i].gpu_ptr = NULL;
+    outputs[i].pitch = 0;
+    outputs[i].width = 0;
+    outputs[i].height = 0;
+    outputs[i].channels = 0;
+    outputs[i].fmt = g_batched_ctx.format;
+
+    if (jpeg_data[i] == NULL || jpeg_sizes[i] == 0) {
+      g_batched_ctx.failed_decodes++;
+      continue;
+    }
+
+    // Get image info
+    int nComponents = 0;
+    nvjpegChromaSubsampling_t subsampling;
+    int widths[NVJPEG_MAX_COMPONENT];
+    int heights[NVJPEG_MAX_COMPONENT];
+
+    nvjpegStatus_t status = nvjpegGetImageInfo(
+        g_nvjpeg_ctx.handle, jpeg_data[i], jpeg_sizes[i], &nComponents,
+        &subsampling, widths, heights);
+    if (status != NVJPEG_STATUS_SUCCESS) {
+      g_batched_ctx.failed_decodes++;
+      continue;
+    }
+
+    int width = widths[0];
+    int height = heights[0];
+
+    if (width > g_batched_ctx.max_width || height > g_batched_ctx.max_height) {
+      g_batched_ctx.failed_decodes++;
+      continue;
+    }
+
+    // Acquire stream state from the per-image pool
+    NvJpegStreamState *state = nvjpeg_acquire_stream_state();
+    if (state == NULL) {
+      g_batched_ctx.failed_decodes++;
+      continue;
+    }
+
+    // Set up output pointing to pre-allocated buffer
+    nvjpegImage_t nv_output = {0};
+    nv_output.channel[0] = (unsigned char *)g_batched_ctx.gpu_buffers[i];
+    nv_output.pitch[0] = (unsigned int)g_batched_ctx.buffer_pitches[i];
+
+    // Decode using the simple API (each uses its own stream for parallelism)
+    status = nvjpegDecode(g_nvjpeg_ctx.handle, state->state, jpeg_data[i],
+                          jpeg_sizes[i], nvfmt, &nv_output, state->decode_stream);
+
+    if (status == NVJPEG_STATUS_SUCCESS) {
+      // Sync this specific stream
+      cudaError_t sync_err = cudaStreamSynchronize(state->decode_stream);
+      if (sync_err == cudaSuccess) {
+        outputs[i].gpu_ptr = g_batched_ctx.gpu_buffers[i];
+        outputs[i].pitch = g_batched_ctx.buffer_pitches[i];
+        outputs[i].width = width;
+        outputs[i].height = height;
+        outputs[i].channels = channels;
+        outputs[i].fmt = g_batched_ctx.format;
+        success_count++;
+      } else {
+        g_batched_ctx.failed_decodes++;
+      }
+    } else {
+      g_batched_ctx.failed_decodes++;
+    }
+
+    nvjpeg_release_stream_state(state);
+  }
+
+  g_batched_ctx.total_images_decoded += (size_t)success_count;
+
+  return success_count;
+}
+
+int nvjpeg_decode_batch(const uint8_t *const *jpeg_data,
+                        const size_t *jpeg_sizes, int batch_size,
+                        NvJpegDecodedImage *outputs) {
+  if (!g_batched_ctx.initialized) {
+    verboseLog(VERBOSE_DEBUG, "nvjpeg_decode_batch: not initialized\n");
+    return 0;
+  }
+
+  if (jpeg_data == NULL || jpeg_sizes == NULL || outputs == NULL ||
+      batch_size <= 0) {
+    return 0;
+  }
+
+  if (batch_size > g_batched_ctx.max_batch_size) {
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg_decode_batch: batch_size %d exceeds max %d\n",
+               batch_size, g_batched_ctx.max_batch_size);
+    batch_size = g_batched_ctx.max_batch_size;
+  }
+
+  g_batched_ctx.total_batch_calls++;
+  if ((size_t)batch_size > g_batched_ctx.max_batch_size_used) {
+    g_batched_ctx.max_batch_size_used = (size_t)batch_size;
+  }
+
+  // If true batched API not available, use concurrent single-image fallback
+  if (!g_batched_ctx.batched_api_available) {
+    return decode_batch_fallback(jpeg_data, jpeg_sizes, batch_size, outputs);
+  }
+
+  // True batched API path
+  nvjpegStatus_t status;
+  int channels = format_channels(g_batched_ctx.format);
+  int max_batch = g_batched_ctx.max_batch_size;
+
+  // nvjpegDecodeBatched requires arrays sized to match the initialized batch_size.
+  nvjpegImage_t *nv_outputs = calloc((size_t)max_batch, sizeof(nvjpegImage_t));
+  const uint8_t **padded_data = calloc((size_t)max_batch, sizeof(uint8_t *));
+  size_t *padded_sizes = calloc((size_t)max_batch, sizeof(size_t));
+  bool *valid = calloc((size_t)max_batch, sizeof(bool));
+
+  if (nv_outputs == NULL || padded_data == NULL || padded_sizes == NULL ||
+      valid == NULL) {
+    free(nv_outputs);
+    free(padded_data);
+    free(padded_sizes);
+    free(valid);
+    return 0;
+  }
+
+  // Initialize output structures and prepare padded arrays
+  for (int i = 0; i < batch_size; i++) {
+    outputs[i].gpu_ptr = NULL;
+    outputs[i].pitch = 0;
+    outputs[i].width = 0;
+    outputs[i].height = 0;
+    outputs[i].channels = 0;
+    outputs[i].fmt = g_batched_ctx.format;
+
+    padded_data[i] = jpeg_data[i];
+    padded_sizes[i] = jpeg_sizes[i];
+
+    if (jpeg_data[i] == NULL || jpeg_sizes[i] == 0) {
+      g_batched_ctx.failed_decodes++;
+      continue;
+    }
+
+    int nComponents = 0;
+    nvjpegChromaSubsampling_t subsampling;
+    int widths[NVJPEG_MAX_COMPONENT];
+    int heights[NVJPEG_MAX_COMPONENT];
+
+    status = nvjpegGetImageInfo(g_nvjpeg_ctx.handle, jpeg_data[i], jpeg_sizes[i],
+                                &nComponents, &subsampling, widths, heights);
+    if (status != NVJPEG_STATUS_SUCCESS) {
+      g_batched_ctx.failed_decodes++;
+      continue;
+    }
+
+    int width = widths[0];
+    int height = heights[0];
+
+    if (width > g_batched_ctx.max_width || height > g_batched_ctx.max_height) {
+      g_batched_ctx.failed_decodes++;
+      continue;
+    }
+
+    nv_outputs[i].channel[0] = (unsigned char *)g_batched_ctx.gpu_buffers[i];
+    nv_outputs[i].pitch[0] = (unsigned int)g_batched_ctx.buffer_pitches[i];
+
+    outputs[i].gpu_ptr = g_batched_ctx.gpu_buffers[i];
+    outputs[i].pitch = g_batched_ctx.buffer_pitches[i];
+    outputs[i].width = width;
+    outputs[i].height = height;
+    outputs[i].channels = channels;
+    outputs[i].fmt = g_batched_ctx.format;
+
+    valid[i] = true;
+  }
+
+  // Pad remaining slots
+  for (int i = batch_size; i < max_batch; i++) {
+    padded_data[i] = NULL;
+    padded_sizes[i] = 0;
+    nv_outputs[i].channel[0] = (unsigned char *)g_batched_ctx.gpu_buffers[i];
+    nv_outputs[i].pitch[0] = (unsigned int)g_batched_ctx.buffer_pitches[i];
+    valid[i] = false;
+  }
+
+  // Perform batched decode
+  status = nvjpegDecodeBatched(g_nvjpeg_ctx.handle, g_batched_ctx.batch_state,
+                               padded_data, padded_sizes, nv_outputs,
+                               g_batched_ctx.batch_stream);
+
+  if (status != NVJPEG_STATUS_SUCCESS) {
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg_decode_batch: nvjpegDecodeBatched failed: %s, "
+               "falling back to single-image decode\n",
+               nvjpeg_status_string(status));
+    // Batched decode failed (e.g., image not supported) - fall back to single-image
+    free(valid);
+    free(nv_outputs);
+    free(padded_data);
+    free(padded_sizes);
+    return decode_batch_fallback(jpeg_data, jpeg_sizes, batch_size, outputs);
+  }
+
+  // Single sync for entire batch
+  cudaError_t sync_err = cudaStreamSynchronize(g_batched_ctx.batch_stream);
+  if (sync_err != cudaSuccess) {
+    for (int i = 0; i < batch_size; i++) {
+      if (valid[i]) {
+        outputs[i].gpu_ptr = NULL;
+        g_batched_ctx.failed_decodes++;
+      }
+    }
+    free(valid);
+    free(nv_outputs);
+    free(padded_data);
+    free(padded_sizes);
+    return 0;
+  }
+
+  int success_count = 0;
+  for (int i = 0; i < batch_size; i++) {
+    if (valid[i]) {
+      success_count++;
+    }
+  }
+
+  g_batched_ctx.total_images_decoded += (size_t)success_count;
+
+  free(valid);
+  free(nv_outputs);
+  free(padded_data);
+  free(padded_sizes);
+
+  return success_count;
+}
+
+bool nvjpeg_batched_is_ready(void) {
+  pthread_mutex_lock(&g_batched_mutex);
+  bool ready = g_batched_ctx.initialized;
+  pthread_mutex_unlock(&g_batched_mutex);
+  return ready;
+}
+
+NvJpegOutputFormat nvjpeg_batched_get_format(void) {
+  if (!g_batched_ctx.initialized) {
+    return NVJPEG_FMT_RGB;  // Default
+  }
+  return g_batched_ctx.format;
+}
+
+int nvjpeg_batched_get_max_batch_size(void) {
+  if (!g_batched_ctx.initialized) {
+    return 0;
+  }
+  return g_batched_ctx.max_batch_size;
+}
+
+void nvjpeg_batched_cleanup(void) {
+  pthread_mutex_lock(&g_batched_mutex);
+
+  if (!g_batched_ctx.initialized) {
+    pthread_mutex_unlock(&g_batched_mutex);
+    return;
+  }
+
+  // Free GPU buffer pool
+  if (g_batched_ctx.gpu_buffers != NULL) {
+    for (int i = 0; i < g_batched_ctx.max_batch_size; i++) {
+      if (g_batched_ctx.gpu_buffers[i] != NULL) {
+        cudaFree(g_batched_ctx.gpu_buffers[i]);
+      }
+    }
+    free(g_batched_ctx.gpu_buffers);
+    g_batched_ctx.gpu_buffers = NULL;
+  }
+
+  if (g_batched_ctx.buffer_pitches != NULL) {
+    free(g_batched_ctx.buffer_pitches);
+    g_batched_ctx.buffer_pitches = NULL;
+  }
+
+  // Destroy batch state (if batched API was available)
+  if (g_batched_ctx.batch_state != NULL) {
+    nvjpegJpegStateDestroy(g_batched_ctx.batch_state);
+    g_batched_ctx.batch_state = NULL;
+  }
+
+  // Destroy stream
+  if (g_batched_ctx.batch_stream != NULL) {
+    cudaStreamDestroy(g_batched_ctx.batch_stream);
+    g_batched_ctx.batch_stream = NULL;
+  }
+
+  g_batched_ctx.max_batch_size = 0;
+  g_batched_ctx.max_width = 0;
+  g_batched_ctx.max_height = 0;
+  g_batched_ctx.buffer_size = 0;
+  g_batched_ctx.batched_api_available = false;
+  g_batched_ctx.initialized = false;
+
+  verboseLog(VERBOSE_DEBUG, "nvjpeg_batched: cleaned up\n");
+
+  pthread_mutex_unlock(&g_batched_mutex);
+}
+
+NvJpegBatchStats nvjpeg_batched_get_stats(void) {
+  NvJpegBatchStats stats = {0};
+
+  if (!g_batched_ctx.initialized) {
+    return stats;
+  }
+
+  stats.total_batch_calls = g_batched_ctx.total_batch_calls;
+  stats.total_images_decoded = g_batched_ctx.total_images_decoded;
+  stats.failed_decodes = g_batched_ctx.failed_decodes;
+  stats.max_batch_size_used = g_batched_ctx.max_batch_size_used;
+
+  return stats;
+}
+
 #else // !UNPAPER_WITH_CUDA
 
 // Stub implementations for non-CUDA builds
@@ -711,6 +1230,39 @@ bool nvjpeg_decode_file_to_gpu(const char *filename, UnpaperCudaStream *stream,
   (void)output_fmt;
   (void)out;
   return false;
+}
+
+// Batched decode stubs for non-CUDA builds
+bool nvjpeg_batched_init(int max_batch_size, int max_width, int max_height,
+                         NvJpegOutputFormat format) {
+  (void)max_batch_size;
+  (void)max_width;
+  (void)max_height;
+  (void)format;
+  return false;
+}
+
+int nvjpeg_decode_batch(const uint8_t *const *jpeg_data,
+                        const size_t *jpeg_sizes, int batch_size,
+                        NvJpegDecodedImage *outputs) {
+  (void)jpeg_data;
+  (void)jpeg_sizes;
+  (void)batch_size;
+  (void)outputs;
+  return 0;
+}
+
+bool nvjpeg_batched_is_ready(void) { return false; }
+
+NvJpegOutputFormat nvjpeg_batched_get_format(void) { return NVJPEG_FMT_RGB; }
+
+int nvjpeg_batched_get_max_batch_size(void) { return 0; }
+
+void nvjpeg_batched_cleanup(void) {}
+
+NvJpegBatchStats nvjpeg_batched_get_stats(void) {
+  NvJpegBatchStats stats = {0};
+  return stats;
 }
 
 #endif // UNPAPER_WITH_CUDA

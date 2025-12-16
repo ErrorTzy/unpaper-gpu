@@ -146,6 +146,80 @@ bool nvjpeg_decode_file_to_gpu(const char *filename,
                                NvJpegOutputFormat output_fmt,
                                NvJpegDecodedImage *out);
 
+// ============================================================================
+// Batched Decode API (PR36A)
+// ============================================================================
+// The batched decode API uses nvjpegDecodeBatched() for efficient parallel
+// decoding of multiple JPEG images. This achieves much better scaling than
+// per-image decode because:
+// 1. Single sync point per batch (not per image)
+// 2. nvJPEG optimizes GPU parallelism internally for batch sizes >50
+// 3. Pre-allocated output buffer pool eliminates runtime cudaMalloc
+
+// Maximum images to decode in a single batch call.
+// This is a memory-performance tradeoff:
+// - Larger batches = better GPU utilization
+// - But more GPU memory needed for output buffers
+// 8 images at 4000x6000x3 = ~576MB GPU RAM for decode outputs
+#define NVJPEG_MAX_BATCH_SIZE 16
+
+// Initialize the batched decoder with pre-allocated output buffer pool.
+// Must call nvjpeg_context_init() first.
+//
+// max_batch_size: Maximum images per batch (capped at NVJPEG_MAX_BATCH_SIZE)
+// max_width, max_height: Maximum image dimensions to support
+// format: Output format for all images in batch (must be uniform)
+//
+// Returns true on success.
+// Thread-safety: NOT thread-safe. Call once during initialization.
+bool nvjpeg_batched_init(int max_batch_size, int max_width, int max_height,
+                         NvJpegOutputFormat format);
+
+// Decode a batch of JPEG images using nvjpegDecodeBatched().
+// This is the high-performance path for batch processing.
+//
+// jpeg_data: Array of pointers to JPEG data (host memory, ideally pinned)
+// jpeg_sizes: Array of JPEG data sizes in bytes
+// batch_size: Number of images to decode (must be <= initialized max_batch_size)
+// outputs: Pre-allocated array of NvJpegDecodedImage structs (size >= batch_size)
+//
+// Returns number of successfully decoded images.
+// On success, outputs[i].gpu_ptr points to pre-allocated buffer pool memory.
+// Memory is valid until next nvjpeg_decode_batch() call or nvjpeg_batched_cleanup().
+//
+// IMPORTANT: All images are decoded to the format specified in nvjpeg_batched_init().
+// If an image fails to decode, its outputs[i].gpu_ptr will be NULL.
+//
+// Thread-safety: NOT thread-safe. Must synchronize externally.
+int nvjpeg_decode_batch(const uint8_t *const *jpeg_data,
+                        const size_t *jpeg_sizes, int batch_size,
+                        NvJpegDecodedImage *outputs);
+
+// Check if batched decoder is initialized and ready.
+bool nvjpeg_batched_is_ready(void);
+
+// Get the configured output format for batched decoding.
+NvJpegOutputFormat nvjpeg_batched_get_format(void);
+
+// Get the maximum batch size configured.
+int nvjpeg_batched_get_max_batch_size(void);
+
+// Clean up batched decoder resources (buffer pool, state).
+// Safe to call even if not initialized.
+// Thread-safety: NOT thread-safe. Call once during shutdown.
+void nvjpeg_batched_cleanup(void);
+
+// Statistics for batched decode operations
+typedef struct {
+  size_t total_batch_calls;     // Number of nvjpeg_decode_batch() calls
+  size_t total_images_decoded;  // Total images decoded via batch API
+  size_t failed_decodes;        // Images that failed to decode
+  size_t max_batch_size_used;   // Largest batch size actually used
+} NvJpegBatchStats;
+
+// Get batched decode statistics.
+NvJpegBatchStats nvjpeg_batched_get_stats(void);
+
 #ifdef __cplusplus
 }
 #endif
