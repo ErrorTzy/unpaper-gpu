@@ -423,9 +423,12 @@ bool image_is_gpu_resident(Image *image) {
     return false;
   }
 
-  // GPU is resident if we have GPU memory and it's not marked dirty
-  // (meaning GPU is current, not CPU)
-  return (st->dptr != 0) && !st->cuda_dirty;
+  // GPU is resident (has valid data) if:
+  // 1. We have GPU memory allocated (dptr != 0), AND
+  // 2. GPU data is current (cuda_dirty = true means GPU was modified and is
+  //    the source of truth, OR cpu_dirty = false means data is synced)
+  // After CUDA processing, cuda_dirty=true indicates GPU has valid results.
+  return (st->dptr != 0) && (st->cuda_dirty || !st->cpu_dirty);
 #else
   (void)image;
   return false;

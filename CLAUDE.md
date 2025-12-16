@@ -462,21 +462,33 @@ JPEG file → [nvjpegDecode] → GPU buffer → [processing] → GPU buffer → 
 python tools/bench_jpeg_pipeline.py --images 50 --verify-speedup
 ```
 
-**Acceptance:** ✓ All criteria met:
-- ✓ JPEG-to-JPEG processing with zero-copy GPU path
-- ✓ D2H transfer eliminated for JPEG outputs
-- ✓ Graceful fallback for non-JPEG or when GPU unavailable
-- ✓ All 15 tests pass
+**Acceptance Criteria:**
+- [x] Full JPEG→JPEG processing without CPU memory touch
+- [x] D2H transfer eliminated for JPEG outputs (~6ms/image saved)
+- [x] Graceful fallback for non-JPEG input/output
+- [x] All 15 tests pass
+
+**Benchmark Results** (2480x3507 test images, 8 streams):
+| Metric | Standard Path | GPU Pipeline | Improvement |
+|--------|---------------|--------------|-------------|
+| 1 image (total) | 1994ms | 1999ms | ~same (startup dominated) |
+| 50 images (total) | 21745ms | 21449ms | 1.4% faster |
+| Per-image | 434.9ms | 429.0ms | ~6ms/image saved |
+| Output size | 13929 KB/img (PBM) | 1298 KB/img (JPEG) | 10.7x smaller |
+
+**Note**: The D2H transfer elimination saves ~6ms/image. The total processing time
+is dominated by image processing (filters, deskew, etc.), not memory transfers.
+For JPEG output workflows, the GPU pipeline also provides ~10x smaller output files.
 
 ---
 
 ### Performance Targets Summary
 
-| PR | Component | Status | Target | Approach |
+| PR | Component | Status | Result | Approach |
 |----|-----------|--------|--------|----------|
-| PR36B-C | Decode pipeline | **achieved** | ≥3x | nvjpegDecodeBatched |
-| PR37 | Encode | **achieved** | GPU encode | nvJPEG encoder pool |
-| PR38 | Full pipeline | **achieved** | Zero-copy | GPU-resident encode path |
+| PR36B-C | Decode pipeline | **achieved** | ≥3x scaling | nvjpegDecodeBatched |
+| PR37 | Encode | **achieved** | GPU encode working | nvJPEG encoder pool |
+| PR38 | Full pipeline | **achieved** | ~6ms/img saved, 10x smaller JPEG | Zero-copy GPU path |
 
 ---
 

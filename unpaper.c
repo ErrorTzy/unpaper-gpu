@@ -1771,7 +1771,8 @@ int main(int argc, char *argv[]) {
                   batch_stats.max_batch_size_used);
         }
       }
-      nvjpeg_context_cleanup();
+      // NOTE: nvjpeg_context_cleanup moved below - must happen AFTER encode cleanup
+      // because nvjpeg_encode uses the shared handle from nvjpeg_context
 #endif
 
       // Cleanup encode queue - wait for all pending encodes to complete
@@ -1785,13 +1786,16 @@ int main(int argc, char *argv[]) {
       }
 
 #ifdef UNPAPER_WITH_CUDA
-      // Cleanup nvJPEG encode (must be after encode queue is done)
+      // Cleanup nvJPEG encode first (uses shared handle from decode context)
       if (nvjpeg_encode_is_available()) {
         if (options.perf) {
           nvjpeg_encode_print_stats();
         }
         nvjpeg_encode_cleanup();
       }
+
+      // Now cleanup nvJPEG decode context (destroys shared handle)
+      nvjpeg_context_cleanup();
 #endif
 
 #ifdef UNPAPER_WITH_CUDA
