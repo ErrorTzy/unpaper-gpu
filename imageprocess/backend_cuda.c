@@ -69,6 +69,8 @@ static void *k_blackfilter_wipe_regions;
 static void *k_detect_edge_rotation_peaks;
 static void *k_rotate_bytes;
 static void *k_rotate_mono;
+static void *k_batch_scan_grayscale_sum;
+static void *k_batch_scan_brightness_count;
 
 static void ensure_kernels_loaded(void) {
   // Fast path: already loaded
@@ -140,6 +142,10 @@ static void ensure_kernels_loaded(void) {
       unpaper_cuda_module_get_function(module, "unpaper_rotate_bytes");
   k_rotate_mono =
       unpaper_cuda_module_get_function(module, "unpaper_rotate_mono");
+  k_batch_scan_grayscale_sum = unpaper_cuda_module_get_function(
+      module, "unpaper_batch_scan_grayscale_sum");
+  k_batch_scan_brightness_count = unpaper_cuda_module_get_function(
+      module, "unpaper_batch_scan_brightness_count");
 
   // Publish the module pointer last (release semantics)
   atomic_store_explicit(&cuda_module, module, memory_order_release);
@@ -351,138 +357,140 @@ static unsigned long long cuda_rect_sum_lightness(Image image,
   return *out_ptr;
 }
 
-static unsigned long long cuda_rect_sum_grayscale(Image image,
-                                                  Rectangle input_area) {
-  Rectangle area = clip_rectangle(image, input_area);
-  if (rect_empty(area)) {
-    return 0;
-  }
-  const int rect_w = area.vertex[1].x - area.vertex[0].x + 1;
-  const int rect_h = area.vertex[1].y - area.vertex[0].y + 1;
-  if (rect_w <= 0 || rect_h <= 0) {
-    return 0;
-  }
-
-  ensure_kernels_loaded();
-  image_ensure_cuda(&image);
-  ImageCudaState *st = image_cuda_state(image);
-  if (st == NULL || st->dptr == 0) {
-    errOutput("CUDA image state missing for sum_grayscale_rect.");
-  }
-
-  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
-  if (fmt == UNPAPER_CUDA_FMT_INVALID) {
-    errOutput("CUDA sum_grayscale_rect: unsupported pixel format.");
-  }
-
-  // Use stream-ordered allocation to avoid blocking other streams
-  UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
-  uint64_t out_dptr = unpaper_cuda_malloc_async(stream, sizeof(unsigned long long));
-  unpaper_cuda_memset_async(stream, out_dptr, 0, sizeof(unsigned long long));
-
-  const int src_fmt = (int)fmt;
-  const int src_w = image.frame->width;
-  const int src_h = image.frame->height;
-  const int x0 = area.vertex[0].x;
-  const int y0 = area.vertex[0].y;
-  const int x1 = area.vertex[1].x;
-  const int y1 = area.vertex[1].y;
-
-  const unsigned long long total =
-      (unsigned long long)rect_w * (unsigned long long)rect_h;
-  const uint32_t block_x = 256;
-  uint32_t grid_x = (uint32_t)((total + block_x - 1) / block_x);
-  if (grid_x == 0) {
-    grid_x = 1;
-  }
-  if (grid_x > 1024) {
-    grid_x = 1024;
-  }
-
-  void *params[] = {
-      &st->dptr, &st->linesize, &src_fmt, &src_w, &src_h,
-      &x0,       &y0,           &x1,      &y1,    &out_dptr,
-  };
-  unpaper_cuda_launch_kernel_on_stream(stream, k_sum_grayscale_rect, grid_x, 1,
-                                       1, block_x, 1, 1, params);
-
-  // Use per-stream pinned memory for stream-specific D2H sync
-  size_t pinned_capacity = 0;
-  unsigned long long *out_pinned = (unsigned long long *)unpaper_cuda_stream_pinned_reserve(
-      stream, sizeof(unsigned long long), &pinned_capacity);
-  unsigned long long out_fallback = 0;
-  unsigned long long *out_ptr = (out_pinned != NULL) ? out_pinned : &out_fallback;
-
-  if (out_pinned != NULL) {
-    unpaper_cuda_memcpy_d2h_async(stream, out_ptr, out_dptr, sizeof(*out_ptr));
-    unpaper_cuda_stream_synchronize_on(stream);
-  } else {
-    unpaper_cuda_memcpy_d2h(out_ptr, out_dptr, sizeof(*out_ptr));
-  }
-
-  unpaper_cuda_free_async(stream, out_dptr);
-  return *out_ptr;
-}
-
-static uint8_t cuda_rect_inverse_brightness(Image image, Rectangle input_area) {
-  Rectangle area = clip_rectangle(image, input_area);
-  if (rect_empty(area)) {
-    return 0;
-  }
-  const int rect_w = area.vertex[1].x - area.vertex[0].x + 1;
-  const int rect_h = area.vertex[1].y - area.vertex[0].y + 1;
-  if (rect_w <= 0 || rect_h <= 0) {
-    return 0;
-  }
-
-  const unsigned long long count =
-      (unsigned long long)rect_w * (unsigned long long)rect_h;
-  if (count == 0) {
-    return 0;
-  }
-
-  const unsigned long long sum = cuda_rect_sum_grayscale(image, area);
-  const unsigned long long avg = sum / count;
-  return (uint8_t)(0xFFu - (uint8_t)avg);
-}
-
+// Batched version of detect_edge_cuda that eliminates per-iteration syncs.
+// Instead of syncing after each brightness computation, we:
+// 1. Pre-compute ALL positions' brightness values in a single kernel launch
+// 2. Single D2H transfer for all values
+// 3. CPU iterates through values to find the edge
+//
+// This reduces syncs from O(n) to O(1) per edge detection.
 static uint32_t detect_edge_cuda(Image image, Point origin, Delta step,
                                  int32_t scan_size, int32_t scan_depth,
                                  float threshold) {
-  Rectangle scan_area;
   const RectangleSize image_size = size_of_image(image);
+  Rectangle scan_area;
+  int max_positions;
+  int rect_w, rect_h;
 
+  // Setup scan area and compute max positions
   if (step.vertical == 0) {
+    // Horizontal scanning (vertical border detection)
     if (scan_depth == -1) {
       scan_depth = image_size.height;
     }
-
     scan_area = rectangle_from_size(
         shift_point(origin, (Delta){-scan_size / 2, -scan_depth / 2}),
         (RectangleSize){scan_size, scan_depth});
+    rect_w = scan_size;
+    rect_h = scan_depth;
+    // Max positions until we go outside image
+    if (step.horizontal > 0) {
+      max_positions = (image_size.width - scan_area.vertex[0].x) / step.horizontal + 1;
+    } else {
+      max_positions = (scan_area.vertex[1].x + 1) / (-step.horizontal) + 1;
+    }
   } else if (step.horizontal == 0) {
+    // Vertical scanning (horizontal border detection)
     if (scan_depth == -1) {
       scan_depth = image_size.width;
     }
-
     scan_area = rectangle_from_size(
         shift_point(origin, (Delta){-scan_depth / 2, -scan_size / 2}),
         (RectangleSize){scan_depth, scan_size});
+    rect_w = scan_depth;
+    rect_h = scan_size;
+    // Max positions until we go outside image
+    if (step.vertical > 0) {
+      max_positions = (image_size.height - scan_area.vertex[0].y) / step.vertical + 1;
+    } else {
+      max_positions = (scan_area.vertex[1].y + 1) / (-step.vertical) + 1;
+    }
   } else {
     errOutput("detect_edge_cuda() called with diagonal steps, impossible! "
               "(%" PRId32 ", %" PRId32 ")",
               step.horizontal, step.vertical);
+    return 0;
   }
 
+  // Clamp to reasonable maximum to avoid huge allocations
+  if (max_positions > 2000) {
+    max_positions = 2000;
+  }
+  if (max_positions < 1) {
+    max_positions = 1;
+  }
+
+  ensure_kernels_loaded();
+  image_ensure_cuda((Image *)&image);
+  ImageCudaState *st = image_cuda_state(image);
+  if (st == NULL || st->dptr == 0) {
+    errOutput("CUDA image state missing for detect_edge_cuda.");
+  }
+
+  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+  UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+
+  // Allocate GPU buffers for sums and counts
+  const size_t buffer_size = (size_t)max_positions * sizeof(unsigned long long);
+  uint64_t sums_dptr = unpaper_cuda_malloc_async(stream, buffer_size);
+  uint64_t counts_dptr = unpaper_cuda_malloc_async(stream, buffer_size);
+
+  // Launch batched kernel - one block per scan position
+  const int src_fmt = (int)fmt;
+  const int src_w = image.frame->width;
+  const int src_h = image.frame->height;
+  const int base_x0 = scan_area.vertex[0].x;
+  const int base_y0 = scan_area.vertex[0].y;
+  const int step_x = step.horizontal;
+  const int step_y = step.vertical;
+
+  void *params[] = {
+      &st->dptr,      &st->linesize,  &src_fmt,       &src_w,    &src_h,
+      &base_x0,       &base_y0,       &rect_w,        &rect_h,   &step_x,
+      &step_y,        &max_positions, &sums_dptr,     &counts_dptr,
+  };
+
+  // One block per position, 256 threads per block for parallel reduction
+  unpaper_cuda_launch_kernel_on_stream(stream, k_batch_scan_grayscale_sum,
+                                       max_positions, 1, 1, 256, 1, 1, params);
+
+  // Single D2H transfer for all results
+  unsigned long long *sums_host = (unsigned long long *)malloc(buffer_size);
+  unsigned long long *counts_host = (unsigned long long *)malloc(buffer_size);
+
+  // Use async memcpy + single sync
+  unpaper_cuda_memcpy_d2h_async(stream, sums_host, sums_dptr, buffer_size);
+  unpaper_cuda_memcpy_d2h_async(stream, counts_host, counts_dptr, buffer_size);
+  unpaper_cuda_stream_synchronize_on(stream);
+
+  // Free GPU buffers
+  unpaper_cuda_free_async(stream, sums_dptr);
+  unpaper_cuda_free_async(stream, counts_dptr);
+
+  // Now iterate on CPU to find edge (same logic as original)
   uint32_t total = 0;
   uint32_t count = 0;
-  uint8_t blackness;
-  do {
-    blackness = cuda_rect_inverse_brightness(image, scan_area);
+
+  for (int i = 0; i < max_positions; i++) {
+    uint8_t blackness;
+    if (counts_host[i] == 0) {
+      blackness = 0;
+    } else {
+      const unsigned long long avg = sums_host[i] / counts_host[i];
+      blackness = (uint8_t)(0xFFu - (uint8_t)avg);
+    }
+
     total += blackness;
     count++;
-    scan_area = shift_rectangle(scan_area, step);
-  } while ((blackness >= ((threshold * total) / count)) && blackness != 0);
+
+    // Check termination condition
+    if (!((blackness >= ((threshold * total) / count)) && blackness != 0)) {
+      break;
+    }
+  }
+
+  free(sums_host);
+  free(counts_host);
 
   return count;
 }
@@ -557,6 +565,13 @@ static bool detect_mask_cuda(Image image, MaskDetectionParameters params,
   return success;
 }
 
+// Batched version of detect_border_edge_cuda that eliminates per-iteration syncs.
+// Instead of syncing after each pixel count, we:
+// 1. Pre-compute ALL positions' dark pixel counts in a single kernel launch
+// 2. Single D2H transfer for all counts
+// 3. CPU iterates through counts to find the border
+//
+// This reduces syncs from O(n) to O(1) per border edge detection.
 static uint32_t detect_border_edge_cuda(Image image,
                                         const Rectangle outside_mask,
                                         Delta step, int32_t size,
@@ -565,7 +580,9 @@ static uint32_t detect_border_edge_cuda(Image image,
   const RectangleSize mask_size = size_of_rectangle(outside_mask);
   int32_t max_step;
 
+  // Setup initial scan area (modifies area rectangle)
   if (step.vertical == 0) {
+    // Horizontal scan
     if (step.horizontal > 0) {
       area.vertex[1].x = outside_mask.vertex[0].x + size;
     } else {
@@ -573,6 +590,7 @@ static uint32_t detect_border_edge_cuda(Image image,
     }
     max_step = mask_size.width;
   } else {
+    // Vertical scan
     if (step.vertical > 0) {
       area.vertex[1].y = outside_mask.vertex[0].y + size;
     } else {
@@ -581,23 +599,83 @@ static uint32_t detect_border_edge_cuda(Image image,
     max_step = mask_size.height;
   }
 
-  uint32_t result = 0;
-  while (result < (uint32_t)max_step) {
-    const unsigned long long cnt = cuda_rect_count_brightness_range(
-        image, area, 0, image.abs_black_threshold);
-    if (cnt >= (unsigned long long)threshold) {
-      return result;
-    }
+  // Compute actual rectangle dimensions from modified area
+  const int rect_w = area.vertex[1].x - area.vertex[0].x + 1;
+  const int rect_h = area.vertex[1].y - area.vertex[0].y + 1;
 
-    area = shift_rectangle(area, step);
-
-    int32_t delta = step.horizontal + step.vertical;
-    if (delta < 0) {
-      delta = -delta;
-    }
-    result += (uint32_t)delta;
+  // Compute step magnitude and number of positions
+  int32_t step_magnitude = step.horizontal + step.vertical;
+  if (step_magnitude < 0) {
+    step_magnitude = -step_magnitude;
+  }
+  if (step_magnitude == 0) {
+    return 0;
   }
 
+  int max_positions = (max_step / step_magnitude) + 1;
+  if (max_positions > 2000) {
+    max_positions = 2000;
+  }
+  if (max_positions < 1) {
+    max_positions = 1;
+  }
+
+  ensure_kernels_loaded();
+  image_ensure_cuda((Image *)&image);
+  ImageCudaState *st = image_cuda_state(image);
+  if (st == NULL || st->dptr == 0) {
+    errOutput("CUDA image state missing for detect_border_edge_cuda.");
+  }
+
+  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+  UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
+
+  // Allocate GPU buffer for counts
+  const size_t buffer_size = (size_t)max_positions * sizeof(unsigned long long);
+  uint64_t counts_dptr = unpaper_cuda_malloc_async(stream, buffer_size);
+
+  // Launch batched kernel - one block per scan position
+  const int src_fmt = (int)fmt;
+  const int src_w = image.frame->width;
+  const int src_h = image.frame->height;
+  const int base_x0 = area.vertex[0].x;
+  const int base_y0 = area.vertex[0].y;
+  const int step_x = step.horizontal;
+  const int step_y = step.vertical;
+  const uint8_t min_brightness = 0;
+  const uint8_t max_brightness = image.abs_black_threshold;
+
+  void *params[] = {
+      &st->dptr,        &st->linesize, &src_fmt,        &src_w,
+      &src_h,           &base_x0,      &base_y0,        &rect_w,
+      &rect_h,          &step_x,       &step_y,         &max_positions,
+      &min_brightness,  &max_brightness, &counts_dptr,
+  };
+
+  // One block per position, 256 threads per block for parallel reduction
+  unpaper_cuda_launch_kernel_on_stream(stream, k_batch_scan_brightness_count,
+                                       max_positions, 1, 1, 256, 1, 1, params);
+
+  // Single D2H transfer for all results
+  unsigned long long *counts_host = (unsigned long long *)malloc(buffer_size);
+
+  unpaper_cuda_memcpy_d2h_async(stream, counts_host, counts_dptr, buffer_size);
+  unpaper_cuda_stream_synchronize_on(stream);
+
+  // Free GPU buffer
+  unpaper_cuda_free_async(stream, counts_dptr);
+
+  // Now iterate on CPU to find border (same logic as original)
+  uint32_t result = 0;
+  for (int i = 0; i < max_positions && result < (uint32_t)max_step; i++) {
+    if (counts_host[i] >= (unsigned long long)threshold) {
+      free(counts_host);
+      return result;
+    }
+    result += (uint32_t)step_magnitude;
+  }
+
+  free(counts_host);
   return 0;
 }
 

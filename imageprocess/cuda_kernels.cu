@@ -1796,3 +1796,160 @@ extern "C" __global__ void unpaper_blackfilter_scan_parallel(
   out_rects[idx * 4 + 2] = x1;
   out_rects[idx * 4 + 3] = y1;
 }
+
+// ============================================================================
+// Batched Edge Scan Kernels
+// ============================================================================
+// These kernels eliminate the per-iteration cudaStreamSynchronize overhead
+// in detect_edge_cuda() and detect_border_edge_cuda() by computing ALL scan
+// positions in a single kernel launch with a single D2H transfer.
+
+/**
+ * Batch scan for grayscale sums - used by detect_edge_cuda().
+ *
+ * Each block processes one scan position. The base rectangle is shifted by
+ * (step_x * block_idx, step_y * block_idx) and the sum of grayscale values
+ * is computed using parallel reduction within the block.
+ *
+ * Parameters:
+ *   src, src_linesize, src_fmt, src_w, src_h: Source image
+ *   base_x0, base_y0: Top-left of base rectangle (at position 0)
+ *   rect_w, rect_h: Rectangle dimensions
+ *   step_x, step_y: Step direction (one must be 0)
+ *   max_positions: Number of positions to compute
+ *   out_sums: Output array of uint64_t[max_positions] for grayscale sums
+ *   out_counts: Output array of uint64_t[max_positions] for pixel counts
+ */
+extern "C" __global__ void unpaper_batch_scan_grayscale_sum(
+    const uint8_t *src, int src_linesize, int src_fmt, int src_w, int src_h,
+    int base_x0, int base_y0, int rect_w, int rect_h, int step_x, int step_y,
+    int max_positions, unsigned long long *out_sums,
+    unsigned long long *out_counts) {
+  const int pos_idx = (int)blockIdx.x;
+  if (pos_idx >= max_positions) {
+    return;
+  }
+
+  const int tid = (int)threadIdx.x;
+  const UnpaperCudaFormat fmt = (UnpaperCudaFormat)src_fmt;
+
+  // Compute rectangle for this position
+  const int x0 = base_x0 + pos_idx * step_x;
+  const int y0 = base_y0 + pos_idx * step_y;
+
+  // Shared memory for parallel reduction
+  __shared__ unsigned long long sh_sum[256];
+  __shared__ unsigned long long sh_count[256];
+
+  // Compute local sum for this thread's pixels
+  unsigned long long local_sum = 0;
+  unsigned long long local_count = 0;
+
+  const int total_pixels = rect_w * rect_h;
+  for (int i = tid; i < total_pixels; i += (int)blockDim.x) {
+    const int rx = i % rect_w;
+    const int ry = i / rect_w;
+    const int x = x0 + rx;
+    const int y = y0 + ry;
+
+    // Only count pixels inside image bounds
+    if (x >= 0 && x < src_w && y >= 0 && y < src_h) {
+      uint8_t r, g, b;
+      read_rgb(src, src_linesize, fmt, x, y, &r, &g, &b);
+      local_sum += grayscale_u8(r, g, b);
+      local_count++;
+    }
+  }
+
+  sh_sum[tid] = local_sum;
+  sh_count[tid] = local_count;
+  __syncthreads();
+
+  // Parallel reduction
+  for (int offset = (int)blockDim.x / 2; offset > 0; offset >>= 1) {
+    if (tid < offset) {
+      sh_sum[tid] += sh_sum[tid + offset];
+      sh_count[tid] += sh_count[tid + offset];
+    }
+    __syncthreads();
+  }
+
+  // Write result
+  if (tid == 0) {
+    out_sums[pos_idx] = sh_sum[0];
+    out_counts[pos_idx] = sh_count[0];
+  }
+}
+
+/**
+ * Batch scan for brightness range counts - used by detect_border_edge_cuda().
+ *
+ * Each block processes one scan position. Counts pixels where grayscale
+ * is within [min_brightness, max_brightness].
+ *
+ * Parameters:
+ *   src, src_linesize, src_fmt, src_w, src_h: Source image
+ *   base_x0, base_y0: Top-left of base rectangle (at position 0)
+ *   rect_w, rect_h: Rectangle dimensions
+ *   step_x, step_y: Step direction (one must be 0)
+ *   max_positions: Number of positions to compute
+ *   min_brightness, max_brightness: Brightness range for counting
+ *   out_counts: Output array of uint64_t[max_positions]
+ */
+extern "C" __global__ void unpaper_batch_scan_brightness_count(
+    const uint8_t *src, int src_linesize, int src_fmt, int src_w, int src_h,
+    int base_x0, int base_y0, int rect_w, int rect_h, int step_x, int step_y,
+    int max_positions, uint8_t min_brightness, uint8_t max_brightness,
+    unsigned long long *out_counts) {
+  const int pos_idx = (int)blockIdx.x;
+  if (pos_idx >= max_positions) {
+    return;
+  }
+
+  const int tid = (int)threadIdx.x;
+  const UnpaperCudaFormat fmt = (UnpaperCudaFormat)src_fmt;
+
+  // Compute rectangle for this position
+  const int x0 = base_x0 + pos_idx * step_x;
+  const int y0 = base_y0 + pos_idx * step_y;
+
+  // Shared memory for parallel reduction
+  __shared__ unsigned long long sh_count[256];
+
+  // Compute local count for this thread's pixels
+  unsigned long long local_count = 0;
+
+  const int total_pixels = rect_w * rect_h;
+  for (int i = tid; i < total_pixels; i += (int)blockDim.x) {
+    const int rx = i % rect_w;
+    const int ry = i / rect_w;
+    const int x = x0 + rx;
+    const int y = y0 + ry;
+
+    // Only count pixels inside image bounds
+    if (x >= 0 && x < src_w && y >= 0 && y < src_h) {
+      uint8_t r, g, b;
+      read_rgb(src, src_linesize, fmt, x, y, &r, &g, &b);
+      const uint8_t gray = grayscale_u8(r, g, b);
+      if (gray >= min_brightness && gray <= max_brightness) {
+        local_count++;
+      }
+    }
+  }
+
+  sh_count[tid] = local_count;
+  __syncthreads();
+
+  // Parallel reduction
+  for (int offset = (int)blockDim.x / 2; offset > 0; offset >>= 1) {
+    if (tid < offset) {
+      sh_count[tid] += sh_count[tid + offset];
+    }
+    __syncthreads();
+  }
+
+  // Write result
+  if (tid == 0) {
+    out_counts[pos_idx] = sh_count[0];
+  }
+}
