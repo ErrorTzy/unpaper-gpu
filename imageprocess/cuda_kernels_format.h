@@ -12,4 +12,3 @@ typedef enum {
   UNPAPER_CUDA_FMT_MONOWHITE = 4,
   UNPAPER_CUDA_FMT_MONOBLACK = 5,
 } UnpaperCudaFormat;
-

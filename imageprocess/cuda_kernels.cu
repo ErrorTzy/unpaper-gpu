@@ -2,8 +2,8 @@
 //
 // SPDX-License-Identifier: GPL-2.0-only
 
-#include <stdint.h>
 #include <math.h>
+#include <stdint.h>
 
 #include "imageprocess/cuda_kernels_format.h"
 
@@ -12,11 +12,9 @@ static __device__ __forceinline__ uint8_t grayscale_u8(uint8_t r, uint8_t g,
   return (uint8_t)(((uint32_t)r + (uint32_t)g + (uint32_t)b) / 3u);
 }
 
-static __device__ __forceinline__ void read_rgb(const uint8_t *src,
-                                                int src_linesize,
-                                                UnpaperCudaFormat fmt, int x,
-                                                int y, uint8_t *r, uint8_t *g,
-                                                uint8_t *b) {
+static __device__ __forceinline__ void
+read_rgb(const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int x,
+         int y, uint8_t *r, uint8_t *g, uint8_t *b) {
   const uint8_t *row = src + (size_t)y * (size_t)src_linesize;
   switch (fmt) {
   case UNPAPER_CUDA_FMT_GRAY8: {
@@ -42,8 +40,8 @@ static __device__ __forceinline__ void read_rgb(const uint8_t *src,
     const uint8_t byte = row[x / 8];
     const uint8_t mask = (uint8_t)(0x80u >> (x & 7));
     const bool bit_set = (byte & mask) != 0;
-    const bool is_white = (fmt == UNPAPER_CUDA_FMT_MONOBLACK) ? bit_set
-                                                              : (!bit_set);
+    const bool is_white =
+        (fmt == UNPAPER_CUDA_FMT_MONOBLACK) ? bit_set : (!bit_set);
     const uint8_t v = is_white ? 255u : 0u;
     *r = v;
     *g = v;
@@ -57,9 +55,10 @@ static __device__ __forceinline__ void read_rgb(const uint8_t *src,
   }
 }
 
-static __device__ __forceinline__ void read_rgb_safe(
-    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
-    int src_h, int x, int y, uint8_t *r, uint8_t *g, uint8_t *b) {
+static __device__ __forceinline__ void
+read_rgb_safe(const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt,
+              int src_w, int src_h, int x, int y, uint8_t *r, uint8_t *g,
+              uint8_t *b) {
   if (x < 0 || y < 0 || x >= src_w || y >= src_h) {
     *r = 255u;
     *g = 255u;
@@ -86,12 +85,9 @@ static __device__ __forceinline__ uint8_t linear_scale(float x, uint8_t a,
   return (uint8_t)(fa + fb);
 }
 
-static __device__ __forceinline__ void linear_pixel(float x, uint8_t ar,
-                                                    uint8_t ag, uint8_t ab,
-                                                    uint8_t br, uint8_t bg,
-                                                    uint8_t bb, uint8_t *or_,
-                                                    uint8_t *og,
-                                                    uint8_t *ob) {
+static __device__ __forceinline__ void
+linear_pixel(float x, uint8_t ar, uint8_t ag, uint8_t ab, uint8_t br,
+             uint8_t bg, uint8_t bb, uint8_t *or_, uint8_t *og, uint8_t *ob) {
   *or_ = linear_scale(x, ar, br);
   *og = linear_scale(x, ag, bg);
   *ob = linear_scale(x, ab, bb);
@@ -106,43 +102,37 @@ static __device__ __forceinline__ uint8_t cubic_scale(float factor, uint8_t a,
   const float fd = (float)d;
   const float f = factor;
 
-  const float term =
-      (fc - fa +
-       f * (2.0f * fa - 5.0f * fb + 4.0f * fc - fd +
-            f * (3.0f * (fb - fc) + fd - fa)));
+  const float term = (fc - fa +
+                      f * (2.0f * fa - 5.0f * fb + 4.0f * fc - fd +
+                           f * (3.0f * (fb - fc) + fd - fa)));
 
   const int result = (int)(fb + 0.5f * f * term);
   return clip_uint8(result);
 }
 
-static __device__ __forceinline__ void cubic_pixel(float factor, uint8_t a0r,
-                                                   uint8_t a0g, uint8_t a0b,
-                                                   uint8_t a1r, uint8_t a1g,
-                                                   uint8_t a1b, uint8_t a2r,
-                                                   uint8_t a2g, uint8_t a2b,
-                                                   uint8_t a3r, uint8_t a3g,
-                                                   uint8_t a3b, uint8_t *or_,
-                                                   uint8_t *og, uint8_t *ob) {
+static __device__ __forceinline__ void
+cubic_pixel(float factor, uint8_t a0r, uint8_t a0g, uint8_t a0b, uint8_t a1r,
+            uint8_t a1g, uint8_t a1b, uint8_t a2r, uint8_t a2g, uint8_t a2b,
+            uint8_t a3r, uint8_t a3g, uint8_t a3b, uint8_t *or_, uint8_t *og,
+            uint8_t *ob) {
   *or_ = cubic_scale(factor, a0r, a1r, a2r, a3r);
   *og = cubic_scale(factor, a0g, a1g, a2g, a3g);
   *ob = cubic_scale(factor, a0b, a1b, a2b, a3b);
 }
 
-static __device__ __forceinline__ void interp_nn(const uint8_t *src,
-                                                 int src_linesize,
-                                                 UnpaperCudaFormat fmt,
-                                                 int src_w, int src_h,
-                                                 float sx, float sy,
-                                                 uint8_t *r, uint8_t *g,
-                                                 uint8_t *b) {
+static __device__ __forceinline__ void
+interp_nn(const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt,
+          int src_w, int src_h, float sx, float sy, uint8_t *r, uint8_t *g,
+          uint8_t *b) {
   const int ix = (int)floorf(sx + 0.5f);
   const int iy = (int)floorf(sy + 0.5f);
   read_rgb_safe(src, src_linesize, fmt, src_w, src_h, ix, iy, r, g, b);
 }
 
-static __device__ __forceinline__ void interp_bilinear(
-    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
-    int src_h, float sx, float sy, uint8_t *r, uint8_t *g, uint8_t *b) {
+static __device__ __forceinline__ void
+interp_bilinear(const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt,
+                int src_w, int src_h, float sx, float sy, uint8_t *r,
+                uint8_t *g, uint8_t *b) {
   const int p1x = (int)floorf(sx);
   const int p1y = (int)floorf(sy);
   const int p2x = (int)ceilf(sx);
@@ -189,16 +179,15 @@ static __device__ __forceinline__ void interp_bilinear(
                 &b22);
 
   uint8_t rh1, gh1, bh1, rh2, gh2, bh2;
-  linear_pixel(sx - (float)p1x, r11, g11, b11, r21, g21, b21, &rh1, &gh1,
-               &bh1);
-  linear_pixel(sx - (float)p1x, r12, g12, b12, r22, g22, b22, &rh2, &gh2,
-               &bh2);
+  linear_pixel(sx - (float)p1x, r11, g11, b11, r21, g21, b21, &rh1, &gh1, &bh1);
+  linear_pixel(sx - (float)p1x, r12, g12, b12, r22, g22, b22, &rh2, &gh2, &bh2);
   linear_pixel(sy - (float)p1y, rh1, gh1, bh1, rh2, gh2, bh2, r, g, b);
 }
 
-static __device__ __forceinline__ void interp_bicubic(
-    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
-    int src_h, float sx, float sy, uint8_t *r, uint8_t *g, uint8_t *b) {
+static __device__ __forceinline__ void
+interp_bicubic(const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt,
+               int src_w, int src_h, float sx, float sy, uint8_t *r, uint8_t *g,
+               uint8_t *b) {
   const int px = (int)sx;
   const int py = (int)sy;
 
@@ -220,8 +209,8 @@ static __device__ __forceinline__ void interp_bicubic(
     read_rgb_safe(src, src_linesize, fmt, src_w, src_h, px + 2, py + i, &q3r,
                   &q3g, &q3b);
 
-    cubic_pixel(fx, q0r, q0g, q0b, q1r, q1g, q1b, q2r, q2g, q2b, q3r, q3g,
-                q3b, &row_r[i + 1], &row_g[i + 1], &row_b[i + 1]);
+    cubic_pixel(fx, q0r, q0g, q0b, q1r, q1g, q1b, q2r, q2g, q2b, q3r, q3g, q3b,
+                &row_r[i + 1], &row_g[i + 1], &row_b[i + 1]);
   }
 
   cubic_pixel(fy, row_r[0], row_g[0], row_b[0], row_r[1], row_g[1], row_b[1],
@@ -229,11 +218,9 @@ static __device__ __forceinline__ void interp_bicubic(
               b);
 }
 
-static __device__ __forceinline__ void write_pixel(uint8_t *dst,
-                                                   int dst_linesize,
-                                                   UnpaperCudaFormat fmt, int x,
-                                                   int y, uint8_t r, uint8_t g,
-                                                   uint8_t b) {
+static __device__ __forceinline__ void
+write_pixel(uint8_t *dst, int dst_linesize, UnpaperCudaFormat fmt, int x, int y,
+            uint8_t r, uint8_t g, uint8_t b) {
   uint8_t *row = dst + (size_t)y * (size_t)dst_linesize;
   switch (fmt) {
   case UNPAPER_CUDA_FMT_GRAY8: {
@@ -280,8 +267,8 @@ static __device__ __forceinline__ uint8_t read_darkness_inverse(
     const uint8_t byte = row[x / 8];
     const uint8_t mask = (uint8_t)(0x80u >> (x & 7));
     const bool bit_set = (byte & mask) != 0;
-    const bool is_white = (fmt == UNPAPER_CUDA_FMT_MONOBLACK) ? bit_set
-                                                              : (!bit_set);
+    const bool is_white =
+        (fmt == UNPAPER_CUDA_FMT_MONOBLACK) ? bit_set : (!bit_set);
     return is_white ? 255u : 0u;
   }
   default:
@@ -370,19 +357,21 @@ extern "C" __global__ void unpaper_detect_edge_rotation_peaks(
   }
 }
 
-static __device__ __forceinline__ void interp_nn_round(
-    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
-    int src_h, float sx, float sy, uint8_t *r, uint8_t *g, uint8_t *b) {
+static __device__ __forceinline__ void
+interp_nn_round(const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt,
+                int src_w, int src_h, float sx, float sy, uint8_t *r,
+                uint8_t *g, uint8_t *b) {
   const int ix = (int)roundf(sx);
   const int iy = (int)roundf(sy);
   read_rgb_safe(src, src_linesize, fmt, src_w, src_h, ix, iy, r, g, b);
 }
 
-extern "C" __global__ void unpaper_rotate_bytes(
-    const uint8_t *src, int src_linesize, uint8_t *dst, int dst_linesize,
-    int fmt, int src_w, int src_h, int dst_w, int dst_h, float src_center_x,
-    float src_center_y, float dst_center_x, float dst_center_y, float cosval,
-    float sinval, int interp_type) {
+extern "C" __global__ void
+unpaper_rotate_bytes(const uint8_t *src, int src_linesize, uint8_t *dst,
+                     int dst_linesize, int fmt, int src_w, int src_h, int dst_w,
+                     int dst_h, float src_center_x, float src_center_y,
+                     float dst_center_x, float dst_center_y, float cosval,
+                     float sinval, int interp_type) {
   const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
   if (x < 0 || y < 0 || x >= dst_w || y >= dst_h) {
@@ -407,12 +396,13 @@ extern "C" __global__ void unpaper_rotate_bytes(
   write_pixel(dst, dst_linesize, f, x, y, r, g, b);
 }
 
-extern "C" __global__ void unpaper_rotate_mono(
-    const uint8_t *src, int src_linesize, int src_fmt, uint8_t *dst,
-    int dst_linesize, int dst_fmt, int src_w, int src_h, int dst_w, int dst_h,
-    float src_center_x, float src_center_y, float dst_center_x,
-    float dst_center_y, float cosval, float sinval, int interp_type,
-    uint8_t abs_black_threshold) {
+extern "C" __global__ void
+unpaper_rotate_mono(const uint8_t *src, int src_linesize, int src_fmt,
+                    uint8_t *dst, int dst_linesize, int dst_fmt, int src_w,
+                    int src_h, int dst_w, int dst_h, float src_center_x,
+                    float src_center_y, float dst_center_x, float dst_center_y,
+                    float cosval, float sinval, int interp_type,
+                    uint8_t abs_black_threshold) {
   const int bytes_per_row = (dst_w + 7) / 8;
   const int byte_x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
@@ -445,9 +435,10 @@ extern "C" __global__ void unpaper_rotate_mono(
 
     const uint8_t gray = grayscale_u8(r, g, b);
     const bool pixel_black = gray < abs_black_threshold;
-    const bool bit_set = ((UnpaperCudaFormat)dst_fmt == UNPAPER_CUDA_FMT_MONOWHITE)
-                             ? pixel_black
-                             : !pixel_black;
+    const bool bit_set =
+        ((UnpaperCudaFormat)dst_fmt == UNPAPER_CUDA_FMT_MONOWHITE)
+            ? pixel_black
+            : !pixel_black;
     if (bit_set) {
       out = (uint8_t)(out | (uint8_t)(0x80u >> bit));
     }
@@ -456,9 +447,10 @@ extern "C" __global__ void unpaper_rotate_mono(
   dst[(size_t)y * (size_t)dst_linesize + (size_t)byte_x] = out;
 }
 
-extern "C" __global__ void unpaper_wipe_rect_bytes(
-    uint8_t *dst, int dst_linesize, int x0, int y0, int x1, int y1,
-    int bytes_per_pixel, uint8_t c0, uint8_t c1, uint8_t c2) {
+extern "C" __global__ void
+unpaper_wipe_rect_bytes(uint8_t *dst, int dst_linesize, int x0, int y0, int x1,
+                        int y1, int bytes_per_pixel, uint8_t c0, uint8_t c1,
+                        uint8_t c2) {
   const int rx = x1 - x0 + 1;
   const int ry = y1 - y0 + 1;
   const int x = x0 + (int)(blockIdx.x * blockDim.x + threadIdx.x);
@@ -481,9 +473,10 @@ extern "C" __global__ void unpaper_wipe_rect_bytes(
   }
 }
 
-extern "C" __global__ void unpaper_wipe_rect_mono(uint8_t *dst, int dst_linesize,
-                                                  int x0, int y0, int x1,
-                                                  int y1, uint8_t bit_set) {
+extern "C" __global__ void unpaper_wipe_rect_mono(uint8_t *dst,
+                                                  int dst_linesize, int x0,
+                                                  int y0, int x1, int y1,
+                                                  uint8_t bit_set) {
   const int first_byte = x0 / 8;
   const int last_byte = x1 / 8;
   const int bytes_span = last_byte - first_byte + 1;
@@ -514,10 +507,11 @@ extern "C" __global__ void unpaper_wipe_rect_mono(uint8_t *dst, int dst_linesize
   }
 }
 
-extern "C" __global__ void unpaper_copy_rect_to_bytes(
-    const uint8_t *src, int src_linesize, int src_fmt, uint8_t *dst,
-    int dst_linesize, int dst_fmt, int src_x0, int src_y0, int dst_x0,
-    int dst_y0, int w, int h) {
+extern "C" __global__ void
+unpaper_copy_rect_to_bytes(const uint8_t *src, int src_linesize, int src_fmt,
+                           uint8_t *dst, int dst_linesize, int dst_fmt,
+                           int src_x0, int src_y0, int dst_x0, int dst_y0,
+                           int w, int h) {
   const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
   if (x < 0 || y < 0 || x >= w || y >= h) {
@@ -531,10 +525,11 @@ extern "C" __global__ void unpaper_copy_rect_to_bytes(
               dst_y0 + y, r, g, b);
 }
 
-extern "C" __global__ void unpaper_copy_rect_to_mono(
-    const uint8_t *src, int src_linesize, int src_fmt, uint8_t *dst,
-    int dst_linesize, int dst_fmt, int src_x0, int src_y0, int dst_x0,
-    int dst_y0, int w, int h, uint8_t abs_black_threshold) {
+extern "C" __global__ void
+unpaper_copy_rect_to_mono(const uint8_t *src, int src_linesize, int src_fmt,
+                          uint8_t *dst, int dst_linesize, int dst_fmt,
+                          int src_x0, int src_y0, int dst_x0, int dst_y0, int w,
+                          int h, uint8_t abs_black_threshold) {
   const int first_byte = dst_x0 / 8;
   const int last_byte = (dst_x0 + w - 1) / 8;
   const int bytes_span = last_byte - first_byte + 1;
@@ -568,8 +563,9 @@ extern "C" __global__ void unpaper_copy_rect_to_mono(
     const bool pixel_black = gray < abs_black_threshold;
 
     const bool bit_set =
-        ((UnpaperCudaFormat)dst_fmt == UNPAPER_CUDA_FMT_MONOWHITE) ? pixel_black
-                                                                   : !pixel_black;
+        ((UnpaperCudaFormat)dst_fmt == UNPAPER_CUDA_FMT_MONOWHITE)
+            ? pixel_black
+            : !pixel_black;
     const uint8_t mask = (uint8_t)(0x80u >> bit);
     if (bit_set) {
       v = (uint8_t)(v | mask);
@@ -636,9 +632,10 @@ extern "C" __global__ void unpaper_mirror_mono(const uint8_t *src,
   dst[(size_t)y * (size_t)dst_linesize + (size_t)byte_x] = out;
 }
 
-extern "C" __global__ void unpaper_rotate90_bytes(
-    const uint8_t *src, int src_linesize, uint8_t *dst, int dst_linesize,
-    int fmt, int src_w, int src_h, int direction) {
+extern "C" __global__ void
+unpaper_rotate90_bytes(const uint8_t *src, int src_linesize, uint8_t *dst,
+                       int dst_linesize, int fmt, int src_w, int src_h,
+                       int direction) {
   const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
   if (x < 0 || y < 0 || x >= src_w || y >= src_h) {
@@ -710,9 +707,10 @@ extern "C" __global__ void unpaper_rotate90_mono(const uint8_t *src,
   dst[(size_t)dy * (size_t)dst_linesize + (size_t)byte_x] = out;
 }
 
-extern "C" __global__ void unpaper_stretch_bytes(
-    const uint8_t *src, int src_linesize, uint8_t *dst, int dst_linesize,
-    int fmt, int src_w, int src_h, int dst_w, int dst_h, int interp_type) {
+extern "C" __global__ void
+unpaper_stretch_bytes(const uint8_t *src, int src_linesize, uint8_t *dst,
+                      int dst_linesize, int fmt, int src_w, int src_h,
+                      int dst_w, int dst_h, int interp_type) {
   const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
   if (x < 0 || y < 0 || x >= dst_w || y >= dst_h) {
@@ -738,10 +736,11 @@ extern "C" __global__ void unpaper_stretch_bytes(
   write_pixel(dst, dst_linesize, f, x, y, r, g, b);
 }
 
-extern "C" __global__ void unpaper_stretch_mono(
-    const uint8_t *src, int src_linesize, int src_fmt, uint8_t *dst,
-    int dst_linesize, int dst_fmt, int src_w, int src_h, int dst_w, int dst_h,
-    int interp_type, uint8_t abs_black_threshold) {
+extern "C" __global__ void
+unpaper_stretch_mono(const uint8_t *src, int src_linesize, int src_fmt,
+                     uint8_t *dst, int dst_linesize, int dst_fmt, int src_w,
+                     int src_h, int dst_w, int dst_h, int interp_type,
+                     uint8_t abs_black_threshold) {
   const int bytes_per_row = (dst_w + 7) / 8;
   const int byte_x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
@@ -775,9 +774,10 @@ extern "C" __global__ void unpaper_stretch_mono(
 
     const uint8_t gray = grayscale_u8(r, g, b);
     const bool pixel_black = gray < abs_black_threshold;
-    const bool bit_set = ((UnpaperCudaFormat)dst_fmt == UNPAPER_CUDA_FMT_MONOWHITE)
-                             ? pixel_black
-                             : !pixel_black;
+    const bool bit_set =
+        ((UnpaperCudaFormat)dst_fmt == UNPAPER_CUDA_FMT_MONOWHITE)
+            ? pixel_black
+            : !pixel_black;
     if (bit_set) {
       out = (uint8_t)(out | (uint8_t)(0x80u >> bit));
     }
@@ -809,9 +809,9 @@ static __device__ __forceinline__ uint8_t darkness_inverse_u8(uint8_t r,
   return max3_u8(r, g, b);
 }
 
-static __device__ __forceinline__ void set_pixel_white_safe(
-    uint8_t *dst, int dst_linesize, UnpaperCudaFormat fmt, int dst_w, int dst_h,
-    int x, int y) {
+static __device__ __forceinline__ void
+set_pixel_white_safe(uint8_t *dst, int dst_linesize, UnpaperCudaFormat fmt,
+                     int dst_w, int dst_h, int x, int y) {
   if (x < 0 || y < 0 || x >= dst_w || y >= dst_h) {
     return;
   }
@@ -856,7 +856,8 @@ extern "C" __global__ void unpaper_count_brightness_range(
     return;
   }
 
-  const unsigned long long total = (unsigned long long)w * (unsigned long long)h;
+  const unsigned long long total =
+      (unsigned long long)w * (unsigned long long)h;
   unsigned long long idx =
       (unsigned long long)blockIdx.x * (unsigned long long)blockDim.x +
       (unsigned long long)threadIdx.x;
@@ -881,16 +882,18 @@ extern "C" __global__ void unpaper_count_brightness_range(
   }
 }
 
-extern "C" __global__ void unpaper_sum_lightness_rect(
-    const uint8_t *src, int src_linesize, int src_fmt, int src_w, int src_h,
-    int x0, int y0, int x1, int y1, unsigned long long *out_sum) {
+extern "C" __global__ void
+unpaper_sum_lightness_rect(const uint8_t *src, int src_linesize, int src_fmt,
+                           int src_w, int src_h, int x0, int y0, int x1, int y1,
+                           unsigned long long *out_sum) {
   const int w = x1 - x0 + 1;
   const int h = y1 - y0 + 1;
   if (w <= 0 || h <= 0) {
     return;
   }
 
-  const unsigned long long total = (unsigned long long)w * (unsigned long long)h;
+  const unsigned long long total =
+      (unsigned long long)w * (unsigned long long)h;
   unsigned long long idx =
       (unsigned long long)blockIdx.x * (unsigned long long)blockDim.x +
       (unsigned long long)threadIdx.x;
@@ -912,9 +915,10 @@ extern "C" __global__ void unpaper_sum_lightness_rect(
   }
 }
 
-extern "C" __global__ void unpaper_sum_grayscale_rect(
-    const uint8_t *src, int src_linesize, int src_fmt, int src_w, int src_h,
-    int x0, int y0, int x1, int y1, unsigned long long *out_sum) {
+extern "C" __global__ void
+unpaper_sum_grayscale_rect(const uint8_t *src, int src_linesize, int src_fmt,
+                           int src_w, int src_h, int x0, int y0, int x1, int y1,
+                           unsigned long long *out_sum) {
   const int w = x1 - x0 + 1;
   const int h = y1 - y0 + 1;
   if (w <= 0 || h <= 0) {
@@ -953,7 +957,8 @@ extern "C" __global__ void unpaper_sum_darkness_inverse_rect(
     return;
   }
 
-  const unsigned long long total = (unsigned long long)w * (unsigned long long)h;
+  const unsigned long long total =
+      (unsigned long long)w * (unsigned long long)h;
   unsigned long long idx =
       (unsigned long long)blockIdx.x * (unsigned long long)blockDim.x +
       (unsigned long long)threadIdx.x;
@@ -975,8 +980,8 @@ extern "C" __global__ void unpaper_sum_darkness_inverse_rect(
   }
 }
 
-static __device__ __forceinline__ bool rect_contains_point(
-    const int32_t *rects, int rect_index, int x, int y) {
+static __device__ __forceinline__ bool
+rect_contains_point(const int32_t *rects, int rect_index, int x, int y) {
   const int32_t x0 = rects[rect_index * 4 + 0];
   const int32_t y0 = rects[rect_index * 4 + 1];
   const int32_t x1 = rects[rect_index * 4 + 2];
@@ -984,9 +989,10 @@ static __device__ __forceinline__ bool rect_contains_point(
   return x >= x0 && x <= x1 && y >= y0 && y <= y1;
 }
 
-extern "C" __global__ void unpaper_apply_masks_bytes(
-    uint8_t *img, int img_linesize, int img_fmt, int img_w, int img_h,
-    const int32_t *rects, int rect_count, uint8_t r, uint8_t g, uint8_t b) {
+extern "C" __global__ void
+unpaper_apply_masks_bytes(uint8_t *img, int img_linesize, int img_fmt,
+                          int img_w, int img_h, const int32_t *rects,
+                          int rect_count, uint8_t r, uint8_t g, uint8_t b) {
   const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
   if (x < 0 || y < 0 || x >= img_w || y >= img_h) {
@@ -1007,9 +1013,10 @@ extern "C" __global__ void unpaper_apply_masks_bytes(
   write_pixel(img, img_linesize, fmt, x, y, r, g, b);
 }
 
-extern "C" __global__ void unpaper_apply_masks_mono(
-    uint8_t *img, int img_linesize, int img_fmt, int img_w, int img_h,
-    const int32_t *rects, int rect_count, uint8_t bit_value) {
+extern "C" __global__ void
+unpaper_apply_masks_mono(uint8_t *img, int img_linesize, int img_fmt, int img_w,
+                         int img_h, const int32_t *rects, int rect_count,
+                         uint8_t bit_value) {
   const int bytes_span = (img_w + 7) / 8;
 
   const int byte_x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
@@ -1056,9 +1063,9 @@ extern "C" __global__ void unpaper_apply_masks_mono(
   }
 }
 
-static __device__ __forceinline__ uint8_t get_grayscale_safe(
-    const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt, int src_w,
-    int src_h, int x, int y) {
+static __device__ __forceinline__ uint8_t
+get_grayscale_safe(const uint8_t *src, int src_linesize, UnpaperCudaFormat fmt,
+                   int src_w, int src_h, int x, int y) {
   uint8_t r, g, b;
   read_rgb_safe(src, src_linesize, fmt, src_w, src_h, x, y, &r, &g, &b);
   return grayscale_u8(r, g, b);
@@ -1072,17 +1079,18 @@ static __device__ __forceinline__ uint8_t get_darkness_inverse_safe(
   return darkness_inverse_u8(r, g, b);
 }
 
-static __device__ __forceinline__ bool noisefilter_is_dark(
-    const uint8_t *img, int img_linesize, UnpaperCudaFormat fmt, int w, int h,
-    int x, int y, uint8_t min_white_level) {
+static __device__ __forceinline__ bool
+noisefilter_is_dark(const uint8_t *img, int img_linesize, UnpaperCudaFormat fmt,
+                    int w, int h, int x, int y, uint8_t min_white_level) {
   const uint8_t darkness =
       get_darkness_inverse_safe(img, img_linesize, fmt, w, h, x, y);
   return darkness < min_white_level;
 }
 
-extern "C" __global__ void unpaper_noisefilter_build_labels(
-    const uint8_t *img, int img_linesize, int img_fmt, int w, int h,
-    uint8_t min_white_level, uint32_t *labels) {
+extern "C" __global__ void
+unpaper_noisefilter_build_labels(const uint8_t *img, int img_linesize,
+                                 int img_fmt, int w, int h,
+                                 uint8_t min_white_level, uint32_t *labels) {
   const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
   if (x >= w || y >= h) {
@@ -1091,15 +1099,15 @@ extern "C" __global__ void unpaper_noisefilter_build_labels(
 
   const int idx = y * w + x;
   const UnpaperCudaFormat fmt = (UnpaperCudaFormat)img_fmt;
-  labels[idx] = noisefilter_is_dark(img, img_linesize, fmt, w, h, x, y,
-                                    min_white_level)
-                    ? (uint32_t)(idx + 1)
-                    : 0u;
+  labels[idx] =
+      noisefilter_is_dark(img, img_linesize, fmt, w, h, x, y, min_white_level)
+          ? (uint32_t)(idx + 1)
+          : 0u;
 }
 
-extern "C" __global__ void unpaper_noisefilter_propagate(
-    const uint32_t *labels_in, uint32_t *labels_out, int w, int h,
-    int *changed) {
+extern "C" __global__ void
+unpaper_noisefilter_propagate(const uint32_t *labels_in, uint32_t *labels_out,
+                              int w, int h, int *changed) {
   const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
   if (x >= w || y >= h) {
@@ -1152,10 +1160,10 @@ extern "C" __global__ void unpaper_noisefilter_count(const uint32_t *labels,
   atomicAdd(&counts[label], 1u);
 }
 
-extern "C" __global__ void unpaper_noisefilter_apply(
-    uint8_t *img, int img_linesize, int img_fmt, int w, int h,
-    const uint32_t *labels, const uint32_t *counts,
-    unsigned long long intensity) {
+extern "C" __global__ void
+unpaper_noisefilter_apply(uint8_t *img, int img_linesize, int img_fmt, int w,
+                          int h, const uint32_t *labels, const uint32_t *counts,
+                          unsigned long long intensity) {
   const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
   if (x >= w || y >= h) {
@@ -1177,9 +1185,10 @@ extern "C" __global__ void unpaper_noisefilter_apply(
 
 // Apply noisefilter mask directly on GPU:
 // If mask is 0 (small component removed) and pixel is dark, set to white.
-extern "C" __global__ void unpaper_noisefilter_apply_mask(
-    uint8_t *img, int img_linesize, int img_fmt, int w, int h,
-    const uint8_t *mask, int mask_linesize, uint8_t min_white_level) {
+extern "C" __global__ void
+unpaper_noisefilter_apply_mask(uint8_t *img, int img_linesize, int img_fmt,
+                               int w, int h, const uint8_t *mask,
+                               int mask_linesize, uint8_t min_white_level) {
   const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
   if (x >= w || y >= h) {
@@ -1229,10 +1238,11 @@ typedef struct {
   int y;
 } UnpaperCudaPoint;
 
-static __device__ __forceinline__ unsigned long long flood_fill_line_cuda(
-    uint8_t *img, int img_linesize, UnpaperCudaFormat fmt, int w, int h, int px,
-    int py, int step_x, int step_y, uint8_t mask_min, uint8_t mask_max,
-    unsigned long long intensity) {
+static __device__ __forceinline__ unsigned long long
+flood_fill_line_cuda(uint8_t *img, int img_linesize, UnpaperCudaFormat fmt,
+                     int w, int h, int px, int py, int step_x, int step_y,
+                     uint8_t mask_min, uint8_t mask_max,
+                     unsigned long long intensity) {
   unsigned long long distance = 0;
   unsigned long long intensityCount = 1ull;
 
@@ -1263,9 +1273,8 @@ static __device__ __forceinline__ unsigned long long flood_fill_line_cuda(
   }
 }
 
-static __device__ __forceinline__ void stack_push(UnpaperCudaPoint *stack,
-                                                  int *top, int cap, int x,
-                                                  int y) {
+static __device__ __forceinline__ void
+stack_push(UnpaperCudaPoint *stack, int *top, int cap, int x, int y) {
   const int t = *top;
   if (t >= cap) {
     return;
@@ -1274,9 +1283,8 @@ static __device__ __forceinline__ void stack_push(UnpaperCudaPoint *stack,
   *top = t + 1;
 }
 
-static __device__ __forceinline__ bool stack_pop(UnpaperCudaPoint *stack,
-                                                 int *top,
-                                                 UnpaperCudaPoint *out) {
+static __device__ __forceinline__ bool
+stack_pop(UnpaperCudaPoint *stack, int *top, UnpaperCudaPoint *out) {
   const int t = *top;
   if (t <= 0) {
     return false;
@@ -1286,10 +1294,11 @@ static __device__ __forceinline__ bool stack_pop(UnpaperCudaPoint *stack,
   return true;
 }
 
-static __device__ __forceinline__ void flood_fill_cuda(
-    uint8_t *img, int img_linesize, UnpaperCudaFormat fmt, int w, int h, int sx,
-    int sy, uint8_t mask_min, uint8_t mask_max, unsigned long long intensity,
-    UnpaperCudaPoint *stack, int stack_cap) {
+static __device__ __forceinline__ void
+flood_fill_cuda(uint8_t *img, int img_linesize, UnpaperCudaFormat fmt, int w,
+                int h, int sx, int sy, uint8_t mask_min, uint8_t mask_max,
+                unsigned long long intensity, UnpaperCudaPoint *stack,
+                int stack_cap) {
   const uint8_t seed = get_grayscale_safe(img, img_linesize, fmt, w, h, sx, sy);
   if (seed < mask_min || seed > mask_max) {
     return;
@@ -1308,18 +1317,18 @@ static __device__ __forceinline__ void flood_fill_cuda(
 
     set_pixel_white_safe(img, img_linesize, fmt, w, h, p.x, p.y);
 
-    const unsigned long long left = flood_fill_line_cuda(
-        img, img_linesize, fmt, w, h, p.x, p.y, -1, 0, mask_min, mask_max,
-        intensity);
-    const unsigned long long up = flood_fill_line_cuda(
-        img, img_linesize, fmt, w, h, p.x, p.y, 0, -1, mask_min, mask_max,
-        intensity);
-    const unsigned long long right = flood_fill_line_cuda(
-        img, img_linesize, fmt, w, h, p.x, p.y, 1, 0, mask_min, mask_max,
-        intensity);
-    const unsigned long long down = flood_fill_line_cuda(
-        img, img_linesize, fmt, w, h, p.x, p.y, 0, 1, mask_min, mask_max,
-        intensity);
+    const unsigned long long left =
+        flood_fill_line_cuda(img, img_linesize, fmt, w, h, p.x, p.y, -1, 0,
+                             mask_min, mask_max, intensity);
+    const unsigned long long up =
+        flood_fill_line_cuda(img, img_linesize, fmt, w, h, p.x, p.y, 0, -1,
+                             mask_min, mask_max, intensity);
+    const unsigned long long right =
+        flood_fill_line_cuda(img, img_linesize, fmt, w, h, p.x, p.y, 1, 0,
+                             mask_min, mask_max, intensity);
+    const unsigned long long down =
+        flood_fill_line_cuda(img, img_linesize, fmt, w, h, p.x, p.y, 0, 1,
+                             mask_min, mask_max, intensity);
 
     int qx = p.x;
     for (unsigned long long d = 0; d < left; d++) {
@@ -1355,7 +1364,8 @@ extern "C" __global__ void unpaper_blackfilter_floodfill_rect(
     uint8_t *img, int img_linesize, int img_fmt, int w, int h, int x0, int y0,
     int x1, int y1, uint8_t mask_max, unsigned long long intensity,
     UnpaperCudaPoint *stack, int stack_cap) {
-  if (blockIdx.x != 0 || threadIdx.x != 0 || blockIdx.y != 0 || threadIdx.y != 0) {
+  if (blockIdx.x != 0 || threadIdx.x != 0 || blockIdx.y != 0 ||
+      threadIdx.y != 0) {
     return;
   }
 
@@ -1380,18 +1390,24 @@ extern "C" __global__ void unpaper_blackfilter_floodfill_rect(
 // Helper: compute sum from NPP integral image for rectangle (x0,y0) to (x1,y1)
 // NPP format: I[y,x] = sum of pixels from (0,0) to (x-1,y-1) EXCLUSIVE
 // First row (y=0) and first column (x=0) are always zero.
-// Sum of rect (x0,y0)-(x1,y1) = I[y1+1,x1+1] - I[y0,x1+1] - I[y1+1,x0] + I[y0,x0]
+// Sum of rect (x0,y0)-(x1,y1) = I[y1+1,x1+1] - I[y0,x1+1] - I[y1+1,x0] +
+// I[y0,x0]
 //
 // IMPORTANT: The integral image is now (img_w+1) x (img_h+1) due to padding.
-// This ensures all boundary accesses are valid for tiles within the original image.
-static __device__ __forceinline__ int64_t npp_integral_rect_sum(
-    const int32_t *integral, int integral_step_i32, int img_w, int img_h,
-    int x0, int y0, int x1, int y1) {
+// This ensures all boundary accesses are valid for tiles within the original
+// image.
+static __device__ __forceinline__ int64_t
+npp_integral_rect_sum(const int32_t *integral, int integral_step_i32, int img_w,
+                      int img_h, int x0, int y0, int x1, int y1) {
   // Clamp coordinates to original image bounds
-  if (x0 < 0) x0 = 0;
-  if (y0 < 0) y0 = 0;
-  if (x1 >= img_w) x1 = img_w - 1;
-  if (y1 >= img_h) y1 = img_h - 1;
+  if (x0 < 0)
+    x0 = 0;
+  if (y0 < 0)
+    y0 = 0;
+  if (x1 >= img_w)
+    x1 = img_w - 1;
+  if (y1 >= img_h)
+    y1 = img_h - 1;
   if (x0 > x1 || y0 > y1) {
     return 0;
   }
@@ -1422,14 +1438,14 @@ typedef struct {
 } UnpaperBlurfilterBlock;
 
 extern "C" __global__ void unpaper_blurfilter_scan(
-    const int32_t *integral,     // GPU integral image (NPP format)
-    int integral_step,           // Bytes per row of integral image
-    int img_w, int img_h,        // Original image dimensions
-    int block_w, int block_h,    // Block size
-    float intensity,             // Isolation threshold (ratio)
+    const int32_t *integral,            // GPU integral image (NPP format)
+    int integral_step,                  // Bytes per row of integral image
+    int img_w, int img_h,               // Original image dimensions
+    int block_w, int block_h,           // Block size
+    float intensity,                    // Isolation threshold (ratio)
     UnpaperBlurfilterBlock *out_blocks, // Output: block coordinates
-    int *out_count,              // Output: number of blocks found (atomic)
-    int max_blocks) {            // Maximum blocks to output
+    int *out_count,   // Output: number of blocks found (atomic)
+    int max_blocks) { // Maximum blocks to output
   // Calculate which block this thread processes
   const int bx = (int)(blockIdx.x * blockDim.x + threadIdx.x);
   const int by = (int)(blockIdx.y * blockDim.y + threadIdx.y);
@@ -1463,9 +1479,9 @@ extern "C" __global__ void unpaper_blurfilter_scan(
   }
 
   // Check all 4 diagonal neighbors for isolation
-  // A block is isolated if ALL neighbors AND the block itself have ratio <= intensity
-  // Missing boundary neighbors are treated as having max density (100%)
-  // to prevent wiping edge blocks where we can't determine isolation
+  // A block is isolated if ALL neighbors AND the block itself have ratio <=
+  // intensity Missing boundary neighbors are treated as having max density
+  // (100%) to prevent wiping edge blocks where we can't determine isolation
   // Start with current block's count (matches CPU blurfilter logic)
   int64_t max_neighbor = dark_count;
 
@@ -1473,11 +1489,12 @@ extern "C" __global__ void unpaper_blurfilter_scan(
   if (bx > 0 && by > 0) {
     int nx0 = (bx - 1) * block_w;
     int ny0 = (by - 1) * block_h;
-    int64_t n_sum = npp_integral_rect_sum(integral, integral_step_i32, img_w,
-                                          img_h, nx0, ny0,
-                                          nx0 + block_w - 1, ny0 + block_h - 1);
+    int64_t n_sum =
+        npp_integral_rect_sum(integral, integral_step_i32, img_w, img_h, nx0,
+                              ny0, nx0 + block_w - 1, ny0 + block_h - 1);
     int64_t n_count = n_sum / 255;
-    if (n_count > max_neighbor) max_neighbor = n_count;
+    if (n_count > max_neighbor)
+      max_neighbor = n_count;
   } else {
     // Boundary: treat as max density
     max_neighbor = total_pixels;
@@ -1487,11 +1504,12 @@ extern "C" __global__ void unpaper_blurfilter_scan(
   if (bx < blocks_per_row - 1 && by > 0) {
     int nx0 = (bx + 1) * block_w;
     int ny0 = (by - 1) * block_h;
-    int64_t n_sum = npp_integral_rect_sum(integral, integral_step_i32, img_w,
-                                          img_h, nx0, ny0,
-                                          nx0 + block_w - 1, ny0 + block_h - 1);
+    int64_t n_sum =
+        npp_integral_rect_sum(integral, integral_step_i32, img_w, img_h, nx0,
+                              ny0, nx0 + block_w - 1, ny0 + block_h - 1);
     int64_t n_count = n_sum / 255;
-    if (n_count > max_neighbor) max_neighbor = n_count;
+    if (n_count > max_neighbor)
+      max_neighbor = n_count;
   } else {
     // Boundary: treat as max density
     max_neighbor = total_pixels;
@@ -1501,11 +1519,12 @@ extern "C" __global__ void unpaper_blurfilter_scan(
   if (bx > 0 && by < blocks_per_col - 1) {
     int nx0 = (bx - 1) * block_w;
     int ny0 = (by + 1) * block_h;
-    int64_t n_sum = npp_integral_rect_sum(integral, integral_step_i32, img_w,
-                                          img_h, nx0, ny0,
-                                          nx0 + block_w - 1, ny0 + block_h - 1);
+    int64_t n_sum =
+        npp_integral_rect_sum(integral, integral_step_i32, img_w, img_h, nx0,
+                              ny0, nx0 + block_w - 1, ny0 + block_h - 1);
     int64_t n_count = n_sum / 255;
-    if (n_count > max_neighbor) max_neighbor = n_count;
+    if (n_count > max_neighbor)
+      max_neighbor = n_count;
   } else {
     // Boundary: treat as max density
     max_neighbor = total_pixels;
@@ -1515,11 +1534,12 @@ extern "C" __global__ void unpaper_blurfilter_scan(
   if (bx < blocks_per_row - 1 && by < blocks_per_col - 1) {
     int nx0 = (bx + 1) * block_w;
     int ny0 = (by + 1) * block_h;
-    int64_t n_sum = npp_integral_rect_sum(integral, integral_step_i32, img_w,
-                                          img_h, nx0, ny0,
-                                          nx0 + block_w - 1, ny0 + block_h - 1);
+    int64_t n_sum =
+        npp_integral_rect_sum(integral, integral_step_i32, img_w, img_h, nx0,
+                              ny0, nx0 + block_w - 1, ny0 + block_h - 1);
     int64_t n_count = n_sum / 255;
-    if (n_count > max_neighbor) max_neighbor = n_count;
+    if (n_count > max_neighbor)
+      max_neighbor = n_count;
   } else {
     // Boundary: treat as max density
     max_neighbor = total_pixels;
@@ -1558,31 +1578,34 @@ typedef struct {
  * - Has no neighbor isolation check
  *
  * @param gray_integral   GPU integral of grayscale image (NPP format)
- * @param dark_integral   GPU integral of dark mask (pixels <= black_threshold -> 255)
+ * @param dark_integral   GPU integral of dark mask (pixels <= black_threshold
+ * -> 255)
  * @param gray_step       Bytes per row of gray integral image
  * @param dark_step       Bytes per row of dark integral image
  * @param img_w, img_h    Original image dimensions
  * @param tile_w, tile_h  Tile size
  * @param step_x, step_y  Step size for tile positions
- * @param gray_threshold  Inverse lightness threshold (255 - avg_lightness must be < this)
+ * @param gray_threshold  Inverse lightness threshold (255 - avg_lightness must
+ * be < this)
  * @param out_tiles       Output: tile coordinates to wipe
  * @param out_count       Output: number of tiles found (atomic counter)
  * @param max_tiles       Maximum tiles to output
  */
 extern "C" __global__ void unpaper_grayfilter_scan(
-    const int32_t *gray_integral,  // GPU integral of grayscale image
-    const int32_t *dark_integral,  // GPU integral of dark mask
-    int gray_step,                 // Bytes per row of gray integral
-    int dark_step,                 // Bytes per row of dark integral
-    int img_w, int img_h,          // Original image dimensions
-    int tile_w, int tile_h,        // Tile size
-    int step_x, int step_y,        // Step size
-    int gray_threshold,            // Inverse lightness threshold (use int for alignment)
+    const int32_t *gray_integral, // GPU integral of grayscale image
+    const int32_t *dark_integral, // GPU integral of dark mask
+    int gray_step,                // Bytes per row of gray integral
+    int dark_step,                // Bytes per row of dark integral
+    int img_w, int img_h,         // Original image dimensions
+    int tile_w, int tile_h,       // Tile size
+    int step_x, int step_y,       // Step size
+    int gray_threshold, // Inverse lightness threshold (use int for alignment)
     UnpaperGrayfilterTile *out_tiles, // Output: tile coordinates
-    int *out_count,                // Output: number of tiles found (atomic)
-    int max_tiles) {               // Maximum tiles to output
+    int *out_count,                   // Output: number of tiles found (atomic)
+    int max_tiles) {                  // Maximum tiles to output
   // Calculate number of tile positions in each dimension
-  // Tiles are placed at positions: 0, step_x, 2*step_x, ... while x + tile_w <= img_w
+  // Tiles are placed at positions: 0, step_x, 2*step_x, ... while x + tile_w <=
+  // img_w
   const int tiles_per_row = (img_w - tile_w) / step_x + 1;
   const int tiles_per_col = (img_h - tile_h) / step_y + 1;
 
@@ -1622,7 +1645,7 @@ extern "C" __global__ void unpaper_grayfilter_scan(
 
   // No dark pixels - check average lightness
   int64_t lightness_sum = npp_integral_rect_sum(gray_integral, gray_step_i32,
-                                                 img_w, img_h, x0, y0, x1, y1);
+                                                img_w, img_h, x0, y0, x1, y1);
   uint8_t avg_lightness = (uint8_t)(lightness_sum / tile_pixels);
   uint8_t inverse_lightness = 255 - avg_lightness;
 
@@ -1635,4 +1658,141 @@ extern "C" __global__ void unpaper_grayfilter_scan(
       out_tiles[idx].y = y0;
     }
   }
+}
+
+// GPU-parallel blackfilter: wipe dark pixels in multiple rectangular regions
+// This replaces the sequential flood-fill approach with fully parallel
+// processing. Each thread handles one pixel, checks if it's in any wipe region
+// and dark, and sets it to white if so.
+//
+// Parameters:
+//   rects: Array of rectangles [x0,y0,x1,y1, x0,y0,x1,y1, ...] (expanded by
+//   intensity) rect_count: Number of rectangles black_threshold: Pixels with
+//   grayscale <= this are considered "dark"
+extern "C" __global__ void
+unpaper_blackfilter_wipe_regions(uint8_t *img, int img_linesize, int img_fmt,
+                                 int w, int h, const int32_t *rects,
+                                 int rect_count, uint8_t black_threshold) {
+  const int x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+  if (x >= w || y >= h) {
+    return;
+  }
+
+  // Check if pixel is in any wipe region
+  bool in_region = false;
+  for (int i = 0; i < rect_count; i++) {
+    const int rx0 = rects[i * 4 + 0];
+    const int ry0 = rects[i * 4 + 1];
+    const int rx1 = rects[i * 4 + 2];
+    const int ry1 = rects[i * 4 + 3];
+    if (x >= rx0 && x <= rx1 && y >= ry0 && y <= ry1) {
+      in_region = true;
+      break;
+    }
+  }
+
+  if (!in_region) {
+    return;
+  }
+
+  // Check if pixel is dark enough to wipe
+  const UnpaperCudaFormat fmt = (UnpaperCudaFormat)img_fmt;
+  const uint8_t gray = get_grayscale_safe(img, img_linesize, fmt, w, h, x, y);
+  if (gray <= black_threshold) {
+    set_pixel_white_safe(img, img_linesize, fmt, w, h, x, y);
+  }
+}
+
+// GPU-parallel blackfilter scan: find dark blocks using integral image
+// Each thread handles one scan position, checks darkness, outputs block coords.
+//
+// Parameters:
+//   integral: GPU integral image in NPP format (padded to (w+1)x(h+1))
+//   integral_step: Bytes per row
+//   img_w, img_h: Original image dimensions
+//   scan_w, scan_h: Scan block size
+//   step_x, step_y: Step between scan positions (one must be 0)
+//   threshold: Darkness threshold (0-255, blocks with darkness >= this are
+//   dark) intensity: Expansion in pixels (added to block bounds before wiping)
+//   out_rects: Output array of rectangles [x0,y0,x1,y1, ...] expanded by
+//   intensity out_count: Atomic counter for number of rectangles found
+//   max_rects: Maximum rectangles to output
+extern "C" __global__ void unpaper_blackfilter_scan_parallel(
+    const int32_t *integral, int integral_step, int img_w, int img_h,
+    int scan_w, int scan_h, int step_x, int step_y, int stripe_offset,
+    int stripe_size, uint8_t threshold, int intensity, int32_t *out_rects,
+    int *out_count, int max_rects) {
+  // Calculate which scan position this thread handles
+  const int tid = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+
+  // Compute scan positions based on step direction
+  int pos_x, pos_y;
+  if (step_x != 0) {
+    // Horizontal scan: stripe is vertical, positions are horizontal
+    const int num_positions = (img_w - scan_w) / step_x + 1;
+    if (tid >= num_positions)
+      return;
+    pos_x = tid * step_x;
+    pos_y = stripe_offset;
+    // Clamp to not exceed stripe bounds
+    if (pos_y + scan_h > stripe_offset + stripe_size) {
+      return;
+    }
+  } else {
+    // Vertical scan: stripe is horizontal, positions are vertical
+    const int num_positions = (img_h - scan_h) / step_y + 1;
+    if (tid >= num_positions)
+      return;
+    pos_x = stripe_offset;
+    pos_y = tid * step_y;
+    if (pos_x + scan_w > stripe_offset + stripe_size) {
+      return;
+    }
+  }
+
+  // Bounds check
+  if (pos_x + scan_w > img_w || pos_y + scan_h > img_h) {
+    return;
+  }
+
+  // Compute darkness using integral image
+  const int integral_step_i32 = integral_step / (int)sizeof(int32_t);
+  const int64_t pixel_sum =
+      npp_integral_rect_sum(integral, integral_step_i32, img_w, img_h, pos_x,
+                            pos_y, pos_x + scan_w - 1, pos_y + scan_h - 1);
+
+  const int64_t pixel_count = (int64_t)scan_w * (int64_t)scan_h;
+  const int64_t avg_brightness = pixel_sum / pixel_count;
+  const uint8_t darkness = (uint8_t)(255 - (int)avg_brightness);
+
+  // Check if dark enough
+  if (darkness < threshold) {
+    return;
+  }
+
+  // Add rectangle to output (expanded by intensity)
+  const int idx = atomicAdd(out_count, 1);
+  if (idx >= max_rects) {
+    return;
+  }
+
+  // Expand rectangle by intensity, clamp to image bounds
+  int x0 = pos_x - intensity;
+  int y0 = pos_y - intensity;
+  int x1 = pos_x + scan_w - 1 + intensity;
+  int y1 = pos_y + scan_h - 1 + intensity;
+  if (x0 < 0)
+    x0 = 0;
+  if (y0 < 0)
+    y0 = 0;
+  if (x1 >= img_w)
+    x1 = img_w - 1;
+  if (y1 >= img_h)
+    y1 = img_h - 1;
+
+  out_rects[idx * 4 + 0] = x0;
+  out_rects[idx * 4 + 1] = y0;
+  out_rects[idx * 4 + 2] = x1;
+  out_rects[idx * 4 + 3] = y1;
 }
