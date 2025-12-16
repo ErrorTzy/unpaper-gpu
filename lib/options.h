@@ -21,6 +21,13 @@ typedef enum {
   UNPAPER_DEVICE_CUDA = 1,
 } UnpaperDevice;
 
+// Decode mode for batch processing
+typedef enum {
+  DECODE_MODE_AUTO = 0,      // Auto-select based on device (default)
+  DECODE_MODE_BATCHED = 1,   // Force nvjpegDecodeBatched (PR36B)
+  DECODE_MODE_PER_IMAGE = 2, // Force per-image nvjpegDecode (legacy)
+} DecodeMode;
+
 typedef struct {
   UnpaperDevice device;
 
@@ -30,10 +37,12 @@ typedef struct {
   enum AVPixelFormat output_pixel_format;
 
   // Batch processing options
-  bool batch_mode;     // Enable batch processing mode
-  int batch_jobs;      // Number of parallel workers (0 = auto-detect)
-  bool batch_progress; // Show progress output
-  int cuda_streams;    // Number of CUDA streams (0 = auto-detect)
+  bool batch_mode;        // Enable batch processing mode
+  int batch_jobs;         // Number of parallel workers (0 = auto-detect)
+  bool batch_progress;    // Show progress output
+  int cuda_streams;       // Number of CUDA streams (0 = auto-detect)
+  DecodeMode decode_mode; // Decode mode: auto, batched, or per-image
+  int decode_chunk_size;  // Batch decode chunk size (0 = default)
 
   Layout layout;
   int start_sheet;

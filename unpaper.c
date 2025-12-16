@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include <sys/stat.h>
 #include <unistd.h>
@@ -61,6 +62,8 @@
           "         --batch, -B (enable batch processing mode)\n"              \
           "         --jobs=N, -j N (parallel workers, 0=auto, default: 0)\n"   \
           "         --cuda-streams=N (CUDA streams, 0=auto, default: 0)\n"     \
+          "         --decode-mode=auto|batched|per-image (default: auto)\n"    \
+          "         --decode-chunk-size=N (batch decode chunk, 0=default)\n"   \
           "         --progress (show batch progress)\n"                        \
           "\n"                                                                 \
           "Filenames may contain a formatting placeholder starting with '%%' " \
@@ -166,6 +169,8 @@ enum LONG_OPTION_VALUES {
   OPT_JOBS,
   OPT_PROGRESS,
   OPT_CUDA_STREAMS,
+  OPT_DECODE_MODE,
+  OPT_DECODE_CHUNK_SIZE,
 };
 
 /****************************************************************************
@@ -425,6 +430,8 @@ int main(int argc, char *argv[]) {
           {"j", required_argument, NULL, OPT_JOBS},
           {"progress", no_argument, NULL, OPT_PROGRESS},
           {"cuda-streams", required_argument, NULL, OPT_CUDA_STREAMS},
+          {"decode-mode", required_argument, NULL, OPT_DECODE_MODE},
+          {"decode-chunk-size", required_argument, NULL, OPT_DECODE_CHUNK_SIZE},
           {NULL, no_argument, NULL, 0}};
 
       c = getopt_long_only(argc, argv, "hVl:S:x::n::M:s:z:p:m:W:B:w:b:Tt:qv",
@@ -1009,6 +1016,30 @@ int main(int argc, char *argv[]) {
           errOutput("invalid value for --cuda-streams: '%s'", optarg);
         }
         break;
+
+      case OPT_DECODE_MODE:
+        if (strcasecmp(optarg, "auto") == 0) {
+          options.decode_mode = DECODE_MODE_AUTO;
+        } else if (strcasecmp(optarg, "batched") == 0) {
+          options.decode_mode = DECODE_MODE_BATCHED;
+        } else if (strcasecmp(optarg, "per-image") == 0) {
+          options.decode_mode = DECODE_MODE_PER_IMAGE;
+        } else {
+          errOutput(
+              "invalid value for --decode-mode: '%s' (use: auto, batched, "
+              "per-image)",
+              optarg);
+        }
+        break;
+
+      case OPT_DECODE_CHUNK_SIZE:
+        if (sscanf(optarg, "%d", &options.decode_chunk_size) != 1 ||
+            options.decode_chunk_size < 0 || options.decode_chunk_size > 64) {
+          errOutput("invalid value for --decode-chunk-size: '%s' (valid: 1-64, "
+                    "0=default)",
+                    optarg);
+        }
+        break;
       }
     }
 
@@ -1387,9 +1418,15 @@ int main(int argc, char *argv[]) {
 #ifdef UNPAPER_WITH_CUDA
       use_pinned_memory = (options.device == UNPAPER_DEVICE_CUDA);
 
-      // For CUDA mode, use the new batch decode queue (PR36B)
-      // This provides ~3x better scaling via nvjpegDecodeBatched
-      if (options.device == UNPAPER_DEVICE_CUDA) {
+      // Determine whether to use batch decode based on decode_mode option
+      // - AUTO: Use batch decode for CUDA, per-image for CPU
+      // - BATCHED: Force batch decode (GPU only)
+      // - PER_IMAGE: Force per-image decode (legacy)
+      bool try_batch_decode = (options.device == UNPAPER_DEVICE_CUDA) &&
+                              (options.decode_mode == DECODE_MODE_AUTO ||
+                               options.decode_mode == DECODE_MODE_BATCHED);
+
+      if (try_batch_decode) {
         // For CUDA with auto-tuned buffers, ensure decode queue can keep GPU
         // fed
         if (auto_buffer_count > decode_queue_depth) {
@@ -1421,6 +1458,12 @@ int main(int argc, char *argv[]) {
               decode_queue_depth, num_io_threads, 8000, 12000);
           if (batch_decode_queue) {
             batch_decode_queue_enable_gpu(batch_decode_queue, true);
+            if (options.decode_chunk_size > 0) {
+              batch_decode_queue_set_chunk_size(batch_decode_queue,
+                                                options.decode_chunk_size);
+              verboseLog(VERBOSE_NORMAL, "Decode chunk size: %d (custom)\n",
+                         options.decode_chunk_size);
+            }
             if (batch_decode_queue_start(batch_decode_queue, &batch_queue,
                                          &options)) {
               use_batch_decode = true;
@@ -1441,9 +1484,19 @@ int main(int argc, char *argv[]) {
         }
 
         if (!use_batch_decode) {
-          verboseLog(VERBOSE_NORMAL,
-                     "Batch decode unavailable, using per-image decode\n");
+          if (options.decode_mode == DECODE_MODE_BATCHED) {
+            // User explicitly requested batched mode but it failed
+            verboseLog(VERBOSE_NORMAL,
+                       "WARNING: --decode-mode=batched requested but "
+                       "unavailable, using per-image\n");
+          } else {
+            verboseLog(VERBOSE_NORMAL,
+                       "Batch decode unavailable, using per-image decode\n");
+          }
         }
+      } else if (options.decode_mode == DECODE_MODE_PER_IMAGE) {
+        verboseLog(VERBOSE_NORMAL,
+                   "Decode mode: per-image (forced via --decode-mode)\n");
       }
 
       // Fallback to legacy per-image decode queue if batch decode not available

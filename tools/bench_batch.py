@@ -12,11 +12,13 @@ with different parallelism settings and devices. It compares:
 - Single-threaded batch mode (--jobs=1)
 - Multi-threaded batch mode (--jobs=N)
 - CUDA-accelerated batch mode (if available)
+- GPU stream scaling (--streams mode)
 
 Usage:
     python tools/bench_batch.py --images 10
     python tools/bench_batch.py --images 100 --threads 1,4,8 --devices cpu,cuda
     python tools/bench_batch.py --images 50,100 --devices cuda --verify-10x
+    python tools/bench_batch.py --images 50 --devices cuda --streams 4,8,16,28
 """
 
 import argparse
@@ -93,7 +95,9 @@ def run_sequential(binary: Path, input_pattern: str, output_pattern: str,
 
 
 def run_batch(binary: Path, input_pattern: str, output_pattern: str,
-              jobs: int, device: str = "cpu") -> float:
+              jobs: int, device: str = "cpu", streams: int | None = None,
+              decode_mode: str | None = None,
+              decode_chunk_size: int | None = None) -> float:
     """Run unpaper in batch mode with specified parallelism."""
     # Remove existing output files
     output_dir = Path(output_pattern).parent
@@ -112,6 +116,18 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
         output_pattern,
     ]
 
+    # Add stream count for CUDA device
+    if streams is not None and device == "cuda":
+        cmd.insert(4, f"--cuda-streams={streams}")
+
+    # Add decode mode if specified (PR36C)
+    if decode_mode is not None:
+        cmd.insert(4, f"--decode-mode={decode_mode}")
+
+    # Add decode chunk size if specified (PR36C tuning)
+    if decode_chunk_size is not None:
+        cmd.insert(4, f"--decode-chunk-size={decode_chunk_size}")
+
     proc = subprocess.run(
         cmd,
         stdout=subprocess.DEVNULL,
@@ -123,7 +139,9 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
 
     if proc.returncode != 0:
         raise RuntimeError(
-            f"Batch unpaper (jobs={jobs}, device={device}) failed: {proc.stderr.decode().strip()}"
+            f"Batch unpaper (jobs={jobs}, device={device}, streams={streams}, "
+            f"decode_mode={decode_mode}, chunk_size={decode_chunk_size}) failed: "
+            f"{proc.stderr.decode().strip()}"
         )
 
     return elapsed
@@ -131,7 +149,10 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
 
 def bench_configuration(binary: Path, input_pattern: str, output_pattern: str,
                         count: int, jobs: int | None, warmup: int,
-                        iterations: int, device: str = "cpu") -> tuple[float, float]:
+                        iterations: int, device: str = "cpu",
+                        streams: int | None = None,
+                        decode_mode: str | None = None,
+                        decode_chunk_size: int | None = None) -> tuple[float, float]:
     """Benchmark a specific configuration and return mean/stdev."""
     samples = []
 
@@ -140,7 +161,8 @@ def bench_configuration(binary: Path, input_pattern: str, output_pattern: str,
             if jobs is None:
                 elapsed = run_sequential(binary, input_pattern, output_pattern, count, device)
             else:
-                elapsed = run_batch(binary, input_pattern, output_pattern, jobs, device)
+                elapsed = run_batch(binary, input_pattern, output_pattern, jobs, device, streams,
+                                    decode_mode, decode_chunk_size)
 
             if i >= warmup:
                 samples.append(elapsed)
@@ -209,6 +231,28 @@ def main() -> int:
         action="store_true",
         help="Verify that CUDA batch achieves 10x speedup over sequential CPU",
     )
+    parser.add_argument(
+        "--streams",
+        default="",
+        help="Comma-separated list of CUDA stream counts to test (e.g., '4,8,16,28'). "
+             "When specified, tests stream scaling with jobs=streams for each stream count.",
+    )
+    parser.add_argument(
+        "--verify-linear",
+        action="store_true",
+        help="Verify near-linear scaling with GPU streams (requires --streams)",
+    )
+    parser.add_argument(
+        "--decode-mode",
+        default="",
+        help="Comma-separated decode modes to test (auto, batched, per-image). "
+             "When specified, compares performance between decode modes (PR36C).",
+    )
+    parser.add_argument(
+        "--verify-batch-scaling",
+        action="store_true",
+        help="Verify ≥3x scaling improvement with batched decode vs per-image (PR36C)",
+    )
 
     args = parser.parse_args()
 
@@ -227,6 +271,8 @@ def main() -> int:
     thread_counts = [int(t.strip()) for t in args.threads.split(",") if t.strip()]
     devices = [d.strip() for d in args.devices.split(",") if d.strip()]
     image_counts = [int(c.strip()) for c in args.images.split(",") if c.strip()]
+    stream_counts = [int(s.strip()) for s in args.streams.split(",") if s.strip()]
+    decode_modes = [m.strip() for m in args.decode_mode.split(",") if m.strip()]
 
     # Check CUDA availability
     cuda_available = check_cuda_available(binary)
@@ -285,17 +331,51 @@ def main() -> int:
             for device in devices:
                 device_label = device.upper()
 
-                # Batch with different thread counts
-                for threads in thread_counts:
-                    config_name = f"batch-{device}-j{threads}"
-                    print(f"Batch {device_label} (jobs={threads})...", end=" ", flush=True)
-                    mean, stdev = bench_configuration(
-                        binary, input_pattern, output_pattern, image_count,
-                        threads, args.warmup, args.iterations, device
-                    )
-                    print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
-                    results.append((config_name, mean, stdev, device))
-                    all_results[(image_count, config_name)] = (mean, stdev)
+                # Batch with different thread counts (skip if stream scaling mode)
+                if not stream_counts:
+                    for threads in thread_counts:
+                        config_name = f"batch-{device}-j{threads}"
+                        print(f"Batch {device_label} (jobs={threads})...", end=" ", flush=True)
+                        mean, stdev = bench_configuration(
+                            binary, input_pattern, output_pattern, image_count,
+                            threads, args.warmup, args.iterations, device
+                        )
+                        print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
+                        results.append((config_name, mean, stdev, device))
+                        all_results[(image_count, config_name)] = (mean, stdev)
+
+                # Stream scaling tests (CUDA only)
+                if stream_counts and device == "cuda":
+                    print(f"\n  GPU Stream Scaling:")
+                    for streams in stream_counts:
+                        # Use jobs=streams to ensure enough work submitted
+                        jobs = streams
+                        config_name = f"cuda-s{streams}-j{jobs}"
+                        print(f"    CUDA (streams={streams}, jobs={jobs})...", end=" ", flush=True)
+                        mean, stdev = bench_configuration(
+                            binary, input_pattern, output_pattern, image_count,
+                            jobs, args.warmup, args.iterations, device, streams
+                        )
+                        print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
+                        results.append((config_name, mean, stdev, device))
+                        all_results[(image_count, config_name)] = (mean, stdev)
+
+                # Decode mode comparison tests (CUDA only, PR36C)
+                if decode_modes and device == "cuda":
+                    print(f"\n  Decode Mode Comparison (PR36C):")
+                    # Use 8 streams and 8 jobs as the standard configuration
+                    streams = 8
+                    jobs = 8
+                    for mode in decode_modes:
+                        config_name = f"cuda-{mode}"
+                        print(f"    CUDA (decode-mode={mode})...", end=" ", flush=True)
+                        mean, stdev = bench_configuration(
+                            binary, input_pattern, output_pattern, image_count,
+                            jobs, args.warmup, args.iterations, device, streams, mode
+                        )
+                        print(f"{mean:.0f}ms (stdev={stdev:.0f}ms)")
+                        results.append((config_name, mean, stdev, device))
+                        all_results[(image_count, config_name)] = (mean, stdev)
 
             # Summary for this image count
             print(f"\n{'-'*60}")
@@ -338,6 +418,80 @@ def main() -> int:
                     print(f"{'N/A':>11}", end="")
             print()
 
+    # Stream scaling summary and verification
+    if stream_counts:
+        print(f"\n{'='*70}")
+        print("GPU Stream Scaling Analysis")
+        print(f"{'='*70}")
+
+        for count in image_counts:
+            print(f"\n  {count} images:")
+            print(f"  {'Streams':<10} {'Time (ms)':<12} {'ms/img':<10} {'Speedup':<10} {'Efficiency':<10}")
+            print(f"  {'-'*52}")
+
+            # Get baseline (lowest stream count)
+            stream_results = []
+            for streams in stream_counts:
+                config = f"cuda-s{streams}-j{streams}"
+                result = all_results.get((count, config))
+                if result and result[0] > 0:
+                    stream_results.append((streams, result[0]))
+
+            if not stream_results:
+                print(f"  No stream scaling results")
+                continue
+
+            # Sort by stream count
+            stream_results.sort(key=lambda x: x[0])
+            baseline_streams, baseline_time = stream_results[0]
+
+            for streams, elapsed in stream_results:
+                per_img = elapsed / count
+                # Speedup relative to lowest stream count
+                speedup = baseline_time / elapsed
+                # Efficiency: actual speedup / ideal speedup (ideal = streams/baseline_streams)
+                ideal_speedup = streams / baseline_streams
+                efficiency = (speedup / ideal_speedup) * 100.0 if ideal_speedup > 0 else 0
+                print(f"  {streams:<10} {elapsed:<12.0f} {per_img:<10.1f} {speedup:<10.2f}x {efficiency:<10.1f}%")
+
+        # Verify near-linear scaling
+        if args.verify_linear and len(stream_counts) >= 2:
+            print(f"\n{'-'*60}")
+            print("Linear Scaling Verification (PR33 Target)")
+            print(f"{'-'*60}")
+
+            passed = True
+            for count in image_counts:
+                # Get first and last stream count results
+                first_config = f"cuda-s{stream_counts[0]}-j{stream_counts[0]}"
+                last_config = f"cuda-s{stream_counts[-1]}-j{stream_counts[-1]}"
+                first_result = all_results.get((count, first_config))
+                last_result = all_results.get((count, last_config))
+
+                if not first_result or not last_result:
+                    print(f"  {count} images: SKIP (missing results)")
+                    continue
+
+                first_time = first_result[0]
+                last_time = last_result[0]
+                actual_speedup = first_time / last_time
+                ideal_speedup = stream_counts[-1] / stream_counts[0]
+                efficiency = (actual_speedup / ideal_speedup) * 100.0
+
+                # Target: at least 50% efficiency for near-linear scaling
+                target_efficiency = 50.0
+                status = "PASS" if efficiency >= target_efficiency else "FAIL"
+                passed = passed and (efficiency >= target_efficiency)
+
+                print(f"  {count} images: {stream_counts[0]}→{stream_counts[-1]} streams = "
+                      f"{actual_speedup:.2f}x (ideal: {ideal_speedup:.1f}x, efficiency: {efficiency:.0f}%) [{status}]")
+
+            print()
+            if passed:
+                print("  *** LINEAR SCALING VERIFIED ***")
+            else:
+                print("  *** LINEAR SCALING BELOW TARGET ***")
+
     # Verify 10x speedup target for PR26
     if args.verify_10x:
         print(f"\n{'='*70}")
@@ -377,6 +531,44 @@ def main() -> int:
             return 0
         else:
             print("  *** SOME TARGETS FAILED ***")
+            return 1
+
+    # Verify batch scaling (PR36C): batched should be ≥3x faster than per-image
+    if args.verify_batch_scaling and decode_modes:
+        print(f"\n{'='*70}")
+        print("Batch Decode Scaling Verification (PR36C Target: ≥3x)")
+        print(f"{'='*70}")
+
+        passed = True
+        for count in image_counts:
+            per_image_result = all_results.get((count, "cuda-per-image"))
+            batched_result = all_results.get((count, "cuda-batched"))
+
+            if not per_image_result or not batched_result:
+                print(f"  {count} images: SKIP (missing per-image or batched results)")
+                print(f"    Hint: Run with --decode-mode=per-image,batched")
+                continue
+
+            per_image_time = per_image_result[0]
+            batched_time = batched_result[0]
+
+            if per_image_time <= 0 or batched_time <= 0:
+                print(f"  {count} images: SKIP (invalid timing data)")
+                continue
+
+            speedup = per_image_time / batched_time
+            target = 3.0
+            status = "PASS" if speedup >= target else "FAIL"
+            passed = passed and (speedup >= target)
+
+            print(f"  {count} images: batched={batched_time:.0f}ms, per-image={per_image_time:.0f}ms "
+                  f"-> {speedup:.2f}x (target: {target:.0f}x) [{status}]")
+
+        print()
+        if passed:
+            print("  *** BATCH SCALING TARGET ACHIEVED ***")
+        else:
+            print("  *** BATCH SCALING BELOW TARGET ***")
             return 1
 
     return 0

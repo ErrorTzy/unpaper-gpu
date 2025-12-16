@@ -31,10 +31,10 @@
 
 // Slot states for lock-free queue
 typedef enum {
-  SLOT_EMPTY = 0,   // Available for producer
-  SLOT_DECODING,    // Producer is processing
-  SLOT_READY,       // Ready for consumer
-  SLOT_IN_USE,      // Consumer is using
+  SLOT_EMPTY = 0, // Available for producer
+  SLOT_DECODING,  // Producer is processing
+  SLOT_READY,     // Ready for consumer
+  SLOT_IN_USE,    // Consumer is using
 } SlotState;
 
 // A slot in the output queue
@@ -45,17 +45,20 @@ typedef struct {
 
 // File data collected for batch decode
 typedef struct {
-  uint8_t *data;      // JPEG file data (malloc'd)
-  size_t size;        // Data size in bytes
-  int job_index;      // Job index
-  int input_index;    // Input index within job
-  const char *path;   // File path (borrowed)
-  bool is_jpeg;       // True if JPEG file
-  bool read_success;  // True if file read succeeded
+  uint8_t *data;     // JPEG file data (malloc'd)
+  size_t size;       // Data size in bytes
+  int job_index;     // Job index
+  int input_index;   // Input index within job
+  const char *path;  // File path (borrowed)
+  bool is_jpeg;      // True if JPEG file
+  bool read_success; // True if file read succeeded
 } CollectedFile;
 
 // Maximum I/O threads
 #define MAX_IO_THREADS 16
+
+// Maximum configurable chunk size for batch decode
+#define MAX_DECODE_CHUNK_SIZE 64
 
 // Maximum JPEG file size to buffer (100MB)
 #define MAX_JPEG_FILE_SIZE (100 * 1024 * 1024)
@@ -85,6 +88,7 @@ struct BatchDecodeQueue {
   bool use_gpu_decode;
   int max_width;
   int max_height;
+  int chunk_size; // Number of images per batch decode call (0 = default)
 
   // I/O work distribution (lock-free)
   // Each entry represents a (job_index, input_index) pair to read
@@ -138,6 +142,14 @@ static bool is_jpeg_file(const char *filename) {
     return false;
   }
   return (strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0);
+}
+
+// Get effective chunk size (configured or default)
+static inline int get_effective_chunk_size(const BatchDecodeQueue *queue) {
+  if (queue->chunk_size > 0) {
+    return queue->chunk_size;
+  }
+  return BATCH_DECODE_CHUNK_SIZE;
 }
 
 // Update peak depth atomically
@@ -332,7 +344,7 @@ static void *io_thread_fn(void *arg) {
     // Get next work item atomically
     size_t idx = atomic_fetch_add(&queue->io_work_next, 1);
     if (idx >= queue->io_work_total) {
-      break;  // No more work
+      break; // No more work
     }
 
     IOWorkItem item;
@@ -498,9 +510,9 @@ static void process_chunk(BatchDecodeQueue *queue, CollectedFile *files,
 
 #ifdef UNPAPER_WITH_CUDA
   // Separate JPEG files (for GPU batch decode) from non-JPEG files (CPU decode)
-  CollectedFile *jpeg_files[BATCH_DECODE_CHUNK_SIZE];
+  CollectedFile *jpeg_files[MAX_DECODE_CHUNK_SIZE];
   size_t jpeg_count = 0;
-  CollectedFile *other_files[BATCH_DECODE_CHUNK_SIZE];
+  CollectedFile *other_files[MAX_DECODE_CHUNK_SIZE];
   size_t other_count = 0;
 
   for (size_t i = 0; i < count; i++) {
@@ -527,9 +539,9 @@ static void process_chunk(BatchDecodeQueue *queue, CollectedFile *files,
     double decode_start = get_time_ms();
 
     // Prepare arrays for batch decode
-    const uint8_t *jpeg_data[BATCH_DECODE_CHUNK_SIZE];
-    size_t jpeg_sizes[BATCH_DECODE_CHUNK_SIZE];
-    NvJpegDecodedImage outputs[BATCH_DECODE_CHUNK_SIZE];
+    const uint8_t *jpeg_data[MAX_DECODE_CHUNK_SIZE];
+    size_t jpeg_sizes[MAX_DECODE_CHUNK_SIZE];
+    NvJpegDecodedImage outputs[MAX_DECODE_CHUNK_SIZE];
 
     for (size_t i = 0; i < jpeg_count; i++) {
       jpeg_data[i] = jpeg_files[i]->data;
@@ -537,8 +549,8 @@ static void process_chunk(BatchDecodeQueue *queue, CollectedFile *files,
     }
 
     // Single batch decode call - key performance optimization!
-    int decoded = nvjpeg_decode_batch(jpeg_data, jpeg_sizes, (int)jpeg_count,
-                                      outputs);
+    int decoded =
+        nvjpeg_decode_batch(jpeg_data, jpeg_sizes, (int)jpeg_count, outputs);
 
     double decode_end = get_time_ms();
     atomic_fetch_add(&queue->decode_time_us,
@@ -702,11 +714,11 @@ static void *orchestrator_thread_fn(void *arg) {
 
     // Initialize batched decoder if GPU decode is enabled
     // Use RGB format for maximum compatibility
-    if (!nvjpeg_batched_init(BATCH_DECODE_CHUNK_SIZE, queue->max_width,
+    int effective_chunk_size = get_effective_chunk_size(queue);
+    if (!nvjpeg_batched_init(effective_chunk_size, queue->max_width,
                              queue->max_height, NVJPEG_FMT_RGB)) {
-      verboseLog(VERBOSE_DEBUG,
-                 "batch_decode: nvjpeg_batched_init failed, "
-                 "using single-image decode\n");
+      verboseLog(VERBOSE_DEBUG, "batch_decode: nvjpeg_batched_init failed, "
+                                "using single-image decode\n");
     }
   }
 #endif
@@ -762,12 +774,13 @@ static void *orchestrator_thread_fn(void *arg) {
 
   // Process all collected files in chunks
   size_t total_collected = atomic_load(&queue->collected_count);
+  int eff_chunk_size = get_effective_chunk_size(queue);
   for (size_t offset = 0;
        offset < total_collected && atomic_load(&queue->running);
-       offset += BATCH_DECODE_CHUNK_SIZE) {
+       offset += (size_t)eff_chunk_size) {
     size_t chunk_size = total_collected - offset;
-    if (chunk_size > BATCH_DECODE_CHUNK_SIZE) {
-      chunk_size = BATCH_DECODE_CHUNK_SIZE;
+    if (chunk_size > (size_t)eff_chunk_size) {
+      chunk_size = (size_t)eff_chunk_size;
     }
     process_chunk(queue, &queue->collected_files[offset], chunk_size);
   }
@@ -789,8 +802,8 @@ static void *orchestrator_thread_fn(void *arg) {
 // ============================================================================
 
 BatchDecodeQueue *batch_decode_queue_create(size_t queue_depth,
-                                             int num_io_threads, int max_width,
-                                             int max_height) {
+                                            int num_io_threads, int max_width,
+                                            int max_height) {
   if (queue_depth == 0 || num_io_threads < 1) {
     return NULL;
   }
@@ -814,6 +827,7 @@ BatchDecodeQueue *batch_decode_queue_create(size_t queue_depth,
   queue->max_width = max_width;
   queue->max_height = max_height;
   queue->use_gpu_decode = false;
+  queue->chunk_size = 0; // 0 = use BATCH_DECODE_CHUNK_SIZE default
   queue->orchestrator_started = false;
 
   atomic_init(&queue->running, false);
@@ -893,8 +907,23 @@ void batch_decode_queue_enable_gpu(BatchDecodeQueue *queue, bool enable) {
 #endif
 }
 
+void batch_decode_queue_set_chunk_size(BatchDecodeQueue *queue,
+                                       int chunk_size) {
+  if (!queue) {
+    return;
+  }
+  // Clamp to valid range (1-64, or 0 for default)
+  if (chunk_size < 0) {
+    chunk_size = 0;
+  }
+  if (chunk_size > 64) {
+    chunk_size = 64;
+  }
+  queue->chunk_size = chunk_size;
+}
+
 bool batch_decode_queue_start(BatchDecodeQueue *queue, BatchQueue *batch_queue,
-                               const Options *options) {
+                              const Options *options) {
   if (!queue || !batch_queue || queue->orchestrator_started) {
     return false;
   }
@@ -956,7 +985,7 @@ bool batch_decode_queue_done(BatchDecodeQueue *queue) {
 }
 
 BatchDecodedImage *batch_decode_queue_get(BatchDecodeQueue *queue,
-                                           int job_index, int input_index) {
+                                          int job_index, int input_index) {
   if (!queue) {
     return NULL;
   }
@@ -986,7 +1015,7 @@ BatchDecodedImage *batch_decode_queue_get(BatchDecodeQueue *queue,
 }
 
 void batch_decode_queue_release(BatchDecodeQueue *queue,
-                                 BatchDecodedImage *image) {
+                                BatchDecodedImage *image) {
   if (!queue || !image) {
     return;
   }
