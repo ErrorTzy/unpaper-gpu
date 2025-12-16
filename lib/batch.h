@@ -83,5 +83,9 @@ void batch_progress_finish(BatchQueue *queue);
 // Auto-detect optimal parallelism based on CPU cores
 int batch_detect_parallelism(void);
 
+// Auto-detect optimal parallelism for CUDA batch processing (PNG/non-JPEG)
+// Returns CPU cores / 3 (rounded), which balances GPU compute with CPU decode/encode
+int batch_detect_cuda_parallelism(void);
+
 // Free a single job's resources (strings)
 void batch_job_free(BatchJob *job);

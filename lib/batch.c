@@ -77,6 +77,32 @@ int batch_detect_parallelism(void) {
   return (int)nprocs;
 }
 
+int batch_detect_cuda_parallelism(void) {
+  // For CUDA batch processing with PNG/non-JPEG files:
+  // - Decode uses FFmpeg (CPU-bound)
+  // - Processing uses CUDA (GPU-bound)
+  // - Encode uses FFmpeg (CPU-bound)
+  //
+  // Benchmarking shows CPU cores / 3 (rounded) is optimal because:
+  // - Too many workers saturate CPU decode/encode threads
+  // - GPU can handle the processing with 8 streams efficiently
+  // - This balances CPU I/O with GPU compute
+  long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+  if (nprocs < 1) {
+    nprocs = 1;
+  }
+
+  // CPU cores / 3, with minimum of 2 and maximum of 16
+  int parallelism = (int)((nprocs + 1) / 3); // Round to nearest
+  if (parallelism < 2) {
+    parallelism = 2;
+  }
+  if (parallelism > 16) {
+    parallelism = 16;
+  }
+  return parallelism;
+}
+
 void batch_progress_start(BatchQueue *queue) {
   if (!queue->progress)
     return;

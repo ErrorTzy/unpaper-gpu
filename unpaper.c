@@ -1174,8 +1174,16 @@ int main(int argc, char *argv[]) {
   BatchQueue batch_queue;
   batch_queue_init(&batch_queue);
   batch_queue.progress = options.batch_progress;
-  batch_queue.parallelism =
-      options.batch_jobs > 0 ? options.batch_jobs : batch_detect_parallelism();
+  // Auto-detect parallelism based on device and pipeline mode
+  if (options.batch_jobs > 0) {
+    batch_queue.parallelism = options.batch_jobs;
+  } else if (options.device == UNPAPER_DEVICE_CUDA && !options.gpu_pipeline) {
+    // For CUDA with PNG/non-JPEG: use CPU cores / 3 to balance GPU compute
+    // with CPU decode/encode (benchmarked optimal for 8 CUDA streams)
+    batch_queue.parallelism = batch_detect_cuda_parallelism();
+  } else {
+    batch_queue.parallelism = batch_detect_parallelism();
+  }
 
   // Initialize batch-level performance tracking (used in both batch modes)
   BatchPerfRecorder batch_perf;
@@ -1309,8 +1317,8 @@ int main(int argc, char *argv[]) {
       bool mempool_active = false;
       bool integralpool_active = false;
       bool streampool_active = false;
-      size_t auto_stream_count = 4;
-      size_t auto_buffer_count = 8;
+      size_t auto_stream_count = 8;  // Default for non-GPU pipeline (PNG)
+      size_t auto_buffer_count = 24; // 3x streams for triple-buffering
       if (options.device == UNPAPER_DEVICE_CUDA) {
         // Check available GPU memory before starting batch
         GpuMemoryInfo mem_info = {0};
@@ -1320,32 +1328,43 @@ int main(int argc, char *argv[]) {
                      (double)mem_info.free_bytes / (1024.0 * 1024.0),
                      (double)mem_info.total_bytes / (1024.0 * 1024.0));
 
-          // Auto-tune pool sizes based on available GPU memory
-          // Scale: For every 3GB of VRAM, multiply parallelism tier
-          // This allows high-end GPUs (RTX 5090 24GB) to use more resources
-          size_t vram_gb = mem_info.total_bytes / (1024 * 1024 * 1024);
-          size_t tier = vram_gb / 3; // 1 tier per 3GB
-          if (tier < 1)
-            tier = 1;
-          if (tier > 8)
-            tier = 8; // Cap at 8x scaling
+          if (options.gpu_pipeline) {
+            // GPU pipeline (JPEG-to-JPEG): scale with VRAM for maximum throughput
+            // Auto-tune pool sizes based on available GPU memory
+            // Scale: For every 3GB of VRAM, multiply parallelism tier
+            // This allows high-end GPUs (RTX 5090 24GB) to use more resources
+            size_t vram_gb = mem_info.total_bytes / (1024 * 1024 * 1024);
+            size_t tier = vram_gb / 3; // 1 tier per 3GB
+            if (tier < 1)
+              tier = 1;
+            if (tier > 8)
+              tier = 8; // Cap at 8x scaling
 
-          // Scale streams: 4 per tier (4, 8, 12, 16, 20, 24, 28, 32)
-          auto_stream_count = 4 * tier;
-          if (auto_stream_count > 32)
-            auto_stream_count = 32;
+            // Scale streams: 4 per tier (4, 8, 12, 16, 20, 24, 28, 32)
+            auto_stream_count = 4 * tier;
+            if (auto_stream_count > 32)
+              auto_stream_count = 32;
 
-          // Scale buffers: 3x streams for triple-buffering
-          // (decode+process+encode) 2x was insufficient - peak usage exceeded
-          // pool size causing cudaMalloc fallback
-          auto_buffer_count = auto_stream_count * 3;
-          if (auto_buffer_count > 96)
-            auto_buffer_count = 96;
+            // Scale buffers: 3x streams for triple-buffering
+            // (decode+process+encode) 2x was insufficient - peak usage exceeded
+            // pool size causing cudaMalloc fallback
+            auto_buffer_count = auto_stream_count * 3;
+            if (auto_buffer_count > 96)
+              auto_buffer_count = 96;
 
-          verboseLog(VERBOSE_NORMAL,
-                     "GPU auto-tune: %zu GB VRAM -> tier %zu -> %zu streams, "
-                     "%zu buffers\n",
-                     vram_gb, tier, auto_stream_count, auto_buffer_count);
+            verboseLog(VERBOSE_NORMAL,
+                       "GPU pipeline auto-tune: %zu GB VRAM -> tier %zu -> "
+                       "%zu streams, %zu buffers\n",
+                       vram_gb, tier, auto_stream_count, auto_buffer_count);
+          } else {
+            // Non-GPU pipeline (PNG/FFmpeg decode): use fixed 8 streams
+            // Benchmarking shows 8 streams is optimal for CPU decode/encode
+            // with GPU processing, regardless of VRAM size
+            auto_stream_count = 8;
+            auto_buffer_count = 24; // 3x streams for triple-buffering
+            verboseLog(VERBOSE_NORMAL,
+                       "PNG batch mode: 8 streams (optimized for CPU I/O)\n");
+          }
         }
 
         // Override auto-tuned stream count if --cuda-streams specified
@@ -1843,6 +1862,11 @@ int main(int argc, char *argv[]) {
       batch_perf_end(&batch_perf, batch_queue.completed, batch_queue.failed);
       batch_perf_print(&batch_perf,
                        options.device == UNPAPER_DEVICE_CUDA ? "cuda" : "cpu");
+
+      // Print async allocation stats for CUDA debugging
+      if (options.device == UNPAPER_DEVICE_CUDA && options.perf) {
+        unpaper_cuda_print_async_stats();
+      }
 
       batch_progress_finish(&batch_queue);
       batch_queue_free(&batch_queue);
@@ -2879,6 +2903,11 @@ int main(int argc, char *argv[]) {
     batch_perf_print(&batch_perf,
                      options.device == UNPAPER_DEVICE_CUDA ? "cuda" : "cpu");
     batch_progress_finish(&batch_queue);
+
+    // Print async allocation stats for CUDA debugging
+    if (options.device == UNPAPER_DEVICE_CUDA && options.perf) {
+      unpaper_cuda_print_async_stats();
+    }
   }
   batch_queue_free(&batch_queue);
 
