@@ -668,18 +668,18 @@ bool nvjpeg_decode_file_to_gpu(const char *filename, UnpaperCudaStream *stream,
 // Batched decoder context (singleton, separate from per-image decoder)
 typedef struct {
   // Pre-allocated output buffer pool
-  void **gpu_buffers;       // Array of GPU buffer pointers
-  size_t *buffer_pitches;   // Pitch for each buffer (aligned)
-  int max_batch_size;       // Number of buffers allocated
-  int max_width;            // Maximum image width
-  int max_height;           // Maximum image height
+  void **gpu_buffers;        // Array of GPU buffer pointers
+  size_t *buffer_pitches;    // Pitch for each buffer (aligned)
+  int max_batch_size;        // Number of buffers allocated
+  int max_width;             // Maximum image width
+  int max_height;            // Maximum image height
   NvJpegOutputFormat format; // Output format for all decodes
-  size_t buffer_size;       // Size of each buffer in bytes
+  size_t buffer_size;        // Size of each buffer in bytes
 
   // For true batched API (may not be available on all systems)
-  nvjpegJpegState_t batch_state;  // Dedicated state for batched decode
-  cudaStream_t batch_stream;      // Dedicated CUDA stream
-  bool batched_api_available;     // True if nvjpegDecodeBatched works
+  nvjpegJpegState_t batch_state; // Dedicated state for batched decode
+  cudaStream_t batch_stream;     // Dedicated CUDA stream
+  bool batched_api_available;    // True if nvjpegDecodeBatched works
 
   // Statistics
   size_t total_batch_calls;
@@ -715,8 +715,7 @@ bool nvjpeg_batched_init(int max_batch_size, int max_width, int max_height,
 
   // Require base context to be initialized
   if (!g_nvjpeg_ctx.initialized) {
-    verboseLog(VERBOSE_DEBUG,
-               "nvjpeg_batched: base context not initialized\n");
+    verboseLog(VERBOSE_DEBUG, "nvjpeg_batched: base context not initialized\n");
     pthread_mutex_unlock(&g_batched_mutex);
     return false;
   }
@@ -744,17 +743,18 @@ bool nvjpeg_batched_init(int max_batch_size, int max_width, int max_height,
 
   // Try to create state and initialize for batched decoding
   // Note: nvjpegDecodeBatched may not be supported on all systems/images
-  status = nvjpegJpegStateCreate(g_nvjpeg_ctx.handle, &g_batched_ctx.batch_state);
+  status =
+      nvjpegJpegStateCreate(g_nvjpeg_ctx.handle, &g_batched_ctx.batch_state);
   if (status == NVJPEG_STATUS_SUCCESS) {
     nvjpegOutputFormat_t nvfmt = to_nvjpeg_format(format);
-    // Note: max_cpu_threads must be >= 1 (documentation says deprecated but 0 causes INVALID_PARAMETER)
+    // Note: max_cpu_threads must be >= 1 (documentation says deprecated but 0
+    // causes INVALID_PARAMETER)
     status = nvjpegDecodeBatchedInitialize(g_nvjpeg_ctx.handle,
                                            g_batched_ctx.batch_state,
                                            max_batch_size, 1, nvfmt);
     if (status == NVJPEG_STATUS_SUCCESS) {
       g_batched_ctx.batched_api_available = true;
-      verboseLog(VERBOSE_DEBUG,
-                 "nvjpeg_batched: true batched API available\n");
+      verboseLog(VERBOSE_DEBUG, "nvjpeg_batched: true batched API available\n");
     } else {
       // Batched API not available, cleanup state but continue
       // We'll use concurrent single-image decodes instead
@@ -775,7 +775,7 @@ bool nvjpeg_batched_init(int max_batch_size, int max_width, int max_height,
   // Calculate buffer size with 256-byte pitch alignment
   int channels = format_channels(format);
   size_t pitch = (size_t)max_width * (size_t)channels;
-  pitch = (pitch + 255) & ~(size_t)255;  // Align to 256 bytes
+  pitch = (pitch + 255) & ~(size_t)255; // Align to 256 bytes
   size_t buffer_size = pitch * (size_t)max_height;
 
   // Allocate buffer pool
@@ -784,7 +784,8 @@ bool nvjpeg_batched_init(int max_batch_size, int max_width, int max_height,
 
   if (g_batched_ctx.gpu_buffers == NULL ||
       g_batched_ctx.buffer_pitches == NULL) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg_batched: failed to allocate buffer arrays\n");
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg_batched: failed to allocate buffer arrays\n");
     free(g_batched_ctx.gpu_buffers);
     free(g_batched_ctx.buffer_pitches);
     if (g_batched_ctx.batch_state != NULL) {
@@ -873,9 +874,9 @@ static int decode_batch_fallback(const uint8_t *const *jpeg_data,
     int widths[NVJPEG_MAX_COMPONENT];
     int heights[NVJPEG_MAX_COMPONENT];
 
-    nvjpegStatus_t status = nvjpegGetImageInfo(
-        g_nvjpeg_ctx.handle, jpeg_data[i], jpeg_sizes[i], &nComponents,
-        &subsampling, widths, heights);
+    nvjpegStatus_t status =
+        nvjpegGetImageInfo(g_nvjpeg_ctx.handle, jpeg_data[i], jpeg_sizes[i],
+                           &nComponents, &subsampling, widths, heights);
     if (status != NVJPEG_STATUS_SUCCESS) {
       g_batched_ctx.failed_decodes++;
       continue;
@@ -902,8 +903,9 @@ static int decode_batch_fallback(const uint8_t *const *jpeg_data,
     nv_output.pitch[0] = (unsigned int)g_batched_ctx.buffer_pitches[i];
 
     // Decode using the simple API (each uses its own stream for parallelism)
-    status = nvjpegDecode(g_nvjpeg_ctx.handle, state->state, jpeg_data[i],
-                          jpeg_sizes[i], nvfmt, &nv_output, state->decode_stream);
+    status =
+        nvjpegDecode(g_nvjpeg_ctx.handle, state->state, jpeg_data[i],
+                     jpeg_sizes[i], nvfmt, &nv_output, state->decode_stream);
 
     if (status == NVJPEG_STATUS_SUCCESS) {
       // Sync this specific stream
@@ -966,7 +968,8 @@ int nvjpeg_decode_batch(const uint8_t *const *jpeg_data,
   int channels = format_channels(g_batched_ctx.format);
   int max_batch = g_batched_ctx.max_batch_size;
 
-  // nvjpegDecodeBatched requires arrays sized to match the initialized batch_size.
+  // nvjpegDecodeBatched requires arrays sized to match the initialized
+  // batch_size.
   nvjpegImage_t *nv_outputs = calloc((size_t)max_batch, sizeof(nvjpegImage_t));
   const uint8_t **padded_data = calloc((size_t)max_batch, sizeof(uint8_t *));
   size_t *padded_sizes = calloc((size_t)max_batch, sizeof(size_t));
@@ -1003,8 +1006,9 @@ int nvjpeg_decode_batch(const uint8_t *const *jpeg_data,
     int widths[NVJPEG_MAX_COMPONENT];
     int heights[NVJPEG_MAX_COMPONENT];
 
-    status = nvjpegGetImageInfo(g_nvjpeg_ctx.handle, jpeg_data[i], jpeg_sizes[i],
-                                &nComponents, &subsampling, widths, heights);
+    status =
+        nvjpegGetImageInfo(g_nvjpeg_ctx.handle, jpeg_data[i], jpeg_sizes[i],
+                           &nComponents, &subsampling, widths, heights);
     if (status != NVJPEG_STATUS_SUCCESS) {
       g_batched_ctx.failed_decodes++;
       continue;
@@ -1050,7 +1054,8 @@ int nvjpeg_decode_batch(const uint8_t *const *jpeg_data,
                "nvjpeg_decode_batch: nvjpegDecodeBatched failed: %s, "
                "falling back to single-image decode\n",
                nvjpeg_status_string(status));
-    // Batched decode failed (e.g., image not supported) - fall back to single-image
+    // Batched decode failed (e.g., image not supported) - fall back to
+    // single-image
     free(valid);
     free(nv_outputs);
     free(padded_data);
@@ -1100,7 +1105,7 @@ bool nvjpeg_batched_is_ready(void) {
 
 NvJpegOutputFormat nvjpeg_batched_get_format(void) {
   if (!g_batched_ctx.initialized) {
-    return NVJPEG_FMT_RGB;  // Default
+    return NVJPEG_FMT_RGB; // Default
   }
   return g_batched_ctx.format;
 }
@@ -1173,6 +1178,19 @@ NvJpegBatchStats nvjpeg_batched_get_stats(void) {
   stats.max_batch_size_used = g_batched_ctx.max_batch_size_used;
 
   return stats;
+}
+
+// ============================================================================
+// Internal API for encoder context access (PR37)
+// ============================================================================
+
+// Get the shared nvJPEG handle for use by nvjpeg_encode.c
+// This avoids creating multiple handles which wastes GPU resources.
+nvjpegHandle_t nvjpeg_get_handle_internal(void) {
+  if (!g_nvjpeg_ctx.initialized) {
+    return NULL;
+  }
+  return g_nvjpeg_ctx.handle;
 }
 
 #else // !UNPAPER_WITH_CUDA

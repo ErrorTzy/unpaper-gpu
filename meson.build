@@ -109,6 +109,7 @@ if have_cuda
         'imageprocess/npp_wrapper.c',
         'imageprocess/npp_integral.c',
         'imageprocess/nvjpeg_decode.c',
+        'imageprocess/nvjpeg_encode.c',
         'imageprocess/opencv_bridge.cpp',
         'imageprocess/opencv_ops.cpp',
     ]
@@ -523,5 +524,22 @@ if have_cuda
     )
 
     test('nvjpeg batched decode', nvjpeg_batched_test,
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+
+    nvjpeg_encode_test = executable(
+        'nvjpeg_encode_test',
+        [
+            'tests/nvjpeg_encode_test.c',
+            'imageprocess/cuda_runtime.c',
+            'imageprocess/nvjpeg_decode.c',
+            'imageprocess/nvjpeg_encode.c',
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('nvjpeg encode', nvjpeg_encode_test,
          env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
 endif
