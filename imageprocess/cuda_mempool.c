@@ -20,8 +20,8 @@
 #define SLOT_IN_USE 1
 
 typedef struct {
-  uint64_t dptr;       // GPU device pointer
-  atomic_int in_use;   // SLOT_FREE or SLOT_IN_USE
+  uint64_t dptr;     // GPU device pointer
+  atomic_int in_use; // SLOT_FREE or SLOT_IN_USE
 } PoolSlot;
 
 // Fallback allocation tracking (for non-pooled allocations)
@@ -32,9 +32,9 @@ typedef struct FallbackAlloc {
 } FallbackAlloc;
 
 struct CudaMemPool {
-  PoolSlot *slots;              // Pre-allocated buffer slots
-  size_t slot_count;            // Number of slots
-  size_t buffer_size;           // Size of each buffer
+  PoolSlot *slots;    // Pre-allocated buffer slots
+  size_t slot_count;  // Number of slots
+  size_t buffer_size; // Size of each buffer
 
   // Fallback allocations for size mismatches
   FallbackAlloc *fallback_head;
@@ -44,8 +44,8 @@ struct CudaMemPool {
   atomic_size_t total_allocations;
   atomic_size_t pool_hits;
   atomic_size_t pool_misses;
-  atomic_size_t size_mismatches;   // Misses due to image size > pool buffer
-  atomic_size_t pool_exhaustion;   // Misses due to all slots in use
+  atomic_size_t size_mismatches; // Misses due to image size > pool buffer
+  atomic_size_t pool_exhaustion; // Misses due to all slots in use
   atomic_size_t current_in_use;
   atomic_size_t peak_in_use;
 };
@@ -57,6 +57,10 @@ static pthread_mutex_t global_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Global singleton pool for integral buffers (separate due to different sizes)
 static CudaMemPool *global_integral_pool = NULL;
 static pthread_mutex_t global_integral_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// Global singleton pool for scratch buffers (padded source for integral)
+static CudaMemPool *global_scratch_pool = NULL;
+static pthread_mutex_t global_scratch_pool_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 CudaMemPool *cuda_mempool_create(size_t buffer_count, size_t buffer_size) {
   if (buffer_count == 0 || buffer_size == 0) {
@@ -149,8 +153,8 @@ uint64_t cuda_mempool_acquire(CudaMemPool *pool, size_t bytes) {
     // Try to acquire a free slot (lock-free)
     for (size_t i = 0; i < pool->slot_count; i++) {
       int expected = SLOT_FREE;
-      if (atomic_compare_exchange_strong(&pool->slots[i].in_use,
-                                         &expected, SLOT_IN_USE)) {
+      if (atomic_compare_exchange_strong(&pool->slots[i].in_use, &expected,
+                                         SLOT_IN_USE)) {
         // Got a slot
         atomic_fetch_add(&pool->pool_hits, 1);
         size_t in_use = atomic_fetch_add(&pool->current_in_use, 1) + 1;
@@ -270,7 +274,8 @@ void cuda_mempool_print_stats(const CudaMemPool *pool) {
 
   double hit_rate = 0.0;
   if (stats.total_allocations > 0) {
-    hit_rate = 100.0 * (double)stats.pool_hits / (double)stats.total_allocations;
+    hit_rate =
+        100.0 * (double)stats.pool_hits / (double)stats.total_allocations;
   }
 
   fprintf(stderr,
@@ -282,20 +287,23 @@ void cuda_mempool_print_stats(const CudaMemPool *pool) {
           "  Peak concurrent usage: %zu\n",
           stats.buffer_count, stats.buffer_size,
           (double)stats.total_bytes_pooled / (1024.0 * 1024.0),
-          stats.total_allocations, stats.pool_hits, hit_rate,
-          stats.pool_misses, stats.peak_in_use);
+          stats.total_allocations, stats.pool_hits, hit_rate, stats.pool_misses,
+          stats.peak_in_use);
 
   // Show breakdown of miss reasons
   if (stats.pool_misses > 0) {
     if (stats.size_mismatches > 0) {
       fprintf(stderr,
-              "  WARNING: %zu allocations required larger buffers (mixed image sizes)\n"
-              "           Consider increasing pool buffer size for optimal performance\n",
+              "  WARNING: %zu allocations required larger buffers (mixed image "
+              "sizes)\n"
+              "           Consider increasing pool buffer size for optimal "
+              "performance\n",
               stats.size_mismatches);
     }
     if (stats.pool_exhaustion > 0) {
       fprintf(stderr,
-              "  Pool exhaustion: %zu (all buffers in use, needed direct allocation)\n",
+              "  Pool exhaustion: %zu (all buffers in use, needed direct "
+              "allocation)\n",
               stats.pool_exhaustion);
     }
   }
@@ -385,7 +393,8 @@ void cuda_mempool_global_print_stats(void) {
 
 // Integral pool implementation
 
-bool cuda_mempool_integral_global_init(size_t buffer_count, size_t buffer_size) {
+bool cuda_mempool_integral_global_init(size_t buffer_count,
+                                       size_t buffer_size) {
   pthread_mutex_lock(&global_integral_pool_mutex);
 
   if (global_integral_pool != NULL) {
@@ -482,8 +491,7 @@ void cuda_mempool_integral_global_print_stats(void) {
 
     if (stats.pool_misses > 0) {
       if (stats.size_mismatches > 0) {
-        fprintf(stderr,
-                "  WARNING: %zu allocations required larger buffers\n",
+        fprintf(stderr, "  WARNING: %zu allocations required larger buffers\n",
                 stats.size_mismatches);
       }
       if (stats.pool_exhaustion > 0) {
@@ -492,6 +500,116 @@ void cuda_mempool_integral_global_print_stats(void) {
     }
   }
   pthread_mutex_unlock(&global_integral_pool_mutex);
+}
+
+// Scratch pool implementation
+
+bool cuda_mempool_scratch_global_init(size_t buffer_count, size_t buffer_size) {
+  pthread_mutex_lock(&global_scratch_pool_mutex);
+
+  if (global_scratch_pool != NULL) {
+    // Already initialized
+    pthread_mutex_unlock(&global_scratch_pool_mutex);
+    return true;
+  }
+
+  global_scratch_pool = cuda_mempool_create(buffer_count, buffer_size);
+
+  pthread_mutex_unlock(&global_scratch_pool_mutex);
+  return global_scratch_pool != NULL;
+}
+
+void cuda_mempool_scratch_global_cleanup(void) {
+  pthread_mutex_lock(&global_scratch_pool_mutex);
+
+  if (global_scratch_pool != NULL) {
+    cuda_mempool_destroy(global_scratch_pool);
+    global_scratch_pool = NULL;
+  }
+
+  pthread_mutex_unlock(&global_scratch_pool_mutex);
+}
+
+bool cuda_mempool_scratch_global_active(void) {
+  pthread_mutex_lock(&global_scratch_pool_mutex);
+  bool active = (global_scratch_pool != NULL);
+  pthread_mutex_unlock(&global_scratch_pool_mutex);
+  return active;
+}
+
+uint64_t cuda_mempool_scratch_global_acquire(size_t bytes) {
+  // Fast path: check without lock
+  CudaMemPool *pool = global_scratch_pool;
+  if (pool != NULL) {
+    return cuda_mempool_acquire(pool, bytes);
+  }
+
+  // No pool - direct allocation
+  return unpaper_cuda_malloc(bytes);
+}
+
+void cuda_mempool_scratch_global_release(uint64_t dptr) {
+  if (dptr == 0) {
+    return;
+  }
+
+  // Fast path: check without lock
+  CudaMemPool *pool = global_scratch_pool;
+  if (pool != NULL) {
+    cuda_mempool_release(pool, dptr);
+    return;
+  }
+
+  // No pool - direct free
+  unpaper_cuda_free(dptr);
+}
+
+CudaMemPoolStats cuda_mempool_scratch_global_get_stats(void) {
+  CudaMemPoolStats stats = {0};
+
+  pthread_mutex_lock(&global_scratch_pool_mutex);
+  if (global_scratch_pool != NULL) {
+    stats = cuda_mempool_get_stats(global_scratch_pool);
+  }
+  pthread_mutex_unlock(&global_scratch_pool_mutex);
+
+  return stats;
+}
+
+void cuda_mempool_scratch_global_print_stats(void) {
+  pthread_mutex_lock(&global_scratch_pool_mutex);
+  if (global_scratch_pool != NULL) {
+    fprintf(stderr, "GPU Scratch Buffer Pool Statistics:\n");
+    CudaMemPoolStats stats = cuda_mempool_get_stats(global_scratch_pool);
+
+    double hit_rate = 0.0;
+    if (stats.total_allocations > 0) {
+      hit_rate =
+          100.0 * (double)stats.pool_hits / (double)stats.total_allocations;
+    }
+
+    fprintf(stderr,
+            "  Pool size: %zu buffers x %zu bytes = %.2f MB\n"
+            "  Total acquisitions: %zu\n"
+            "  Pool hits: %zu (%.1f%%)\n"
+            "  Pool misses: %zu\n"
+            "  Peak concurrent usage: %zu\n",
+            stats.buffer_count, stats.buffer_size,
+            (double)stats.total_bytes_pooled / (1024.0 * 1024.0),
+            stats.total_allocations, stats.pool_hits, hit_rate,
+            stats.pool_misses, stats.peak_in_use);
+
+    if (stats.pool_misses > 0) {
+      if (stats.size_mismatches > 0) {
+        fprintf(stderr, "  WARNING: %zu allocations required larger buffers\n",
+                stats.size_mismatches);
+      }
+      if (stats.pool_exhaustion > 0) {
+        fprintf(stderr, "  Pool exhaustion: %zu\n", stats.pool_exhaustion);
+      }
+    }
+  }
+  pthread_mutex_unlock(&global_scratch_pool_mutex);
 }
 
 #else // !UNPAPER_WITH_CUDA
@@ -549,7 +667,8 @@ CudaMemPoolStats cuda_mempool_global_get_stats(void) {
 
 void cuda_mempool_global_print_stats(void) {}
 
-bool cuda_mempool_integral_global_init(size_t buffer_count, size_t buffer_size) {
+bool cuda_mempool_integral_global_init(size_t buffer_count,
+                                       size_t buffer_size) {
   (void)buffer_count;
   (void)buffer_size;
   return false;
@@ -572,5 +691,29 @@ CudaMemPoolStats cuda_mempool_integral_global_get_stats(void) {
 }
 
 void cuda_mempool_integral_global_print_stats(void) {}
+
+bool cuda_mempool_scratch_global_init(size_t buffer_count, size_t buffer_size) {
+  (void)buffer_count;
+  (void)buffer_size;
+  return false;
+}
+
+void cuda_mempool_scratch_global_cleanup(void) {}
+
+bool cuda_mempool_scratch_global_active(void) { return false; }
+
+uint64_t cuda_mempool_scratch_global_acquire(size_t bytes) {
+  (void)bytes;
+  return 0;
+}
+
+void cuda_mempool_scratch_global_release(uint64_t dptr) { (void)dptr; }
+
+CudaMemPoolStats cuda_mempool_scratch_global_get_stats(void) {
+  CudaMemPoolStats stats = {0};
+  return stats;
+}
+
+void cuda_mempool_scratch_global_print_stats(void) {}
 
 #endif // UNPAPER_WITH_CUDA

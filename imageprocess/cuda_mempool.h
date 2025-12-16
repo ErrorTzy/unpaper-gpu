@@ -20,21 +20,22 @@ typedef struct CudaMemPool CudaMemPool;
 
 // Pool statistics for monitoring
 typedef struct {
-  size_t total_allocations;    // Number of acquire calls
-  size_t pool_hits;            // Reuses from pool (no cudaMalloc)
-  size_t pool_misses;          // Required new allocation
-  size_t size_mismatches;      // Misses due to image size > pool buffer (mixed sizes)
-  size_t pool_exhaustion;      // Misses due to all pool slots in use
-  size_t current_in_use;       // Currently checked-out buffers
-  size_t peak_in_use;          // High water mark
-  size_t total_bytes_pooled;   // Total GPU memory in pool
-  size_t buffer_count;         // Number of buffers in pool
-  size_t buffer_size;          // Size of each buffer
+  size_t total_allocations; // Number of acquire calls
+  size_t pool_hits;         // Reuses from pool (no cudaMalloc)
+  size_t pool_misses;       // Required new allocation
+  size_t
+      size_mismatches; // Misses due to image size > pool buffer (mixed sizes)
+  size_t pool_exhaustion;    // Misses due to all pool slots in use
+  size_t current_in_use;     // Currently checked-out buffers
+  size_t peak_in_use;        // High water mark
+  size_t total_bytes_pooled; // Total GPU memory in pool
+  size_t buffer_count;       // Number of buffers in pool
+  size_t buffer_size;        // Size of each buffer
 } CudaMemPoolStats;
 
 // Create a memory pool with pre-allocated GPU buffers.
-// buffer_count: number of buffers to pre-allocate (e.g., 8 for triple-buffered 4-stream)
-// buffer_size: size of each buffer in bytes (e.g., 4MB for A1 images)
+// buffer_count: number of buffers to pre-allocate (e.g., 8 for triple-buffered
+// 4-stream) buffer_size: size of each buffer in bytes (e.g., 4MB for A1 images)
 // Returns NULL on failure.
 CudaMemPool *cuda_mempool_create(size_t buffer_count, size_t buffer_size);
 
@@ -42,9 +43,9 @@ CudaMemPool *cuda_mempool_create(size_t buffer_count, size_t buffer_size);
 void cuda_mempool_destroy(CudaMemPool *pool);
 
 // Acquire a buffer from the pool.
-// If the requested size matches the pool's buffer size, returns a pooled buffer.
-// If size differs or pool is exhausted, falls back to direct cudaMalloc.
-// Returns 0 on failure.
+// If the requested size matches the pool's buffer size, returns a pooled
+// buffer. If size differs or pool is exhausted, falls back to direct
+// cudaMalloc. Returns 0 on failure.
 uint64_t cuda_mempool_acquire(CudaMemPool *pool, size_t bytes);
 
 // Release a buffer back to the pool.
@@ -84,9 +85,10 @@ CudaMemPoolStats cuda_mempool_global_get_stats(void);
 // Print global pool statistics.
 void cuda_mempool_global_print_stats(void);
 
-// Integral buffer pool - separate from image pool due to different buffer sizes.
-// Integral buffers are width*height*4 bytes (int32), typically ~35MB for A1 images.
-// For batch processing with N streams, allocate 2*N buffers for double-buffering.
+// Integral buffer pool - separate from image pool due to different buffer
+// sizes. Integral buffers are width*height*4 bytes (int32), typically ~35MB for
+// A1 images. For batch processing with N streams, allocate 2*N buffers for
+// double-buffering.
 
 // Initialize global integral pool with specified parameters.
 // buffer_count: typically 2 * stream_count
@@ -110,6 +112,33 @@ CudaMemPoolStats cuda_mempool_integral_global_get_stats(void);
 
 // Print global integral pool statistics.
 void cuda_mempool_integral_global_print_stats(void);
+
+// Scratch buffer pool - for temporary GPU allocations during processing.
+// Used for padded source buffers in integral computation.
+// Eliminates cudaMalloc/cudaFree per-image which serialize all streams.
+
+// Initialize global scratch pool with specified parameters.
+// buffer_count: typically 2 * stream_count (for concurrent integral operations)
+// buffer_size: typically (width+1) * (height+1) aligned to 512 bytes
+bool cuda_mempool_scratch_global_init(size_t buffer_count, size_t buffer_size);
+
+// Destroy global scratch pool.
+void cuda_mempool_scratch_global_cleanup(void);
+
+// Check if global scratch pool is active.
+bool cuda_mempool_scratch_global_active(void);
+
+// Acquire from global scratch pool (falls back to direct alloc if no pool).
+uint64_t cuda_mempool_scratch_global_acquire(size_t bytes);
+
+// Release to global scratch pool (falls back to cudaFree if no pool).
+void cuda_mempool_scratch_global_release(uint64_t dptr);
+
+// Get global scratch pool statistics.
+CudaMemPoolStats cuda_mempool_scratch_global_get_stats(void);
+
+// Print global scratch pool statistics.
+void cuda_mempool_scratch_global_print_stats(void);
 
 #ifdef __cplusplus
 }
