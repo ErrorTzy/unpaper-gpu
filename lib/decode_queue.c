@@ -123,6 +123,9 @@ static bool decode_jpeg_to_gpu(const char *filename, DecodedImage *out) {
   // Map nvJPEG format to AVPixelFormat
   out->gpu_format = (nvout.channels == 1) ? AV_PIX_FMT_GRAY8 : AV_PIX_FMT_RGB24;
   out->frame = NULL; // No CPU frame needed
+  // Store completion event for async decode (caller must sync before use)
+  out->gpu_completion_event = nvout.completion_event;
+  out->gpu_event_from_pool = nvout.event_from_pool;
 
   return true;
 }
@@ -439,6 +442,8 @@ static void *producer_thread_fn(void *arg) {
       slot->image.gpu_height = 0;
       slot->image.gpu_channels = 0;
       slot->image.gpu_format = 0;
+      slot->image.gpu_completion_event = NULL;
+      slot->image.gpu_event_from_pool = false;
 
 #ifdef UNPAPER_WITH_CUDA
       // Try GPU decode for JPEG files using nvJPEG
@@ -625,6 +630,13 @@ void decode_queue_destroy(DecodeQueue *queue) {
   for (size_t i = 0; i < queue->queue_depth; i++) {
     DecodeSlot *slot = &queue->slots[i];
 #ifdef UNPAPER_WITH_CUDA
+    // Clean up completion event if not already synced
+    if (slot->image.gpu_completion_event != NULL) {
+      nvjpeg_release_completion_event(slot->image.gpu_completion_event,
+                                      slot->image.gpu_event_from_pool);
+      slot->image.gpu_completion_event = NULL;
+      slot->image.gpu_event_from_pool = false;
+    }
     // Free GPU memory if image was decoded to GPU
     if (slot->image.on_gpu && slot->image.gpu_ptr != NULL) {
       cudaFree(slot->image.gpu_ptr);
@@ -752,6 +764,13 @@ void decode_queue_release(DecodeQueue *queue, DecodedImage *image) {
       DecodeSlot *slot = &queue->slots[i];
 
 #ifdef UNPAPER_WITH_CUDA
+      // Clean up completion event if not already synced
+      if (slot->image.gpu_completion_event != NULL) {
+        nvjpeg_release_completion_event(slot->image.gpu_completion_event,
+                                        slot->image.gpu_event_from_pool);
+        slot->image.gpu_completion_event = NULL;
+        slot->image.gpu_event_from_pool = false;
+      }
       // Free GPU memory if image was decoded to GPU
       if (slot->image.on_gpu && slot->image.gpu_ptr != NULL) {
         cudaFree(slot->image.gpu_ptr);
@@ -794,6 +813,31 @@ void decode_queue_release(DecodeQueue *queue, DecodedImage *image) {
       return;
     }
   }
+}
+
+// Wait for GPU decode to complete (synchronize on completion event).
+// Must be called before accessing gpu_ptr from a different CUDA stream.
+// Safe to call even if image was not GPU-decoded.
+void decoded_image_wait_gpu_complete(DecodedImage *image) {
+  if (image == NULL) {
+    return;
+  }
+
+#ifdef UNPAPER_WITH_CUDA
+  if (image->gpu_completion_event != NULL) {
+    cudaEvent_t event = (cudaEvent_t)image->gpu_completion_event;
+    cudaError_t err = cudaEventSynchronize(event);
+    if (err != cudaSuccess) {
+      verboseLog(VERBOSE_DEBUG, "decoded_image: event sync failed: %s\n",
+                 cudaGetErrorString(err));
+    }
+    // Release event back to pool or destroy
+    nvjpeg_release_completion_event(image->gpu_completion_event,
+                                    image->gpu_event_from_pool);
+    image->gpu_completion_event = NULL;
+    image->gpu_event_from_pool = false;
+  }
+#endif
 }
 
 bool decode_queue_producer_done(DecodeQueue *queue) {

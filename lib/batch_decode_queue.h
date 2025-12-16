@@ -69,6 +69,9 @@ typedef struct {
   size_t peak_queue_depth;     // Maximum queue occupancy
   double total_io_time_ms;     // Total time spent on file I/O
   double total_decode_time_ms; // Total time spent on GPU decode
+  // Worker wait statistics (PR39 diagnostics)
+  size_t worker_wait_count;    // Number of times workers waited for images
+  double worker_wait_time_ms;  // Total time workers spent waiting
 } BatchDecodeQueueStats;
 
 // ============================================================================

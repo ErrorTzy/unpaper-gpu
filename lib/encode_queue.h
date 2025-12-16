@@ -38,6 +38,11 @@ typedef struct {
   size_t peak_queue_depth;     // Maximum queue occupancy observed
   double total_encode_time_ms; // Total time spent encoding
   double avg_encode_time_ms;   // Average encode time per image
+  // GPU encode stats (PR38 diagnostics)
+  size_t gpu_encodes;             // Images encoded via GPU
+  double gpu_encode_time_ms;      // Total GPU encode time
+  double gpu_encode_min_ms;       // Minimum GPU encode time
+  double gpu_encode_max_ms;       // Maximum GPU encode time
 } EncodeQueueStats;
 
 // Create an encode queue

@@ -33,8 +33,20 @@ struct NvJpegStreamState {
   nvjpegJpegStream_t jpeg_stream; // Bitstream parser (per-stream)
   cudaStream_t decode_stream; // Dedicated CUDA stream for this state (CRITICAL
                               // for parallelism)
+  cudaEvent_t completion_event;   // Pre-allocated event for async completion
   atomic_int in_use;          // SLOT_FREE or SLOT_IN_USE
 };
+
+// Event pool for async decode completion tracking.
+// Pre-allocating events avoids contention during event creation.
+#define EVENT_POOL_SIZE 64
+
+typedef struct {
+  cudaEvent_t events[EVENT_POOL_SIZE];
+  atomic_int in_use[EVENT_POOL_SIZE];  // SLOT_FREE or SLOT_IN_USE
+  int count;
+  bool initialized;
+} EventPool;
 
 // Global nvJPEG context (singleton)
 typedef struct {
@@ -42,6 +54,9 @@ typedef struct {
   NvJpegStreamState *stream_states; // Array[num_streams]
   int num_streams;                  // Number of stream states
   bool initialized;                 // Initialization flag
+
+  // Event pool for async decode (avoids create/destroy overhead)
+  EventPool event_pool;
 
   // Statistics (atomic for thread safety)
   atomic_size_t total_decodes;
@@ -181,6 +196,80 @@ static void update_peak_usage(void) {
 }
 
 // ============================================================================
+// Event Pool Management (for async decode completion)
+// ============================================================================
+// Pre-allocating events avoids contention when multiple threads would
+// otherwise create events simultaneously during high-parallelism decode.
+
+static bool event_pool_init(EventPool *pool, int count) {
+  if (count > EVENT_POOL_SIZE) {
+    count = EVENT_POOL_SIZE;
+  }
+
+  pool->count = 0;
+  pool->initialized = false;
+
+  for (int i = 0; i < count; i++) {
+    cudaError_t err = cudaEventCreateWithFlags(&pool->events[i],
+                                                cudaEventDisableTiming);
+    if (err != cudaSuccess) {
+      // Clean up already created events
+      for (int j = 0; j < i; j++) {
+        cudaEventDestroy(pool->events[j]);
+      }
+      return false;
+    }
+    atomic_init(&pool->in_use[i], SLOT_FREE);
+    pool->count++;
+  }
+
+  pool->initialized = true;
+  return true;
+}
+
+static void event_pool_cleanup(EventPool *pool) {
+  if (!pool->initialized) {
+    return;
+  }
+  for (int i = 0; i < pool->count; i++) {
+    cudaEventDestroy(pool->events[i]);
+    pool->events[i] = NULL;
+  }
+  pool->count = 0;
+  pool->initialized = false;
+}
+
+// Acquire an event from the pool (lock-free).
+// Returns NULL if pool is exhausted.
+static cudaEvent_t event_pool_acquire(EventPool *pool) {
+  if (!pool->initialized) {
+    return NULL;
+  }
+  for (int i = 0; i < pool->count; i++) {
+    int expected = SLOT_FREE;
+    if (atomic_compare_exchange_strong(&pool->in_use[i], &expected,
+                                        SLOT_IN_USE)) {
+      return pool->events[i];
+    }
+  }
+  return NULL;  // Pool exhausted
+}
+
+// Release an event back to the pool.
+static void event_pool_release(EventPool *pool, cudaEvent_t event) {
+  if (!pool->initialized || event == NULL) {
+    return;
+  }
+  for (int i = 0; i < pool->count; i++) {
+    if (pool->events[i] == event) {
+      atomic_store(&pool->in_use[i], SLOT_FREE);
+      return;
+    }
+  }
+  // Event not from this pool - shouldn't happen
+}
+
+// ============================================================================
 // Stream State Management
 // ============================================================================
 
@@ -198,11 +287,27 @@ static bool init_stream_state(NvJpegStreamState *state) {
     return false;
   }
 
+  // Pre-allocate completion event for async decode.
+  // Creating events at init time avoids contention when multiple threads
+  // would otherwise create events simultaneously during decode.
+  // Use DisableTiming for faster event operations.
+  cuda_err = cudaEventCreateWithFlags(&state->completion_event,
+                                      cudaEventDisableTiming);
+  if (cuda_err != cudaSuccess) {
+    verboseLog(VERBOSE_DEBUG, "nvjpeg: failed to create completion event: %s\n",
+               cudaGetErrorString(cuda_err));
+    cudaStreamDestroy(state->decode_stream);
+    state->decode_stream = NULL;
+    return false;
+  }
+
   // Create decoder state
   // When nvjpegCreateExV2 was used with custom allocators, nvJPEG will use
   // those allocators for internal device and pinned buffers automatically.
   status = nvjpegJpegStateCreate(g_nvjpeg_ctx.handle, &state->state);
   if (status != NVJPEG_STATUS_SUCCESS) {
+    cudaEventDestroy(state->completion_event);
+    state->completion_event = NULL;
     cudaStreamDestroy(state->decode_stream);
     state->decode_stream = NULL;
     verboseLog(VERBOSE_DEBUG, "nvjpeg: failed to create state: %s\n",
@@ -215,6 +320,8 @@ static bool init_stream_state(NvJpegStreamState *state) {
   status = nvjpegJpegStreamCreate(g_nvjpeg_ctx.handle, &state->jpeg_stream);
   if (status != NVJPEG_STATUS_SUCCESS) {
     nvjpegJpegStateDestroy(state->state);
+    cudaEventDestroy(state->completion_event);
+    state->completion_event = NULL;
     cudaStreamDestroy(state->decode_stream);
     state->decode_stream = NULL;
     verboseLog(VERBOSE_DEBUG, "nvjpeg: failed to create JPEG stream: %s\n",
@@ -235,6 +342,11 @@ static void cleanup_stream_state(NvJpegStreamState *state) {
   if (state->state != NULL) {
     nvjpegJpegStateDestroy(state->state);
     state->state = NULL;
+  }
+  // Destroy completion event
+  if (state->completion_event != NULL) {
+    cudaEventDestroy(state->completion_event);
+    state->completion_event = NULL;
   }
   // Destroy dedicated CUDA stream
   if (state->decode_stream != NULL) {
@@ -341,6 +453,23 @@ bool nvjpeg_context_init(int num_streams) {
   atomic_init(&g_nvjpeg_ctx.current_in_use, 0);
   atomic_init(&g_nvjpeg_ctx.concurrent_peak, 0);
 
+  // Initialize event pool for async decode completion tracking.
+  // Pool size should be enough for concurrent decodes plus some headroom.
+  // Using num_streams * 2 to allow overlap between decode completion and
+  // worker consumption.
+  int event_pool_size = num_streams * 2;
+  if (event_pool_size > EVENT_POOL_SIZE) {
+    event_pool_size = EVENT_POOL_SIZE;
+  }
+  if (!event_pool_init(&g_nvjpeg_ctx.event_pool, event_pool_size)) {
+    verboseLog(VERBOSE_DEBUG, "nvjpeg: warning - failed to create event pool, "
+               "will create events per-decode\n");
+    // Non-fatal - we'll fall back to per-decode event creation
+  } else {
+    verboseLog(VERBOSE_DEBUG, "nvjpeg: initialized event pool with %d events\n",
+               event_pool_size);
+  }
+
   g_nvjpeg_ctx.initialized = true;
 
   verboseLog(VERBOSE_DEBUG, "nvjpeg: initialized with %d stream states\n",
@@ -357,6 +486,9 @@ void nvjpeg_context_cleanup(void) {
     pthread_mutex_unlock(&g_init_mutex);
     return;
   }
+
+  // Cleanup event pool first (events may reference streams)
+  event_pool_cleanup(&g_nvjpeg_ctx.event_pool);
 
   // Cleanup stream states
   if (g_nvjpeg_ctx.stream_states != NULL) {
@@ -504,6 +636,13 @@ bool nvjpeg_decode_to_gpu(const uint8_t *jpeg_data, size_t jpeg_size,
 
   atomic_fetch_add(&g_nvjpeg_ctx.total_decodes, 1);
 
+  // Ensure CUDA context is bound in this thread
+  // This is critical for multi-threaded decode from producer threads
+  cudaError_t dev_err = cudaSetDevice(0);
+  if (dev_err != cudaSuccess) {
+    return false;
+  }
+
   // CRITICAL: Use the state's dedicated stream, NOT the passed-in stream.
   // Each nvJPEG stream state has its own CUDA stream to enable true
   // parallelism. Using a shared stream would serialize all decodes, defeating
@@ -573,15 +712,41 @@ bool nvjpeg_decode_to_gpu(const uint8_t *jpeg_data, size_t jpeg_size,
     return false;
   }
 
-  // Synchronize to ensure decode is complete before another thread uses the
-  // data This is necessary since the producer thread and worker threads are
-  // different
-  cudaError_t sync_err = cudaStreamSynchronize(cuda_stream);
-  if (sync_err != cudaSuccess) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg: stream sync failed\n");
-    cudaFreeAsync(output_ptr, cuda_stream);
-    atomic_fetch_add(&g_nvjpeg_ctx.fallback_decodes, 1);
-    return false;
+  // Try to acquire a completion event from the pool instead of creating
+  // a new one. This avoids cudaEventCreate/Destroy overhead which was
+  // identified as a major bottleneck in multi-stream scaling.
+  cudaEvent_t completion_event = event_pool_acquire(&g_nvjpeg_ctx.event_pool);
+  bool event_from_pool = (completion_event != NULL);
+
+  if (completion_event == NULL) {
+    // Pool exhausted - fall back to creating a new event
+    cudaError_t event_err = cudaEventCreateWithFlags(&completion_event,
+                                                      cudaEventDisableTiming);
+    if (event_err != cudaSuccess) {
+      // Fallback to synchronous if event creation fails
+      verboseLog(VERBOSE_DEBUG, "nvjpeg: event creation failed, falling back to sync\n");
+      cudaStreamSynchronize(cuda_stream);
+      out->completion_event = NULL;
+      out->event_from_pool = false;
+    }
+  }
+
+  if (completion_event != NULL) {
+    cudaError_t event_err = cudaEventRecord(completion_event, cuda_stream);
+    if (event_err != cudaSuccess) {
+      verboseLog(VERBOSE_DEBUG, "nvjpeg: event record failed, falling back to sync\n");
+      if (event_from_pool) {
+        event_pool_release(&g_nvjpeg_ctx.event_pool, completion_event);
+      } else {
+        cudaEventDestroy(completion_event);
+      }
+      cudaStreamSynchronize(cuda_stream);
+      out->completion_event = NULL;
+      out->event_from_pool = false;
+    } else {
+      out->completion_event = (void *)completion_event;
+      out->event_from_pool = event_from_pool;
+    }
   }
 
   // Fill output structure
@@ -654,6 +819,43 @@ bool nvjpeg_decode_file_to_gpu(const char *filename, UnpaperCudaStream *stream,
   free(jpeg_data);
 
   return result;
+}
+
+// Release a completion event back to the pool (or destroy if not from pool).
+void nvjpeg_release_completion_event(void *event, bool from_pool) {
+  if (event == NULL) {
+    return;
+  }
+
+  cudaEvent_t cuda_event = (cudaEvent_t)event;
+  if (from_pool) {
+    // Return event to the pool for reuse
+    event_pool_release(&g_nvjpeg_ctx.event_pool, cuda_event);
+  } else {
+    // Event was created per-decode, destroy it
+    cudaEventDestroy(cuda_event);
+  }
+}
+
+// Wait for decode completion by synchronizing on the completion event.
+// This must be called before accessing the decoded data from a different
+// stream than the one used for decoding.
+void nvjpeg_wait_decode_complete(NvJpegDecodedImage *image) {
+  if (image == NULL || image->completion_event == NULL) {
+    return;
+  }
+
+  cudaEvent_t event = (cudaEvent_t)image->completion_event;
+  cudaError_t err = cudaEventSynchronize(event);
+  if (err != cudaSuccess) {
+    verboseLog(VERBOSE_DEBUG, "nvjpeg: event sync failed: %s\n",
+               cudaGetErrorString(err));
+  }
+
+  // Release event back to pool or destroy
+  nvjpeg_release_completion_event(image->completion_event, image->event_from_pool);
+  image->completion_event = NULL;
+  image->event_from_pool = false;
 }
 
 // ============================================================================
@@ -1248,6 +1450,13 @@ bool nvjpeg_decode_file_to_gpu(const char *filename, UnpaperCudaStream *stream,
   (void)output_fmt;
   (void)out;
   return false;
+}
+
+void nvjpeg_wait_decode_complete(NvJpegDecodedImage *image) { (void)image; }
+
+void nvjpeg_release_completion_event(void *event, bool from_pool) {
+  (void)event;
+  (void)from_pool;
 }
 
 // Batched decode stubs for non-CUDA builds

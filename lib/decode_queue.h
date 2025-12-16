@@ -31,7 +31,14 @@ typedef struct {
   int gpu_channels; // Number of channels (1 for gray, 3 for RGB)
   int gpu_format;   // AVPixelFormat equivalent (AV_PIX_FMT_GRAY8 or
                     // AV_PIX_FMT_RGB24)
+  void *gpu_completion_event;    // CUDA event for async decode completion
+  bool gpu_event_from_pool;      // True if event came from global event pool
 } DecodedImage;
+
+// Wait for GPU decode to complete (if image was decoded to GPU).
+// Must call before accessing gpu_ptr from a different CUDA stream.
+// Safe to call even if image was not GPU-decoded.
+void decoded_image_wait_gpu_complete(DecodedImage *image);
 
 // Decode queue - bounded queue of pre-decoded images
 typedef struct DecodeQueue DecodeQueue;

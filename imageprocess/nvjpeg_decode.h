@@ -39,7 +39,20 @@ typedef struct {
   int height;             // Image height in pixels
   int channels;           // Number of channels (1 for gray, 3 for RGB)
   NvJpegOutputFormat fmt; // Output format
+  void *completion_event; // CUDA event signaled when decode completes (opaque)
+  bool event_from_pool;   // True if completion_event came from global event pool
 } NvJpegDecodedImage;
+
+// Wait for decode to complete (sync on completion event).
+// Call this before accessing gpu_ptr data from a different stream.
+// After calling, completion_event is released/destroyed and set to NULL.
+void nvjpeg_wait_decode_complete(NvJpegDecodedImage *image);
+
+// Release a completion event back to the pool (or destroy if not from pool).
+// This is used by decode_queue when it needs to release events without waiting.
+// event: The completion event (opaque pointer)
+// from_pool: True if the event came from the global event pool
+void nvjpeg_release_completion_event(void *event, bool from_pool);
 
 // Pool statistics for monitoring
 typedef struct {

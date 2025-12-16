@@ -70,6 +70,12 @@ struct EncodeQueue {
   atomic_size_t current_depth;
   atomic_size_t peak_depth;
   atomic_uint_fast64_t total_encode_time_us; // Microseconds for precision
+
+  // GPU encode statistics (PR38 diagnostics)
+  atomic_size_t gpu_encodes;
+  atomic_uint_fast64_t gpu_encode_time_us;
+  atomic_uint_fast64_t gpu_encode_min_us;
+  atomic_uint_fast64_t gpu_encode_max_us;
 };
 
 // Get current time in microseconds
@@ -577,6 +583,12 @@ EncodeQueue *encode_queue_create(size_t queue_depth, int num_encoder_threads) {
   atomic_init(&queue->peak_depth, 0);
   atomic_init(&queue->total_encode_time_us, 0);
 
+  // GPU encode statistics
+  atomic_init(&queue->gpu_encodes, 0);
+  atomic_init(&queue->gpu_encode_time_us, 0);
+  atomic_init(&queue->gpu_encode_min_us, UINT64_MAX);
+  atomic_init(&queue->gpu_encode_max_us, 0);
+
   // GPU encoding support (PR37)
   queue->gpu_encode_enabled = false;
   queue->gpu_encode_quality = 85;
@@ -756,6 +768,16 @@ EncodeQueueStats encode_queue_get_stats(const EncodeQueue *queue) {
         stats.total_encode_time_ms / (double)stats.images_encoded;
   }
 
+  // GPU encode statistics
+  stats.gpu_encodes = atomic_load(&queue->gpu_encodes);
+  uint64_t gpu_time_us = atomic_load(&queue->gpu_encode_time_us);
+  stats.gpu_encode_time_ms = (double)gpu_time_us / 1000.0;
+
+  uint64_t min_us = atomic_load(&queue->gpu_encode_min_us);
+  uint64_t max_us = atomic_load(&queue->gpu_encode_max_us);
+  stats.gpu_encode_min_ms = (min_us == UINT64_MAX) ? 0.0 : (double)min_us / 1000.0;
+  stats.gpu_encode_max_ms = (double)max_us / 1000.0;
+
   return stats;
 }
 
@@ -792,6 +814,17 @@ void encode_queue_print_stats(const EncodeQueue *queue) {
           stats.images_encoded, stats.producer_waits, producer_wait_rate,
           stats.consumer_waits, consumer_wait_rate, stats.peak_queue_depth,
           stats.total_encode_time_ms, stats.avg_encode_time_ms);
+
+  // Print GPU encode stats if any GPU encodes occurred
+  if (stats.gpu_encodes > 0) {
+    double avg_gpu_encode = stats.gpu_encode_time_ms / (double)stats.gpu_encodes;
+    fprintf(stderr,
+            "  GPU encodes: %zu\n"
+            "  GPU encode time: %.2f ms total, %.2f ms/image avg\n"
+            "  GPU encode range: %.2f ms min, %.2f ms max\n",
+            stats.gpu_encodes, stats.gpu_encode_time_ms, avg_gpu_encode,
+            stats.gpu_encode_min_ms, stats.gpu_encode_max_ms);
+  }
 }
 
 // ============================================================================
@@ -875,6 +908,8 @@ bool encode_queue_submit_gpu(EncodeQueue *queue, void *gpu_ptr, size_t pitch,
     NvJpegEncodeFormat fmt =
         (channels == 1) ? NVJPEG_ENC_FMT_GRAY8 : NVJPEG_ENC_FMT_RGB;
 
+    uint64_t encode_start = get_time_us();
+
     for (int i = 0; i < output_count; i++) {
       bool result = nvjpeg_encode_gpu_to_file(gpu_ptr, pitch, width, height,
                                               fmt, NULL, output_files[i]);
@@ -882,6 +917,27 @@ bool encode_queue_submit_gpu(EncodeQueue *queue, void *gpu_ptr, size_t pitch,
         // Fall back to CPU encoding for this file
         goto fallback_cpu;
       }
+    }
+
+    uint64_t encode_time = get_time_us() - encode_start;
+
+    // Update GPU encode statistics
+    atomic_fetch_add(&queue->gpu_encodes, 1);
+    atomic_fetch_add(&queue->gpu_encode_time_us, encode_time);
+
+    // Update min/max (atomic compare-exchange for thread safety)
+    uint64_t current_min = atomic_load(&queue->gpu_encode_min_us);
+    while (encode_time < current_min &&
+           !atomic_compare_exchange_weak(&queue->gpu_encode_min_us, &current_min,
+                                         encode_time)) {
+      // Retry with updated current_min
+    }
+
+    uint64_t current_max = atomic_load(&queue->gpu_encode_max_us);
+    while (encode_time > current_max &&
+           !atomic_compare_exchange_weak(&queue->gpu_encode_max_us, &current_max,
+                                         encode_time)) {
+      // Retry with updated current_max
     }
 
     // Success - update stats

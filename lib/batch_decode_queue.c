@@ -121,6 +121,10 @@ struct BatchDecodeQueue {
   atomic_size_t peak_depth;
   atomic_size_t io_time_us;
   atomic_size_t decode_time_us;
+
+  // Worker wait statistics (for diagnosing parallelism issues)
+  atomic_size_t worker_wait_count;
+  atomic_uint_fast64_t worker_wait_time_us;
 };
 
 // ============================================================================
@@ -870,6 +874,8 @@ BatchDecodeQueue *batch_decode_queue_create(size_t queue_depth,
   atomic_init(&queue->peak_depth, 0);
   atomic_init(&queue->io_time_us, 0);
   atomic_init(&queue->decode_time_us, 0);
+  atomic_init(&queue->worker_wait_count, 0);
+  atomic_init(&queue->worker_wait_time_us, 0);
 
   // Initialize slots
   for (size_t i = 0; i < queue_depth; i++) {
@@ -1025,10 +1031,16 @@ BatchDecodedImage *batch_decode_queue_get(BatchDecodeQueue *queue,
       return NULL;
     }
 
-    // Wait for producer
+    // Wait for producer - track wait time for diagnostics
+    double wait_start = get_time_ms();
+
     pthread_mutex_lock(&queue->slot_mutex);
     pthread_cond_wait(&queue->slot_not_empty, &queue->slot_mutex);
     pthread_mutex_unlock(&queue->slot_mutex);
+
+    double wait_time_ms = get_time_ms() - wait_start;
+    atomic_fetch_add(&queue->worker_wait_count, 1);
+    atomic_fetch_add(&queue->worker_wait_time_us, (uint64_t)(wait_time_ms * 1000.0));
   }
 }
 
@@ -1094,6 +1106,11 @@ batch_decode_queue_get_stats(const BatchDecodeQueue *queue) {
   stats.total_decode_time_ms =
       (double)atomic_load(&queue->decode_time_us) / 1000.0;
 
+  // Worker wait statistics
+  stats.worker_wait_count = atomic_load(&queue->worker_wait_count);
+  stats.worker_wait_time_ms =
+      (double)atomic_load(&queue->worker_wait_time_us) / 1000.0;
+
   return stats;
 }
 
@@ -1128,4 +1145,12 @@ void batch_decode_queue_print_stats(const BatchDecodeQueue *queue) {
           stats.batch_calls, stats.chunks_processed, stats.io_threads_used,
           stats.peak_queue_depth, stats.total_io_time_ms,
           stats.total_decode_time_ms);
+
+  // Print worker wait statistics if any waits occurred
+  if (stats.worker_wait_count > 0) {
+    double avg_wait = stats.worker_wait_time_ms / (double)stats.worker_wait_count;
+    fprintf(stderr,
+            "  Worker waits: %zu (total %.1f ms, avg %.2f ms)\n",
+            stats.worker_wait_count, stats.worker_wait_time_ms, avg_wait);
+  }
 }

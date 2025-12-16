@@ -138,6 +138,10 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
 #ifdef UNPAPER_WITH_CUDA
           // Check if image was decoded directly to GPU
           if (decoded->on_gpu && decoded->gpu_ptr != NULL) {
+            // Wait for async decode to complete before accessing GPU data.
+            // This enables parallel decode across multiple producer threads.
+            decoded_image_wait_gpu_complete(decoded);
+
             // Create Image from GPU memory (ownership transfers to Image)
             // NOTE: owns_memory=true because per-image decode uses
             // cudaMallocAsync which allocates individual buffers.
