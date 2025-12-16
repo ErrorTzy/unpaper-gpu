@@ -6,6 +6,7 @@
 
 #include <cuda_runtime.h>
 #include <dlfcn.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -54,7 +55,10 @@ typedef struct UnpaperCudaStream {
 } UnpaperCudaStream;
 
 static UnpaperCudaStream default_stream = {0};
-static UnpaperCudaStream *current_stream = NULL;
+// Thread-local current stream pointer to avoid race conditions when multiple
+// workers set their CUDA streams concurrently. Each worker thread has its own
+// copy of this pointer.
+static _Thread_local UnpaperCudaStream *current_stream = NULL;
 static void *scratch_dptr = NULL;
 static size_t scratch_capacity = 0;
 
@@ -193,14 +197,69 @@ void unpaper_cuda_free(uint64_t dptr) {
   (void)cudaFree((void *)(uintptr_t)dptr);
 }
 
+// Forward declaration for stream_handle (defined later)
+static cudaStream_t stream_handle(UnpaperCudaStream *stream);
+
+static _Atomic int async_alloc_count = 0;
+static _Atomic int sync_fallback_count = 0;
+
+uint64_t unpaper_cuda_malloc_async(UnpaperCudaStream *stream, size_t bytes) {
+  UnpaperCudaInitStatus st = unpaper_cuda_try_init();
+  if (st != UNPAPER_CUDA_INIT_OK) {
+    errOutput("%s", unpaper_cuda_init_status_string(st));
+  }
+
+  cudaStream_t s = stream_handle(stream);
+  void *dptr = NULL;
+  cudaError_t err = cudaMallocAsync(&dptr, bytes, s);
+  if (err != cudaSuccess) {
+    // Fallback to synchronous allocation
+    atomic_fetch_add(&sync_fallback_count, 1);
+    err = cudaMalloc(&dptr, bytes);
+    if (err != cudaSuccess) {
+      errOutput("CUDA async allocation failed: %s", cudaGetErrorString(err));
+    }
+  } else {
+    atomic_fetch_add(&async_alloc_count, 1);
+  }
+  return (uint64_t)(uintptr_t)dptr;
+}
+
+void unpaper_cuda_malloc_async_stats(int *async_count, int *sync_count) {
+  if (async_count) *async_count = atomic_load(&async_alloc_count);
+  if (sync_count) *sync_count = atomic_load(&sync_fallback_count);
+}
+
+void unpaper_cuda_print_async_stats(void) {
+  int async_count = atomic_load(&async_alloc_count);
+  int sync_count = atomic_load(&sync_fallback_count);
+  fprintf(stderr, "CUDA async allocation stats: async=%d, sync_fallback=%d\n",
+          async_count, sync_count);
+}
+
+void unpaper_cuda_free_async(UnpaperCudaStream *stream, uint64_t dptr) {
+  if (dptr == 0) {
+    return;
+  }
+  if (!cuda_initialized) {
+    return;
+  }
+  cudaStream_t s = stream_handle(stream);
+  cudaError_t err = cudaFreeAsync((void *)(uintptr_t)dptr, s);
+  if (err != cudaSuccess) {
+    // Fallback to synchronous free
+    (void)cudaFree((void *)(uintptr_t)dptr);
+  }
+}
+
 void unpaper_cuda_memcpy_h2d(uint64_t dst, const void *src, size_t bytes) {
   UnpaperCudaInitStatus st = unpaper_cuda_try_init();
   if (st != UNPAPER_CUDA_INIT_OK) {
     errOutput("%s", unpaper_cuda_init_status_string(st));
   }
 
-  cudaError_t err = cudaMemcpy((void *)(uintptr_t)dst, src, bytes,
-                               cudaMemcpyHostToDevice);
+  cudaError_t err =
+      cudaMemcpy((void *)(uintptr_t)dst, src, bytes, cudaMemcpyHostToDevice);
   if (err != cudaSuccess) {
     errOutput("CUDA memcpy HtoD failed: %s", cudaGetErrorString(err));
   }
@@ -299,6 +358,20 @@ void unpaper_cuda_memset_d8(uint64_t dst, uint8_t value, size_t bytes) {
   cudaError_t err = cudaMemset((void *)(uintptr_t)dst, (int)value, bytes);
   if (err != cudaSuccess) {
     errOutput("CUDA memset failed: %s", cudaGetErrorString(err));
+  }
+}
+
+void unpaper_cuda_memset_async(UnpaperCudaStream *stream, uint64_t dst,
+                               uint8_t value, size_t bytes) {
+  UnpaperCudaInitStatus st = unpaper_cuda_try_init();
+  if (st != UNPAPER_CUDA_INIT_OK) {
+    errOutput("%s", unpaper_cuda_init_status_string(st));
+  }
+
+  cudaStream_t s = stream_handle(stream);
+  cudaError_t err = cudaMemsetAsync((void *)(uintptr_t)dst, (int)value, bytes, s);
+  if (err != cudaSuccess) {
+    errOutput("CUDA async memset failed: %s", cudaGetErrorString(err));
   }
 }
 
@@ -543,10 +616,9 @@ void unpaper_cuda_launch_kernel(void *func, uint32_t grid_x, uint32_t grid_y,
   }
 
   cudaStream_t s = stream_handle(NULL);
-  CUresult res =
-      driver_syms.cuLaunchKernel((CUfunction)func, grid_x, grid_y, grid_z,
-                                 block_x, block_y, block_z, 0, s,
-                                 kernel_params, NULL);
+  CUresult res = driver_syms.cuLaunchKernel((CUfunction)func, grid_x, grid_y,
+                                            grid_z, block_x, block_y, block_z,
+                                            0, s, kernel_params, NULL);
   if (res != CUDA_SUCCESS) {
     errOutput("CUDA kernel launch failed: %s", cu_err(res));
   }
@@ -555,11 +627,10 @@ void unpaper_cuda_launch_kernel(void *func, uint32_t grid_x, uint32_t grid_y,
   // implicitly wait for kernels to complete. This allows kernel pipelining.
 }
 
-void unpaper_cuda_launch_kernel_on_stream(UnpaperCudaStream *stream,
-                                          void *func, uint32_t grid_x,
-                                          uint32_t grid_y, uint32_t grid_z,
-                                          uint32_t block_x, uint32_t block_y,
-                                          uint32_t block_z,
+void unpaper_cuda_launch_kernel_on_stream(UnpaperCudaStream *stream, void *func,
+                                          uint32_t grid_x, uint32_t grid_y,
+                                          uint32_t grid_z, uint32_t block_x,
+                                          uint32_t block_y, uint32_t block_z,
                                           void **kernel_params) {
   UnpaperCudaInitStatus st = unpaper_cuda_try_init();
   if (st != UNPAPER_CUDA_INIT_OK) {
