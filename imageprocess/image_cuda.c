@@ -457,3 +457,39 @@ void image_set_gpu_resident(Image *image, bool resident) {
   (void)resident;
 #endif
 }
+
+void *image_get_gpu_ptr(Image *image) {
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+  if (image == NULL || image->frame == NULL) {
+    return NULL;
+  }
+
+  ImageCudaState *st = image_cuda_state_get(image, false);
+  if (st == NULL || st->dptr == 0) {
+    return NULL;
+  }
+
+  return (void *)(uintptr_t)st->dptr;
+#else
+  (void)image;
+  return NULL;
+#endif
+}
+
+size_t image_get_gpu_pitch(Image *image) {
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+  if (image == NULL || image->frame == NULL) {
+    return 0;
+  }
+
+  ImageCudaState *st = image_cuda_state_get(image, false);
+  if (st == NULL || st->dptr == 0) {
+    return 0;
+  }
+
+  return (size_t)st->linesize;
+#else
+  (void)image;
+  return 0;
+#endif
+}

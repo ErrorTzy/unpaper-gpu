@@ -44,6 +44,10 @@ typedef struct {
   DecodeMode decode_mode; // Decode mode: auto, batched, or per-image
   int decode_chunk_size;  // Batch decode chunk size (0 = default)
 
+  // GPU pipeline options (PR38)
+  bool gpu_pipeline;      // Enable full GPU pipeline (JPEG-to-JPEG zero-copy)
+  int jpeg_quality;       // JPEG output quality (1-100, 0 = default 85)
+
   Layout layout;
   int start_sheet;
   int end_sheet;

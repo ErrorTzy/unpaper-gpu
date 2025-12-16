@@ -30,6 +30,7 @@
 #include "imageprocess/interpolate.h"
 #include "imageprocess/masks.h"
 #include "imageprocess/nvjpeg_decode.h"
+#include "imageprocess/nvjpeg_encode.h"
 #include "imageprocess/opencv_bridge.h"
 #include "imageprocess/pixel.h"
 #include "lib/batch.h"
@@ -64,6 +65,8 @@
           "         --cuda-streams=N (CUDA streams, 0=auto, default: 0)\n"     \
           "         --decode-mode=auto|batched|per-image (default: auto)\n"    \
           "         --decode-chunk-size=N (batch decode chunk, 0=default)\n"   \
+          "         --gpu-pipeline (JPEG-to-JPEG zero-copy GPU path)\n"        \
+          "         --jpeg-quality=N (JPEG output quality, 1-100)\n"           \
           "         --progress (show batch progress)\n"                        \
           "\n"                                                                 \
           "Filenames may contain a formatting placeholder starting with '%%' " \
@@ -171,6 +174,8 @@ enum LONG_OPTION_VALUES {
   OPT_CUDA_STREAMS,
   OPT_DECODE_MODE,
   OPT_DECODE_CHUNK_SIZE,
+  OPT_GPU_PIPELINE,
+  OPT_JPEG_QUALITY,
 };
 
 /****************************************************************************
@@ -432,6 +437,8 @@ int main(int argc, char *argv[]) {
           {"cuda-streams", required_argument, NULL, OPT_CUDA_STREAMS},
           {"decode-mode", required_argument, NULL, OPT_DECODE_MODE},
           {"decode-chunk-size", required_argument, NULL, OPT_DECODE_CHUNK_SIZE},
+          {"gpu-pipeline", no_argument, NULL, OPT_GPU_PIPELINE},
+          {"jpeg-quality", required_argument, NULL, OPT_JPEG_QUALITY},
           {NULL, no_argument, NULL, 0}};
 
       c = getopt_long_only(argc, argv, "hVl:S:x::n::M:s:z:p:m:W:B:w:b:Tt:qv",
@@ -1040,6 +1047,18 @@ int main(int argc, char *argv[]) {
                     optarg);
         }
         break;
+
+      case OPT_GPU_PIPELINE:
+        options.gpu_pipeline = true;
+        break;
+
+      case OPT_JPEG_QUALITY:
+        if (sscanf(optarg, "%d", &options.jpeg_quality) != 1 ||
+            options.jpeg_quality < 1 || options.jpeg_quality > 100) {
+          errOutput("invalid value for --jpeg-quality: '%s' (valid: 1-100)",
+                    optarg);
+        }
+        break;
       }
     }
 
@@ -1131,6 +1150,22 @@ int main(int argc, char *argv[]) {
     fprintf(stderr,
             "WARNING: --decode-chunk-size has no effect with CPU backend\n");
     options.decode_chunk_size = 0;
+  }
+
+  // Validate GPU pipeline for CUDA backend
+  if (options.gpu_pipeline) {
+    if (options.device != UNPAPER_DEVICE_CUDA) {
+      fprintf(stderr,
+              "WARNING: --gpu-pipeline requires CUDA backend, enabling CUDA\n");
+      options.device = UNPAPER_DEVICE_CUDA;
+    }
+    // GPU pipeline implies batch mode for best performance
+    if (!options.batch_mode) {
+      verboseLog(VERBOSE_NORMAL,
+                 "GPU pipeline enabled, using batch mode for best "
+                 "performance\n");
+      options.batch_mode = true;
+    }
   }
 
   image_backend_select(options.device);
@@ -1629,6 +1664,26 @@ int main(int argc, char *argv[]) {
         verboseLog(VERBOSE_NORMAL,
                    "Encode queue: %zu slots, %d encoder threads\n",
                    encode_queue_depth, num_encoder_threads);
+
+#ifdef UNPAPER_WITH_CUDA
+        // Initialize nvJPEG encode for GPU pipeline
+        if (options.gpu_pipeline && options.device == UNPAPER_DEVICE_CUDA) {
+          // Use same number of encoder states as CUDA streams for parallelism
+          int num_encoders = num_encoder_threads > 4 ? num_encoder_threads : 4;
+          int jpeg_quality = options.jpeg_quality > 0 ? options.jpeg_quality : 85;
+          if (nvjpeg_encode_init(num_encoders, jpeg_quality,
+                                 NVJPEG_ENC_SUBSAMPLING_420)) {
+            encode_queue_enable_gpu(encode_queue, true, jpeg_quality);
+            verboseLog(VERBOSE_NORMAL,
+                       "nvJPEG GPU encode: enabled (%d states, quality %d)\n",
+                       num_encoders, jpeg_quality);
+          } else {
+            verboseLog(VERBOSE_NORMAL,
+                       "nvJPEG GPU encode: unavailable, using CPU encode\n");
+          }
+        }
+#endif
+
         if (!encode_queue_start(encode_queue)) {
           verboseLog(VERBOSE_NORMAL, "Failed to start encoder threads, falling "
                                      "back to inline encode\n");
@@ -1728,6 +1783,16 @@ int main(int argc, char *argv[]) {
         }
         encode_queue_destroy(encode_queue);
       }
+
+#ifdef UNPAPER_WITH_CUDA
+      // Cleanup nvJPEG encode (must be after encode queue is done)
+      if (nvjpeg_encode_is_available()) {
+        if (options.perf) {
+          nvjpeg_encode_print_stats();
+        }
+        nvjpeg_encode_cleanup();
+      }
+#endif
 
 #ifdef UNPAPER_WITH_CUDA
       // Print GPU pool statistics and cleanup

@@ -51,3 +51,9 @@ bool image_is_gpu_resident(Image *image);
 // Set the GPU-resident status of an image
 // When true, image_ensure_cuda() will skip upload (GPU already has valid data)
 void image_set_gpu_resident(Image *image, bool resident);
+
+// Get GPU device pointer for GPU-resident image (returns NULL if not GPU-resident)
+void *image_get_gpu_ptr(Image *image);
+
+// Get GPU pitch (row stride) for GPU-resident image (returns 0 if not GPU-resident)
+size_t image_get_gpu_pitch(Image *image);
