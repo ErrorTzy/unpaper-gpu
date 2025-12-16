@@ -19,19 +19,20 @@
 
 #include <libavutil/avutil.h>
 
-#include "imageprocess/blit.h"
 #include "imageprocess/backend.h"
+#include "imageprocess/blit.h"
 #include "imageprocess/cuda_mempool.h"
 #include "imageprocess/cuda_stream_pool.h"
-#include "imageprocess/nvjpeg_decode.h"
 #include "imageprocess/deskew.h"
 #include "imageprocess/filters.h"
 #include "imageprocess/image.h"
 #include "imageprocess/interpolate.h"
 #include "imageprocess/masks.h"
+#include "imageprocess/nvjpeg_decode.h"
 #include "imageprocess/opencv_bridge.h"
 #include "imageprocess/pixel.h"
 #include "lib/batch.h"
+#include "lib/batch_decode_queue.h"
 #include "lib/batch_worker.h"
 #include "lib/decode_queue.h"
 #include "lib/encode_queue.h"
@@ -1234,7 +1235,8 @@ int main(int argc, char *argv[]) {
         // Check available GPU memory before starting batch
         GpuMemoryInfo mem_info = {0};
         if (gpu_monitor_get_memory_info(&mem_info)) {
-          verboseLog(VERBOSE_NORMAL, "GPU memory: %.1f MB free of %.1f MB total\n",
+          verboseLog(VERBOSE_NORMAL,
+                     "GPU memory: %.1f MB free of %.1f MB total\n",
                      (double)mem_info.free_bytes / (1024.0 * 1024.0),
                      (double)mem_info.total_bytes / (1024.0 * 1024.0));
 
@@ -1242,29 +1244,36 @@ int main(int argc, char *argv[]) {
           // Scale: For every 3GB of VRAM, multiply parallelism tier
           // This allows high-end GPUs (RTX 5090 24GB) to use more resources
           size_t vram_gb = mem_info.total_bytes / (1024 * 1024 * 1024);
-          size_t tier = vram_gb / 3;  // 1 tier per 3GB
-          if (tier < 1) tier = 1;
-          if (tier > 8) tier = 8;  // Cap at 8x scaling
+          size_t tier = vram_gb / 3; // 1 tier per 3GB
+          if (tier < 1)
+            tier = 1;
+          if (tier > 8)
+            tier = 8; // Cap at 8x scaling
 
           // Scale streams: 4 per tier (4, 8, 12, 16, 20, 24, 28, 32)
           auto_stream_count = 4 * tier;
-          if (auto_stream_count > 32) auto_stream_count = 32;
+          if (auto_stream_count > 32)
+            auto_stream_count = 32;
 
-          // Scale buffers: 3x streams for triple-buffering (decode+process+encode)
-          // 2x was insufficient - peak usage exceeded pool size causing cudaMalloc fallback
+          // Scale buffers: 3x streams for triple-buffering
+          // (decode+process+encode) 2x was insufficient - peak usage exceeded
+          // pool size causing cudaMalloc fallback
           auto_buffer_count = auto_stream_count * 3;
-          if (auto_buffer_count > 96) auto_buffer_count = 96;
+          if (auto_buffer_count > 96)
+            auto_buffer_count = 96;
 
           verboseLog(VERBOSE_NORMAL,
-                     "GPU auto-tune: %zu GB VRAM -> tier %zu -> %zu streams, %zu buffers\n",
+                     "GPU auto-tune: %zu GB VRAM -> tier %zu -> %zu streams, "
+                     "%zu buffers\n",
                      vram_gb, tier, auto_stream_count, auto_buffer_count);
         }
 
         // Override auto-tuned stream count if --cuda-streams specified
         if (options.cuda_streams > 0) {
           auto_stream_count = (size_t)options.cuda_streams;
-          auto_buffer_count = auto_stream_count * 3;  // 3x for triple-buffering
-          if (auto_buffer_count > 96) auto_buffer_count = 96;
+          auto_buffer_count = auto_stream_count * 3; // 3x for triple-buffering
+          if (auto_buffer_count > 96)
+            auto_buffer_count = 96;
           verboseLog(VERBOSE_NORMAL,
                      "GPU manual override: %zu streams, %zu buffers\n",
                      auto_stream_count, auto_buffer_count);
@@ -1275,39 +1284,46 @@ int main(int argc, char *argv[]) {
         const size_t total_pool_size = auto_buffer_count * buffer_size;
 
         // Warn if GPU memory seems low for the batch
-        if (mem_info.free_bytes > 0 && mem_info.free_bytes < total_pool_size * 2) {
-          fprintf(stderr, "WARNING: Low GPU memory available (%.1f MB free).\n"
-                          "         Pool requires %.1f MB. Batch processing may fail.\n"
-                          "         Consider reducing --jobs or using smaller images.\n",
-                  (double)mem_info.free_bytes / (1024.0 * 1024.0),
-                  (double)total_pool_size / (1024.0 * 1024.0));
+        if (mem_info.free_bytes > 0 &&
+            mem_info.free_bytes < total_pool_size * 2) {
+          fprintf(
+              stderr,
+              "WARNING: Low GPU memory available (%.1f MB free).\n"
+              "         Pool requires %.1f MB. Batch processing may fail.\n"
+              "         Consider reducing --jobs or using smaller images.\n",
+              (double)mem_info.free_bytes / (1024.0 * 1024.0),
+              (double)total_pool_size / (1024.0 * 1024.0));
         }
 
         if (cuda_mempool_global_init(auto_buffer_count, buffer_size)) {
           mempool_active = true;
-          verboseLog(VERBOSE_NORMAL,
-                     "GPU memory pool: %zu buffers x %zu bytes (%.1f MB total)\n",
-                     auto_buffer_count, buffer_size,
-                     (double)total_pool_size / (1024.0 * 1024.0));
+          verboseLog(
+              VERBOSE_NORMAL,
+              "GPU memory pool: %zu buffers x %zu bytes (%.1f MB total)\n",
+              auto_buffer_count, buffer_size,
+              (double)total_pool_size / (1024.0 * 1024.0));
         } else {
-          verboseLog(VERBOSE_NORMAL,
-                     "GPU memory pool initialization failed, using direct allocation\n");
+          verboseLog(VERBOSE_NORMAL, "GPU memory pool initialization failed, "
+                                     "using direct allocation\n");
         }
 
         // Integral buffer pool for GPU integral image computation
-        // Integral buffers are int32, ~36MB for A1 images (2500x3500x4 aligned to 512)
-        // Pool same count as image buffers for matching throughput
+        // Integral buffers are int32, ~36MB for A1 images (2500x3500x4 aligned
+        // to 512) Pool same count as image buffers for matching throughput
         const size_t integral_buffer_size = 36 * 1024 * 1024;
-        const size_t total_integral_pool_size = auto_buffer_count * integral_buffer_size;
-        if (cuda_mempool_integral_global_init(auto_buffer_count, integral_buffer_size)) {
+        const size_t total_integral_pool_size =
+            auto_buffer_count * integral_buffer_size;
+        if (cuda_mempool_integral_global_init(auto_buffer_count,
+                                              integral_buffer_size)) {
           integralpool_active = true;
-          verboseLog(VERBOSE_NORMAL,
-                     "GPU integral pool: %zu buffers x %zu bytes (%.1f MB total)\n",
-                     auto_buffer_count, integral_buffer_size,
-                     (double)total_integral_pool_size / (1024.0 * 1024.0));
+          verboseLog(
+              VERBOSE_NORMAL,
+              "GPU integral pool: %zu buffers x %zu bytes (%.1f MB total)\n",
+              auto_buffer_count, integral_buffer_size,
+              (double)total_integral_pool_size / (1024.0 * 1024.0));
         } else {
-          verboseLog(VERBOSE_NORMAL,
-                     "GPU integral pool initialization failed, using direct allocation\n");
+          verboseLog(VERBOSE_NORMAL, "GPU integral pool initialization failed, "
+                                     "using direct allocation\n");
         }
 
         // Scratch buffer pool for temporary GPU allocations
@@ -1317,15 +1333,18 @@ int main(int argc, char *argv[]) {
         // (e.g., grayfilter needs 2 integrals + mask buffer concurrently)
         const size_t scratch_buffer_size = 80 * 1024 * 1024;
         const size_t scratch_buffer_count = auto_stream_count * 2;
-        const size_t total_scratch_pool_size = scratch_buffer_count * scratch_buffer_size;
-        if (cuda_mempool_scratch_global_init(scratch_buffer_count, scratch_buffer_size)) {
-          verboseLog(VERBOSE_NORMAL,
-                     "GPU scratch pool: %zu buffers x %zu bytes (%.1f MB total)\n",
-                     scratch_buffer_count, scratch_buffer_size,
-                     (double)total_scratch_pool_size / (1024.0 * 1024.0));
+        const size_t total_scratch_pool_size =
+            scratch_buffer_count * scratch_buffer_size;
+        if (cuda_mempool_scratch_global_init(scratch_buffer_count,
+                                             scratch_buffer_size)) {
+          verboseLog(
+              VERBOSE_NORMAL,
+              "GPU scratch pool: %zu buffers x %zu bytes (%.1f MB total)\n",
+              scratch_buffer_count, scratch_buffer_size,
+              (double)total_scratch_pool_size / (1024.0 * 1024.0));
         } else {
-          verboseLog(VERBOSE_NORMAL,
-                     "GPU scratch pool initialization failed, using direct allocation\n");
+          verboseLog(VERBOSE_NORMAL, "GPU scratch pool initialization failed, "
+                                     "using direct allocation\n");
         }
 
         // Initialize stream pool for concurrent GPU operations
@@ -1334,11 +1353,13 @@ int main(int argc, char *argv[]) {
           verboseLog(VERBOSE_NORMAL, "GPU stream pool: %zu streams\n",
                      auto_stream_count);
         } else {
-          verboseLog(VERBOSE_NORMAL,
-                     "GPU stream pool initialization failed, using default stream\n");
+          verboseLog(
+              VERBOSE_NORMAL,
+              "GPU stream pool initialization failed, using default stream\n");
         }
 
-        // Initialize GPU monitor for concurrent job tracking and occupancy stats
+        // Initialize GPU monitor for concurrent job tracking and occupancy
+        // stats
         if (gpu_monitor_global_init()) {
           verboseLog(VERBOSE_NORMAL, "GPU occupancy monitoring enabled\n");
           gpu_monitor_global_batch_start();
@@ -1348,67 +1369,143 @@ int main(int argc, char *argv[]) {
 
       // Set up sheet processing configuration
       SheetProcessConfig config;
-      sheet_process_config_init(&config, &options, preMasks, preMaskCount, points,
-                                pointCount, middleWipe, blackfilterExclude, 0);
+      sheet_process_config_init(&config, &options, preMasks, preMaskCount,
+                                points, pointCount, middleWipe,
+                                blackfilterExclude, 0);
 
       // Create decode queue for pre-decoded image pipeline
       // Queue depth scales with parallelism and GPU buffer count
       size_t decode_queue_depth = (size_t)batch_queue.parallelism * 2;
       bool use_pinned_memory = false;
-      int num_decode_threads = 1;  // Single-threaded by default
+      int num_io_threads = 4; // Default I/O threads for batch decode
+
+      // Declare both queue types - only one will be used
+      DecodeQueue *decode_queue = NULL;
+      BatchDecodeQueue *batch_decode_queue = NULL;
+      bool use_batch_decode = false; // True if using new batched decode (PR36B)
+
 #ifdef UNPAPER_WITH_CUDA
       use_pinned_memory = (options.device == UNPAPER_DEVICE_CUDA);
-      // For CUDA with auto-tuned buffers, ensure decode queue can keep GPU fed
-      if (use_pinned_memory && auto_buffer_count > decode_queue_depth) {
-        decode_queue_depth = auto_buffer_count;
-      }
-      // Scale decode threads with CUDA stream count to keep GPU fed
-      // High-end GPUs need parallel decode to prevent starvation
-      // Also consider available CPU cores for multi-core systems
-      if (options.device == UNPAPER_DEVICE_CUDA && auto_stream_count > 4) {
+
+      // For CUDA mode, use the new batch decode queue (PR36B)
+      // This provides ~3x better scaling via nvjpegDecodeBatched
+      if (options.device == UNPAPER_DEVICE_CUDA) {
+        // For CUDA with auto-tuned buffers, ensure decode queue can keep GPU
+        // fed
+        if (auto_buffer_count > decode_queue_depth) {
+          decode_queue_depth = auto_buffer_count;
+        }
+
+        // Scale I/O threads with CUDA stream count to saturate I/O bandwidth
         // Get CPU core count for scaling
         long cpu_cores = sysconf(_SC_NPROCESSORS_ONLN);
-        if (cpu_cores < 1) cpu_cores = 8;
+        if (cpu_cores < 1)
+          cpu_cores = 8;
 
-        // Scale decode threads aggressively to saturate I/O
-        // Use 1 decode thread per stream to avoid worker starvation
-        int stream_based = (int)auto_stream_count;  // 1:1 with streams
-        int cpu_max = (int)(cpu_cores * 3 / 4);  // Use up to 3/4 of CPU cores for decode
-        num_decode_threads = (stream_based < cpu_max) ? stream_based : cpu_max;
+        // Use enough I/O threads to keep disk bandwidth saturated
+        // More threads = better overlap between I/O and GPU decode
+        int stream_based = (int)auto_stream_count;
+        int cpu_max = (int)(cpu_cores * 3 / 4);
+        num_io_threads = (stream_based < cpu_max) ? stream_based : cpu_max;
+        if (num_io_threads < 4)
+          num_io_threads = 4;
+        if (num_io_threads > 16)
+          num_io_threads = 16;
 
-        if (num_decode_threads < 2) num_decode_threads = 2;
-        if (num_decode_threads > 20) num_decode_threads = 20;
-      }
-#endif
-      DecodeQueue *decode_queue = (num_decode_threads > 1)
-          ? decode_queue_create_parallel(decode_queue_depth, use_pinned_memory, num_decode_threads)
-          : decode_queue_create(decode_queue_depth, use_pinned_memory);
-      if (decode_queue) {
-#ifdef UNPAPER_WITH_CUDA
-        // Enable GPU decode for JPEG files when using CUDA
-        if (options.device == UNPAPER_DEVICE_CUDA) {
-          // Initialize nvJPEG context with streams matching decode threads
-          int nvjpeg_streams = num_decode_threads > 1 ? num_decode_threads : 4;
-          if (nvjpeg_context_init(nvjpeg_streams)) {
-            decode_queue_enable_gpu_decode(decode_queue, true);
-            verboseLog(VERBOSE_NORMAL, "nvJPEG GPU decode: enabled (%d streams)\n", nvjpeg_streams);
-          } else {
-            verboseLog(VERBOSE_NORMAL, "nvJPEG GPU decode: unavailable, using CPU decode\n");
+        // Initialize nvJPEG context before creating batch decode queue
+        int nvjpeg_streams = num_io_threads > 1 ? num_io_threads : 4;
+        if (nvjpeg_context_init(nvjpeg_streams)) {
+          // Create batch decode queue with reasonable max dimensions
+          // 8000x12000 supports most document scanners at 600+ DPI
+          batch_decode_queue = batch_decode_queue_create(
+              decode_queue_depth, num_io_threads, 8000, 12000);
+          if (batch_decode_queue) {
+            batch_decode_queue_enable_gpu(batch_decode_queue, true);
+            if (batch_decode_queue_start(batch_decode_queue, &batch_queue,
+                                         &options)) {
+              use_batch_decode = true;
+              verboseLog(
+                  VERBOSE_NORMAL,
+                  "Batch decode queue (PR36B): %zu slots, %d I/O threads\n",
+                  decode_queue_depth, num_io_threads);
+              verboseLog(VERBOSE_NORMAL,
+                         "nvJPEG batched decode: enabled (%d streams)\n",
+                         nvjpeg_streams);
+            } else {
+              verboseLog(VERBOSE_NORMAL,
+                         "Failed to start batch decode queue, falling back\n");
+              batch_decode_queue_destroy(batch_decode_queue);
+              batch_decode_queue = NULL;
+            }
           }
         }
-#endif
-        verboseLog(VERBOSE_NORMAL, "Decode queue: %zu slots%s%s\n",
-                   decode_queue_depth,
-                   use_pinned_memory ? " (pinned memory)" : "",
-                   num_decode_threads > 1 ? ", parallel decode" : "");
-        if (num_decode_threads > 1) {
-          verboseLog(VERBOSE_NORMAL, "Decode threads: %d\n", num_decode_threads);
+
+        if (!use_batch_decode) {
+          verboseLog(VERBOSE_NORMAL,
+                     "Batch decode unavailable, using per-image decode\n");
         }
-        // Start producer thread
-        if (!decode_queue_start_producer(decode_queue, &batch_queue, &options)) {
-          verboseLog(VERBOSE_NORMAL, "Failed to start decode producer, falling back to inline decode\n");
-          decode_queue_destroy(decode_queue);
-          decode_queue = NULL;
+      }
+
+      // Fallback to legacy per-image decode queue if batch decode not available
+      if (!use_batch_decode) {
+        int num_decode_threads = 1;
+        // Scale decode threads with CUDA stream count to keep GPU fed
+        if (options.device == UNPAPER_DEVICE_CUDA && auto_stream_count >= 2) {
+          long cpu_cores = sysconf(_SC_NPROCESSORS_ONLN);
+          if (cpu_cores < 1)
+            cpu_cores = 8;
+          int stream_based = (int)auto_stream_count;
+          int cpu_max = (int)(cpu_cores * 3 / 4);
+          num_decode_threads =
+              (stream_based < cpu_max) ? stream_based : cpu_max;
+          if (num_decode_threads < 2)
+            num_decode_threads = 2;
+          if (num_decode_threads > 20)
+            num_decode_threads = 20;
+        }
+#else
+      {
+        int num_decode_threads = 1;
+#endif
+        decode_queue =
+            (num_decode_threads > 1)
+                ? decode_queue_create_parallel(
+                      decode_queue_depth, use_pinned_memory, num_decode_threads)
+                : decode_queue_create(decode_queue_depth, use_pinned_memory);
+        if (decode_queue) {
+#ifdef UNPAPER_WITH_CUDA
+          // Enable GPU decode for JPEG files when using CUDA
+          if (options.device == UNPAPER_DEVICE_CUDA) {
+            int nvjpeg_streams =
+                num_decode_threads > 1 ? num_decode_threads : 4;
+            if (nvjpeg_context_init(nvjpeg_streams)) {
+              decode_queue_enable_gpu_decode(decode_queue, true);
+              verboseLog(VERBOSE_NORMAL,
+                         "nvJPEG GPU decode: enabled (%d streams)\n",
+                         nvjpeg_streams);
+            } else {
+              verboseLog(VERBOSE_NORMAL,
+                         "nvJPEG GPU decode: unavailable, using CPU decode\n");
+            }
+          }
+#endif
+          verboseLog(VERBOSE_NORMAL, "Decode queue: %zu slots%s%s\n",
+                     decode_queue_depth,
+                     use_pinned_memory ? " (pinned memory)" : "",
+                     num_decode_threads > 1 ? ", parallel decode" : "");
+          if (num_decode_threads > 1) {
+            verboseLog(VERBOSE_NORMAL, "Decode threads: %d\n",
+                       num_decode_threads);
+          }
+          // Start producer thread
+          if (!decode_queue_start_producer(decode_queue, &batch_queue,
+                                           &options)) {
+            verboseLog(VERBOSE_NORMAL,
+                       "Failed to start decode producer, falling "
+                       "back to inline decode\n");
+            decode_queue_destroy(decode_queue);
+            decode_queue = NULL;
+          }
         }
       }
 
@@ -1416,36 +1513,47 @@ int main(int argc, char *argv[]) {
       // Queue depth scales with parallelism and GPU buffer count
       size_t encode_queue_depth = (size_t)batch_queue.parallelism * 2;
 #ifdef UNPAPER_WITH_CUDA
-      // For CUDA with auto-tuned buffers, ensure encode queue can handle throughput
-      if (options.device == UNPAPER_DEVICE_CUDA && auto_buffer_count > encode_queue_depth) {
+      // For CUDA with auto-tuned buffers, ensure encode queue can handle
+      // throughput
+      if (options.device == UNPAPER_DEVICE_CUDA &&
+          auto_buffer_count > encode_queue_depth) {
         encode_queue_depth = auto_buffer_count;
       }
 #endif
-      // Scale encoder threads with parallelism to avoid I/O bottleneck on fast GPUs
-      // Also consider available CPU cores for multi-core systems
+      // Scale encoder threads with parallelism to avoid I/O bottleneck on fast
+      // GPUs Also consider available CPU cores for multi-core systems
       int num_encoder_threads = 2;
 #ifdef UNPAPER_WITH_CUDA
-      if (options.device == UNPAPER_DEVICE_CUDA && batch_queue.parallelism >= 8) {
+      if (options.device == UNPAPER_DEVICE_CUDA &&
+          batch_queue.parallelism >= 8) {
         // Get CPU core count for scaling
         long cpu_cores = sysconf(_SC_NPROCESSORS_ONLN);
-        if (cpu_cores < 1) cpu_cores = 8;
+        if (cpu_cores < 1)
+          cpu_cores = 8;
 
         // Scale encoder threads aggressively to saturate I/O
         // Use 1 encoder per stream to avoid output bottleneck
-        int parallel_based = batch_queue.parallelism;  // 1:1 with workers
-        int cpu_max = (int)(cpu_cores * 3 / 4);  // Use up to 3/4 of CPU cores for encode
-        num_encoder_threads = (parallel_based < cpu_max) ? parallel_based : cpu_max;
+        int parallel_based = batch_queue.parallelism; // 1:1 with workers
+        int cpu_max =
+            (int)(cpu_cores * 3 / 4); // Use up to 3/4 of CPU cores for encode
+        num_encoder_threads =
+            (parallel_based < cpu_max) ? parallel_based : cpu_max;
 
-        if (num_encoder_threads < 2) num_encoder_threads = 2;
-        if (num_encoder_threads > 20) num_encoder_threads = 20;
+        if (num_encoder_threads < 2)
+          num_encoder_threads = 2;
+        if (num_encoder_threads > 20)
+          num_encoder_threads = 20;
       }
 #endif
-      EncodeQueue *encode_queue = encode_queue_create(encode_queue_depth, num_encoder_threads);
+      EncodeQueue *encode_queue =
+          encode_queue_create(encode_queue_depth, num_encoder_threads);
       if (encode_queue) {
-        verboseLog(VERBOSE_NORMAL, "Encode queue: %zu slots, %d encoder threads\n",
+        verboseLog(VERBOSE_NORMAL,
+                   "Encode queue: %zu slots, %d encoder threads\n",
                    encode_queue_depth, num_encoder_threads);
         if (!encode_queue_start(encode_queue)) {
-          verboseLog(VERBOSE_NORMAL, "Failed to start encoder threads, falling back to inline encode\n");
+          verboseLog(VERBOSE_NORMAL, "Failed to start encoder threads, falling "
+                                     "back to inline encode\n");
           encode_queue_destroy(encode_queue);
           encode_queue = NULL;
         }
@@ -1458,6 +1566,10 @@ int main(int argc, char *argv[]) {
           encode_queue_signal_done(encode_queue);
           encode_queue_wait(encode_queue);
           encode_queue_destroy(encode_queue);
+        }
+        if (batch_decode_queue) {
+          batch_decode_queue_stop(batch_decode_queue);
+          batch_decode_queue_destroy(batch_decode_queue);
         }
         if (decode_queue) {
           decode_queue_stop_producer(decode_queue);
@@ -1473,7 +1585,13 @@ int main(int argc, char *argv[]) {
       BatchWorkerContext worker_ctx;
       batch_worker_init(&worker_ctx, &options, &batch_queue);
       batch_worker_set_config(&worker_ctx, &config);
-      batch_worker_set_decode_queue(&worker_ctx, decode_queue);
+      // Use batch decode queue (PR36B) if available, otherwise legacy decode
+      // queue
+      if (batch_decode_queue) {
+        batch_worker_set_batch_decode_queue(&worker_ctx, batch_decode_queue);
+      } else {
+        batch_worker_set_decode_queue(&worker_ctx, decode_queue);
+      }
       batch_worker_set_encode_queue(&worker_ctx, encode_queue);
 #ifdef UNPAPER_WITH_CUDA
       // Enable stream pooling if the stream pool was initialized
@@ -1487,7 +1605,14 @@ int main(int argc, char *argv[]) {
       batch_worker_cleanup(&worker_ctx);
       threadpool_destroy(pool);
 
-      // Cleanup decode queue
+      // Cleanup decode queue (batch or legacy)
+      if (batch_decode_queue) {
+        batch_decode_queue_stop(batch_decode_queue);
+        if (options.perf) {
+          batch_decode_queue_print_stats(batch_decode_queue);
+        }
+        batch_decode_queue_destroy(batch_decode_queue);
+      }
       if (decode_queue) {
         decode_queue_stop_producer(decode_queue);
         if (options.perf) {
@@ -1499,6 +1624,19 @@ int main(int argc, char *argv[]) {
       // Cleanup nvJPEG context
       if (options.perf) {
         nvjpeg_print_stats();
+        // Print batched decode stats if available
+        NvJpegBatchStats batch_stats = nvjpeg_batched_get_stats();
+        if (batch_stats.total_batch_calls > 0) {
+          fprintf(stderr,
+                  "nvJPEG Batched Decode Statistics:\n"
+                  "  Batch API calls: %zu\n"
+                  "  Total images decoded: %zu\n"
+                  "  Failed decodes: %zu\n"
+                  "  Max batch size used: %zu\n",
+                  batch_stats.total_batch_calls,
+                  batch_stats.total_images_decoded, batch_stats.failed_decodes,
+                  batch_stats.max_batch_size_used);
+        }
       }
       nvjpeg_context_cleanup();
 #endif
@@ -1687,7 +1825,8 @@ int main(int argc, char *argv[]) {
       char s1[1023]; // buffers for result of implode()
 
       // Update batch progress
-      if (options.batch_mode && batch_job_index < batch_queue_count(&batch_queue)) {
+      if (options.batch_mode &&
+          batch_job_index < batch_queue_count(&batch_queue)) {
         batch_progress_update(&batch_queue, (int)batch_job_index,
                               BATCH_JOB_IN_PROGRESS);
       }
@@ -1729,7 +1868,8 @@ int main(int argc, char *argv[]) {
           if (options.device == UNPAPER_DEVICE_CUDA &&
               isInMultiIndex(nr, options.ignore_multi_index) &&
               options.input_count == 1 && options.output_count == 1 &&
-              options.sheet_size.width == -1 && options.sheet_size.height == -1 &&
+              options.sheet_size.width == -1 &&
+              options.sheet_size.height == -1 &&
               options.page_size.width == -1 && options.page_size.height == -1 &&
               options.post_page_size.width == -1 &&
               options.post_page_size.height == -1 &&
@@ -1739,14 +1879,15 @@ int main(int argc, char *argv[]) {
               options.post_stretch_size.height == -1 &&
               options.pre_rotate == 0 && options.post_rotate == 0 &&
               !options.pre_mirror.horizontal && !options.pre_mirror.vertical &&
-              !options.post_mirror.horizontal && !options.post_mirror.vertical &&
+              !options.post_mirror.horizontal &&
+              !options.post_mirror.vertical &&
               options.pre_shift.horizontal == 0 &&
               options.pre_shift.vertical == 0 &&
               options.post_shift.horizontal == 0 &&
               options.post_shift.vertical == 0 &&
-              options.pre_zoom_factor == 1.0 && options.post_zoom_factor == 1.0 &&
-              options.pre_wipes.count == 0 && options.wipes.count == 0 &&
-              options.post_wipes.count == 0 &&
+              options.pre_zoom_factor == 1.0 &&
+              options.post_zoom_factor == 1.0 && options.pre_wipes.count == 0 &&
+              options.wipes.count == 0 && options.post_wipes.count == 0 &&
               options.pre_border.left == 0 && options.pre_border.top == 0 &&
               options.pre_border.right == 0 && options.pre_border.bottom == 0 &&
               options.border.left == 0 && options.border.top == 0 &&
@@ -2563,13 +2704,13 @@ int main(int argc, char *argv[]) {
 
   sheet_end:
     if (options.perf) {
-      perf_recorder_print(&perf, nr,
-                          options.device == UNPAPER_DEVICE_CUDA ? "cuda"
-                                                                : "cpu");
+      perf_recorder_print(
+          &perf, nr, options.device == UNPAPER_DEVICE_CUDA ? "cuda" : "cpu");
     }
 
     // Update batch progress - mark as completed
-    if (options.batch_mode && batch_job_index < batch_queue_count(&batch_queue)) {
+    if (options.batch_mode &&
+        batch_job_index < batch_queue_count(&batch_queue)) {
       batch_progress_update(&batch_queue, (int)batch_job_index,
                             BATCH_JOB_COMPLETED);
       batch_job_index++;

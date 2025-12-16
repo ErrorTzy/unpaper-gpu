@@ -51,6 +51,7 @@ unpaper_sources = [
     'imageprocess/pixel.c',
     'imageprocess/primitives.c',
     'lib/batch.c',
+    'lib/batch_decode_queue.c',
     'lib/batch_worker.c',
     'lib/decode_queue.c',
     'lib/encode_queue.c',

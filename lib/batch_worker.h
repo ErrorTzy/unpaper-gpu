@@ -15,6 +15,7 @@
 struct ThreadPool;
 struct UnpaperCudaStream;
 struct DecodeQueue;
+struct BatchDecodeQueue;
 struct EncodeQueue;
 
 // Batch worker context - shared state for all workers
@@ -24,8 +25,10 @@ typedef struct {
   const SheetProcessConfig *config; // Sheet processing configuration
   pthread_mutex_t progress_mutex;   // Protects progress updates
   bool perf_enabled;                // Enable per-job performance output
-  bool use_stream_pool;             // Use CUDA stream pool for GPU batch processing
-  struct DecodeQueue *decode_queue; // Pre-decode queue for async decode (optional)
+  bool use_stream_pool; // Use CUDA stream pool for GPU batch processing
+  struct DecodeQueue
+      *decode_queue; // Pre-decode queue for async decode (optional)
+  struct BatchDecodeQueue *batch_decode_queue; // Batched decode queue (PR36B)
   struct EncodeQueue *encode_queue; // Encode queue for async encode (optional)
 } BatchWorkerContext;
 
@@ -52,6 +55,10 @@ void batch_worker_enable_stream_pool(BatchWorkerContext *ctx, bool enable);
 // Set decode queue for pre-decoded image pipeline
 void batch_worker_set_decode_queue(BatchWorkerContext *ctx,
                                    struct DecodeQueue *decode_queue);
+
+// Set batched decode queue for high-performance batch decode (PR36B)
+void batch_worker_set_batch_decode_queue(
+    BatchWorkerContext *ctx, struct BatchDecodeQueue *batch_decode_queue);
 
 // Set encode queue for async encoding pipeline
 void batch_worker_set_encode_queue(BatchWorkerContext *ctx,

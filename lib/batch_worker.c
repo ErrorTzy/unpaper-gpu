@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 
 #include "lib/batch_worker.h"
+#include "lib/batch_decode_queue.h"
 #include "lib/decode_queue.h"
 #include "lib/encode_queue.h"
 #include "lib/gpu_monitor.h"
@@ -29,6 +30,7 @@ void batch_worker_init(BatchWorkerContext *ctx, const Options *options,
   ctx->config = NULL;
   ctx->use_stream_pool = false;
   ctx->decode_queue = NULL;
+  ctx->batch_decode_queue = NULL;
   ctx->encode_queue = NULL;
   pthread_mutex_init(&ctx->progress_mutex, NULL);
 }
@@ -49,6 +51,11 @@ void batch_worker_enable_stream_pool(BatchWorkerContext *ctx, bool enable) {
 void batch_worker_set_decode_queue(BatchWorkerContext *ctx,
                                    DecodeQueue *decode_queue) {
   ctx->decode_queue = decode_queue;
+}
+
+void batch_worker_set_batch_decode_queue(BatchWorkerContext *ctx,
+                                         BatchDecodeQueue *batch_decode_queue) {
+  ctx->batch_decode_queue = batch_decode_queue;
 }
 
 void batch_worker_set_encode_queue(BatchWorkerContext *ctx,
@@ -72,16 +79,58 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
 
   // Set encode queue for async encoding if available
   if (ctx->encode_queue != NULL) {
-    sheet_process_state_set_encode_queue(&state, ctx->encode_queue, (int)job_index);
+    sheet_process_state_set_encode_queue(&state, ctx->encode_queue,
+                                         (int)job_index);
   }
 
   // Get pre-decoded images from queue if available
+  // Batch decode queue (PR36B) takes precedence over per-image decode queue
   DecodedImage *decoded_images[BATCH_MAX_FILES_PER_SHEET] = {NULL};
-  if (ctx->decode_queue != NULL) {
+  BatchDecodedImage *batch_decoded_images[BATCH_MAX_FILES_PER_SHEET] = {NULL};
+
+  if (ctx->batch_decode_queue != NULL) {
+    // Use new batch decode queue (PR36B) - optimized for GPU batch decode
     for (int i = 0; i < job->input_count; i++) {
       if (job->input_files[i] != NULL) {
-        DecodedImage *decoded = decode_queue_get(ctx->decode_queue,
-                                                 (int)job_index, i);
+        BatchDecodedImage *decoded =
+            batch_decode_queue_get(ctx->batch_decode_queue, (int)job_index, i);
+        if (decoded != NULL && decoded->valid) {
+          batch_decoded_images[i] = decoded;
+
+#ifdef UNPAPER_WITH_CUDA
+          // Check if image was decoded directly to GPU
+          if (decoded->on_gpu && decoded->gpu_ptr != NULL) {
+            // Create Image from GPU memory (ownership transfers to Image)
+            Image gpu_image = create_image_from_gpu(
+                decoded->gpu_ptr, decoded->gpu_pitch, decoded->gpu_width,
+                decoded->gpu_height, decoded->gpu_format,
+                ctx->options->sheet_background,
+                ctx->options->abs_black_threshold);
+
+            if (gpu_image.frame != NULL) {
+              // Transfer GPU pointer ownership
+              decoded->gpu_ptr = NULL;
+              decoded->on_gpu = false;
+              sheet_process_state_set_gpu_decoded_image(&state, gpu_image, i);
+            }
+          } else
+#endif
+              if (decoded->frame != NULL) {
+            // CPU-decoded frame - clone and transfer
+            AVFrame *frame_copy = av_frame_clone(decoded->frame);
+            if (frame_copy) {
+              sheet_process_state_set_decoded(&state, frame_copy, i);
+            }
+          }
+        }
+      }
+    }
+  } else if (ctx->decode_queue != NULL) {
+    // Use legacy per-image decode queue
+    for (int i = 0; i < job->input_count; i++) {
+      if (job->input_files[i] != NULL) {
+        DecodedImage *decoded =
+            decode_queue_get(ctx->decode_queue, (int)job_index, i);
         if (decoded != NULL && decoded->valid) {
           decoded_images[i] = decoded;
 
@@ -90,23 +139,21 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
           if (decoded->on_gpu && decoded->gpu_ptr != NULL) {
             // Create Image from GPU memory (ownership transfers to Image)
             Image gpu_image = create_image_from_gpu(
-                decoded->gpu_ptr,
-                decoded->gpu_pitch,
-                decoded->gpu_width,
-                decoded->gpu_height,
-                decoded->gpu_format,
+                decoded->gpu_ptr, decoded->gpu_pitch, decoded->gpu_width,
+                decoded->gpu_height, decoded->gpu_format,
                 ctx->options->sheet_background,
                 ctx->options->abs_black_threshold);
 
             if (gpu_image.frame != NULL) {
-              // Transfer GPU pointer ownership - don't free in decode_queue_release
+              // Transfer GPU pointer ownership - don't free in
+              // decode_queue_release
               decoded->gpu_ptr = NULL;
               decoded->on_gpu = false;
               sheet_process_state_set_gpu_decoded_image(&state, gpu_image, i);
             }
           } else
 #endif
-          if (decoded->frame != NULL) {
+              if (decoded->frame != NULL) {
             // CPU-decoded frame - clone and transfer
             AVFrame *frame_copy = av_frame_clone(decoded->frame);
             if (frame_copy) {
@@ -121,7 +168,14 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
   bool success = process_sheet(&state, ctx->config);
 
   // Release decoded images back to queue
-  if (ctx->decode_queue != NULL) {
+  if (ctx->batch_decode_queue != NULL) {
+    for (int i = 0; i < BATCH_MAX_FILES_PER_SHEET; i++) {
+      if (batch_decoded_images[i] != NULL) {
+        batch_decode_queue_release(ctx->batch_decode_queue,
+                                   batch_decoded_images[i]);
+      }
+    }
+  } else if (ctx->decode_queue != NULL) {
     for (int i = 0; i < BATCH_MAX_FILES_PER_SHEET; i++) {
       if (decoded_images[i] != NULL) {
         decode_queue_release(ctx->decode_queue, decoded_images[i]);
@@ -189,7 +243,8 @@ static void batch_worker_fn(void *arg, int thread_id) {
 
     // Stop GPU timing and get elapsed time
     if (ev_start != NULL && ev_stop != NULL) {
-      gpu_time_ms = unpaper_cuda_event_pair_stop_ms_on(stream, &ev_start, &ev_stop);
+      gpu_time_ms =
+          unpaper_cuda_event_pair_stop_ms_on(stream, &ev_start, &ev_stop);
     }
 
     // Record GPU job end with timing
