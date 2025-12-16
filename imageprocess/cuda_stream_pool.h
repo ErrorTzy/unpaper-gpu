@@ -41,11 +41,11 @@ void cuda_stream_pool_destroy(CudaStreamPool *pool);
 // Acquire a stream from the pool.
 // If all streams are in use, waits for one to become available.
 // Returns NULL on error (pool destroyed or CUDA error).
-// The returned stream is synchronized before being handed out.
 UnpaperCudaStream *cuda_stream_pool_acquire(CudaStreamPool *pool);
 
 // Release a stream back to the pool.
-// The stream is synchronized before being marked available.
+// NOTE: Does NOT synchronize the stream (for parallelism).
+// Caller must ensure any needed CPU-visible results are obtained before release.
 void cuda_stream_pool_release(CudaStreamPool *pool, UnpaperCudaStream *stream);
 
 // Get current pool statistics.

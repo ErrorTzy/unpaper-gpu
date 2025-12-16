@@ -82,7 +82,7 @@ void copy_rectangle_cpu(Image source, Image target, Rectangle source_area,
 void copy_rectangle(Image source, Image target, Rectangle source_area,
                     Point target_coords) {
   image_backend_get()->copy_rectangle(source, target, source_area,
-                                     target_coords);
+                                      target_coords);
 }
 
 /**

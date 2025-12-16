@@ -57,6 +57,7 @@ typedef struct {
 
 void batch_perf_init(BatchPerfRecorder *recorder, bool enabled);
 void batch_perf_start(BatchPerfRecorder *recorder);
-void batch_perf_end(BatchPerfRecorder *recorder, size_t completed, size_t failed);
-void batch_perf_print(const BatchPerfRecorder *recorder, const char *device_name);
-
+void batch_perf_end(BatchPerfRecorder *recorder, size_t completed,
+                    size_t failed);
+void batch_perf_print(const BatchPerfRecorder *recorder,
+                      const char *device_name);

@@ -212,7 +212,7 @@ size_t detect_masks(Image image, MaskDetectionParameters params,
                     const Point points[], size_t points_count,
                     Rectangle masks[]) {
   return image_backend_get()->detect_masks(image, params, points, points_count,
-                                          masks);
+                                           masks);
 }
 
 /**

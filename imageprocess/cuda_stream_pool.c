@@ -179,8 +179,10 @@ void cuda_stream_pool_release(CudaStreamPool *pool, UnpaperCudaStream *stream) {
   // Find the slot for this stream
   for (size_t i = 0; i < pool->stream_count; i++) {
     if (pool->slots[i].stream == stream) {
-      // Synchronize stream before releasing to ensure all work is complete
-      unpaper_cuda_stream_synchronize_on(stream);
+      // NOTE: We do NOT synchronize the stream here to allow parallelism.
+      // Stream-ordered operations (malloc_async, memcpy_async, etc.) will
+      // queue correctly after previous work. If a consumer needs results,
+      // they must sync themselves (e.g., D2H copy is implicit sync).
 
       // Mark slot as free
       atomic_store(&pool->slots[i].in_use, SLOT_FREE);

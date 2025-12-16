@@ -36,8 +36,7 @@ void perf_recorder_init(PerfRecorder *recorder, bool enabled, bool use_cuda) {
   recorder->enabled = enabled;
   recorder->use_cuda = use_cuda;
 #if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
-  recorder->cuda_events_available =
-      use_cuda && unpaper_cuda_events_supported();
+  recorder->cuda_events_available = use_cuda && unpaper_cuda_events_supported();
 #else
   (void)use_cuda;
   recorder->cuda_events_available = false;
@@ -83,7 +82,8 @@ void perf_stage_end(PerfRecorder *recorder, PerfStage stage) {
 
 #if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
   if (recorder->cuda_events_available && t->cuda_running) {
-    t->cuda_ms += unpaper_cuda_event_pair_stop_ms(&t->cuda_start, &t->cuda_stop);
+    t->cuda_ms +=
+        unpaper_cuda_event_pair_stop_ms(&t->cuda_start, &t->cuda_stop);
     t->cuda_running = false;
   }
 #endif
@@ -178,8 +178,9 @@ void batch_perf_print(const BatchPerfRecorder *recorder,
   double elapsed_sec = elapsed_ms / 1000.0;
   double images_per_sec =
       elapsed_sec > 0.0 ? (double)recorder->total_jobs / elapsed_sec : 0.0;
-  double ms_per_image =
-      recorder->total_jobs > 0 ? elapsed_ms / (double)recorder->total_jobs : 0.0;
+  double ms_per_image = recorder->total_jobs > 0
+                            ? elapsed_ms / (double)recorder->total_jobs
+                            : 0.0;
 
   printf("\n");
   printf("Batch Performance Summary [%s]:\n",
@@ -190,4 +191,3 @@ void batch_perf_print(const BatchPerfRecorder *recorder,
   printf("  Throughput:     %.2f images/sec\n", images_per_sec);
   printf("  Avg per image:  %.2f ms\n", ms_per_image);
 }
-

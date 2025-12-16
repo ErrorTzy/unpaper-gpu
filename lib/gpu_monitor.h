@@ -19,30 +19,30 @@ typedef struct GpuMonitor GpuMonitor;
 
 // GPU memory information
 typedef struct {
-  size_t free_bytes;   // Currently free GPU memory
-  size_t total_bytes;  // Total GPU memory
-  size_t used_bytes;   // Currently used GPU memory
+  size_t free_bytes;    // Currently free GPU memory
+  size_t total_bytes;   // Total GPU memory
+  size_t used_bytes;    // Currently used GPU memory
   double usage_percent; // Usage as percentage (0-100)
 } GpuMemoryInfo;
 
 // GPU occupancy statistics
 typedef struct {
   // Concurrent execution tracking
-  size_t total_gpu_jobs;        // Total GPU jobs processed
-  size_t peak_concurrent_jobs;  // Maximum concurrent GPU jobs observed
-  size_t concurrent_samples;    // Number of times concurrency was sampled
-  double avg_concurrent_jobs;   // Average concurrent GPU jobs
+  size_t total_gpu_jobs;       // Total GPU jobs processed
+  size_t peak_concurrent_jobs; // Maximum concurrent GPU jobs observed
+  size_t concurrent_samples;   // Number of times concurrency was sampled
+  double avg_concurrent_jobs;  // Average concurrent GPU jobs
 
   // Timing statistics
-  double total_gpu_time_ms;     // Total GPU processing time
-  double avg_gpu_time_ms;       // Average per-job GPU time
-  double min_gpu_time_ms;       // Minimum GPU job time
-  double max_gpu_time_ms;       // Maximum GPU job time
+  double total_gpu_time_ms; // Total GPU processing time
+  double avg_gpu_time_ms;   // Average per-job GPU time
+  double min_gpu_time_ms;   // Minimum GPU job time
+  double max_gpu_time_ms;   // Maximum GPU job time
 
   // Memory statistics
-  size_t peak_memory_used;      // Peak GPU memory usage observed
-  size_t initial_memory_free;   // Memory free at start of batch
-  size_t final_memory_free;     // Memory free at end of batch
+  size_t peak_memory_used;    // Peak GPU memory usage observed
+  size_t initial_memory_free; // Memory free at start of batch
+  size_t final_memory_free;   // Memory free at end of batch
 } GpuOccupancyStats;
 
 // Create GPU monitor for tracking batch GPU operations.

@@ -17,9 +17,9 @@ typedef struct UnpaperCudaStream UnpaperCudaStream;
 
 // nvJPEG decode output format
 typedef enum {
-  NVJPEG_FMT_GRAY8 = 0,    // Single-channel grayscale (8-bit)
-  NVJPEG_FMT_RGB = 1,      // Interleaved RGB (24-bit)
-  NVJPEG_FMT_BGR = 2,      // Interleaved BGR (24-bit)
+  NVJPEG_FMT_GRAY8 = 0, // Single-channel grayscale (8-bit)
+  NVJPEG_FMT_RGB = 1,   // Interleaved RGB (24-bit)
+  NVJPEG_FMT_BGR = 2,   // Interleaved BGR (24-bit)
 } NvJpegOutputFormat;
 
 // Per-stream state for nvJPEG decode operations.
@@ -33,22 +33,22 @@ typedef struct NvJpegStreamState NvJpegStreamState;
 
 // Decoded image information returned by nvjpeg_decode_to_gpu
 typedef struct {
-  void *gpu_ptr;           // GPU device pointer to decoded image
-  size_t pitch;            // Row pitch in bytes (may include padding)
-  int width;               // Image width in pixels
-  int height;              // Image height in pixels
-  int channels;            // Number of channels (1 for gray, 3 for RGB)
-  NvJpegOutputFormat fmt;  // Output format
+  void *gpu_ptr;          // GPU device pointer to decoded image
+  size_t pitch;           // Row pitch in bytes (may include padding)
+  int width;              // Image width in pixels
+  int height;             // Image height in pixels
+  int channels;           // Number of channels (1 for gray, 3 for RGB)
+  NvJpegOutputFormat fmt; // Output format
 } NvJpegDecodedImage;
 
 // Pool statistics for monitoring
 typedef struct {
-  size_t total_decodes;            // Number of decode calls
-  size_t successful_decodes;       // Successful decodes
-  size_t fallback_decodes;         // Fell back to CPU (FFmpeg)
-  size_t concurrent_peak;          // Peak concurrent decodes
-  size_t current_in_use;           // Currently active stream states
-  size_t stream_state_count;       // Total stream states in pool
+  size_t total_decodes;      // Number of decode calls
+  size_t successful_decodes; // Successful decodes
+  size_t fallback_decodes;   // Fell back to CPU (FFmpeg)
+  size_t concurrent_peak;    // Peak concurrent decodes
+  size_t current_in_use;     // Currently active stream states
+  size_t stream_state_count; // Total stream states in pool
 } NvJpegStats;
 
 // ============================================================================
@@ -126,8 +126,7 @@ bool nvjpeg_get_image_info(const uint8_t *jpeg_data, size_t jpeg_size,
 // - Each decode must use a different stream state for concurrent execution
 // - The CUDA stream parameter determines execution ordering
 bool nvjpeg_decode_to_gpu(const uint8_t *jpeg_data, size_t jpeg_size,
-                          NvJpegStreamState *state,
-                          UnpaperCudaStream *stream,
+                          NvJpegStreamState *state, UnpaperCudaStream *stream,
                           NvJpegOutputFormat output_fmt,
                           NvJpegDecodedImage *out);
 
@@ -141,8 +140,7 @@ bool nvjpeg_decode_to_gpu(const uint8_t *jpeg_data, size_t jpeg_size,
 // out: Output structure (gpu_ptr will be newly allocated)
 //
 // Returns true on success.
-bool nvjpeg_decode_file_to_gpu(const char *filename,
-                               UnpaperCudaStream *stream,
+bool nvjpeg_decode_file_to_gpu(const char *filename, UnpaperCudaStream *stream,
                                NvJpegOutputFormat output_fmt,
                                NvJpegDecodedImage *out);
 
@@ -180,15 +178,18 @@ bool nvjpeg_batched_init(int max_batch_size, int max_width, int max_height,
 //
 // jpeg_data: Array of pointers to JPEG data (host memory, ideally pinned)
 // jpeg_sizes: Array of JPEG data sizes in bytes
-// batch_size: Number of images to decode (must be <= initialized max_batch_size)
-// outputs: Pre-allocated array of NvJpegDecodedImage structs (size >= batch_size)
+// batch_size: Number of images to decode (must be <= initialized
+// max_batch_size) outputs: Pre-allocated array of NvJpegDecodedImage structs
+// (size >= batch_size)
 //
 // Returns number of successfully decoded images.
 // On success, outputs[i].gpu_ptr points to pre-allocated buffer pool memory.
-// Memory is valid until next nvjpeg_decode_batch() call or nvjpeg_batched_cleanup().
+// Memory is valid until next nvjpeg_decode_batch() call or
+// nvjpeg_batched_cleanup().
 //
-// IMPORTANT: All images are decoded to the format specified in nvjpeg_batched_init().
-// If an image fails to decode, its outputs[i].gpu_ptr will be NULL.
+// IMPORTANT: All images are decoded to the format specified in
+// nvjpeg_batched_init(). If an image fails to decode, its outputs[i].gpu_ptr
+// will be NULL.
 //
 // Thread-safety: NOT thread-safe. Must synchronize externally.
 int nvjpeg_decode_batch(const uint8_t *const *jpeg_data,
@@ -211,10 +212,10 @@ void nvjpeg_batched_cleanup(void);
 
 // Statistics for batched decode operations
 typedef struct {
-  size_t total_batch_calls;     // Number of nvjpeg_decode_batch() calls
-  size_t total_images_decoded;  // Total images decoded via batch API
-  size_t failed_decodes;        // Images that failed to decode
-  size_t max_batch_size_used;   // Largest batch size actually used
+  size_t total_batch_calls;    // Number of nvjpeg_decode_batch() calls
+  size_t total_images_decoded; // Total images decoded via batch API
+  size_t failed_decodes;       // Images that failed to decode
+  size_t max_batch_size_used;  // Largest batch size actually used
 } NvJpegBatchStats;
 
 // Get batched decode statistics.

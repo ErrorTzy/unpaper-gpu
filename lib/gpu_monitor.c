@@ -20,7 +20,7 @@
 
 struct GpuMonitor {
   // Active job tracking
-  atomic_size_t active_jobs;   // Currently running GPU jobs
+  atomic_size_t active_jobs; // Currently running GPU jobs
   pthread_mutex_t job_mutex;
 
   // Job ID generation
@@ -31,7 +31,7 @@ struct GpuMonitor {
   size_t total_jobs;
   size_t peak_concurrent;
   size_t concurrent_samples;
-  size_t concurrent_sum;  // Sum for average calculation
+  size_t concurrent_sum; // Sum for average calculation
 
   // Timing statistics
   double total_gpu_time_ms;
@@ -68,7 +68,8 @@ bool gpu_monitor_get_memory_info(GpuMemoryInfo *info) {
   info->total_bytes = total_bytes;
   info->used_bytes = total_bytes - free_bytes;
   if (total_bytes > 0) {
-    info->usage_percent = 100.0 * (double)info->used_bytes / (double)total_bytes;
+    info->usage_percent =
+        100.0 * (double)info->used_bytes / (double)total_bytes;
   }
 
   return true;
@@ -98,7 +99,7 @@ GpuMonitor *gpu_monitor_create(void) {
   monitor->concurrent_sum = 0;
 
   monitor->total_gpu_time_ms = 0.0;
-  monitor->min_gpu_time_ms = 1e9;  // Very large initial value
+  monitor->min_gpu_time_ms = 1e9; // Very large initial value
   monitor->max_gpu_time_ms = 0.0;
 
   monitor->peak_memory_used = 0;
@@ -148,7 +149,7 @@ void gpu_monitor_job_end(GpuMonitor *monitor, size_t job_id,
   if (monitor == NULL) {
     return;
   }
-  (void)job_id;  // Job ID for potential per-job tracking in future
+  (void)job_id; // Job ID for potential per-job tracking in future
 
   // Decrement active jobs
   atomic_fetch_sub(&monitor->active_jobs, 1);
@@ -232,9 +233,11 @@ GpuOccupancyStats gpu_monitor_get_stats(const GpuMonitor *monitor) {
 
   stats.total_gpu_time_ms = monitor->total_gpu_time_ms;
   if (monitor->total_jobs > 0) {
-    stats.avg_gpu_time_ms = monitor->total_gpu_time_ms / (double)monitor->total_jobs;
+    stats.avg_gpu_time_ms =
+        monitor->total_gpu_time_ms / (double)monitor->total_jobs;
   }
-  stats.min_gpu_time_ms = (monitor->total_jobs > 0) ? monitor->min_gpu_time_ms : 0.0;
+  stats.min_gpu_time_ms =
+      (monitor->total_jobs > 0) ? monitor->min_gpu_time_ms : 0.0;
   stats.max_gpu_time_ms = monitor->max_gpu_time_ms;
 
   stats.peak_memory_used = monitor->peak_memory_used;
@@ -272,8 +275,7 @@ void gpu_monitor_print_stats(const GpuMonitor *monitor) {
 
   // Memory statistics
   if (stats.peak_memory_used > 0) {
-    fprintf(stderr,
-            "  Peak GPU memory used: %.1f MB\n",
+    fprintf(stderr, "  Peak GPU memory used: %.1f MB\n",
             (double)stats.peak_memory_used / (1024.0 * 1024.0));
   }
   if (stats.initial_memory_free > 0) {

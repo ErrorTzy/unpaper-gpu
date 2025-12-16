@@ -213,7 +213,8 @@ void saveImage(char *filename, Image input, int outputPixFmt) {
     if (input.frame->format == AV_PIX_FMT_RGB24 &&
         outputPixFmt == AV_PIX_FMT_MONOWHITE) {
       for (int y = 0; y < height; y++) {
-        const uint8_t *src = input.frame->data[0] + y * input.frame->linesize[0];
+        const uint8_t *src =
+            input.frame->data[0] + y * input.frame->linesize[0];
         uint8_t *dst = output.frame->data[0] + y * output.frame->linesize[0];
         for (int x = 0; x < width; x++) {
           int gray = (src[x * 3] + src[x * 3 + 1] + src[x * 3 + 2]) / 3;
@@ -228,7 +229,8 @@ void saveImage(char *filename, Image input, int outputPixFmt) {
     } else if (input.frame->format == AV_PIX_FMT_GRAY8 &&
                outputPixFmt == AV_PIX_FMT_MONOWHITE) {
       for (int y = 0; y < height; y++) {
-        const uint8_t *src = input.frame->data[0] + y * input.frame->linesize[0];
+        const uint8_t *src =
+            input.frame->data[0] + y * input.frame->linesize[0];
         uint8_t *dst = output.frame->data[0] + y * output.frame->linesize[0];
         for (int x = 0; x < width; x++) {
           int bit_index = x % 8;

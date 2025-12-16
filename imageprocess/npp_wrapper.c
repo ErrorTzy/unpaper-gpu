@@ -61,7 +61,8 @@ bool unpaper_npp_get_device_props(UnpaperNppDeviceProps *props) {
   struct cudaDeviceProp dev_prop;
   err = cudaGetDeviceProperties(&dev_prop, device_id);
   if (err != cudaSuccess) {
-    errOutput("NPP: cudaGetDeviceProperties failed: %s", cudaGetErrorString(err));
+    errOutput("NPP: cudaGetDeviceProperties failed: %s",
+              cudaGetErrorString(err));
     return false;
   }
 

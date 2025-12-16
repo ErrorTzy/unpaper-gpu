@@ -58,4 +58,3 @@ typedef struct {
 
 const ImageBackend *image_backend_get(void);
 void image_backend_select(UnpaperDevice device);
-

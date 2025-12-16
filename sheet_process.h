@@ -85,17 +85,16 @@ typedef struct {
 
   // Async encode queue (optional, set via sheet_process_state_set_encode_queue)
   struct EncodeQueue *encode_queue;
-  int job_index;  // For encode queue submission
+  int job_index; // For encode queue submission
 } SheetProcessState;
 
 // Initialize shared config (call once after parsing)
-void sheet_process_config_init(SheetProcessConfig *config,
-                               const Options *options, const Rectangle *pre_masks,
-                               size_t pre_mask_count, const Point *initial_points,
-                               size_t initial_point_count,
-                               const int32_t middle_wipe[2],
-                               const Rectangle *blackfilter_exclude,
-                               size_t blackfilter_exclude_count);
+void sheet_process_config_init(
+    SheetProcessConfig *config, const Options *options,
+    const Rectangle *pre_masks, size_t pre_mask_count,
+    const Point *initial_points, size_t initial_point_count,
+    const int32_t middle_wipe[2], const Rectangle *blackfilter_exclude,
+    size_t blackfilter_exclude_count);
 
 // Initialize per-job state (call for each job)
 void sheet_process_state_init(SheetProcessState *state,
@@ -114,7 +113,7 @@ void sheet_process_state_set_decoded(SheetProcessState *state,
 // image: Image created from GPU memory (ownership transferred to state)
 // input_index: Which input (0 or 1)
 void sheet_process_state_set_gpu_decoded_image(SheetProcessState *state,
-                                                Image image, int input_index);
+                                               Image image, int input_index);
 
 // Set encode queue for async encoding (optional)
 // If set, process_sheet will submit encoded frames to this queue

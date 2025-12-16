@@ -23,8 +23,8 @@ struct ThreadPool {
 
   // Work queue (ring buffer)
   WorkItem queue[QUEUE_CAPACITY];
-  atomic_size_t head; // Next position to read
-  atomic_size_t tail; // Next position to write
+  atomic_size_t head;    // Next position to read
+  atomic_size_t tail;    // Next position to write
   atomic_size_t pending; // Number of items being processed
 
   // Synchronization
@@ -86,8 +86,7 @@ ThreadPool *threadpool_create(int num_threads) {
   // Create worker threads
   for (int i = 0; i < num_threads; i++) {
     // Pass thread ID via pointer arithmetic trick
-    if (pthread_create(&pool->threads[i], NULL, worker_thread,
-                       pool) != 0) {
+    if (pthread_create(&pool->threads[i], NULL, worker_thread, pool) != 0) {
       // Failed to create thread - shutdown already created ones
       atomic_store(&pool->shutdown, true);
       pthread_cond_broadcast(&pool->work_available);

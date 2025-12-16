@@ -11,7 +11,8 @@ static void cuda_unimplemented(const char *op_name) {
             op_name);
 }
 
-static void wipe_rectangle_cuda(Image image, Rectangle input_area, Pixel color) {
+static void wipe_rectangle_cuda(Image image, Rectangle input_area,
+                                Pixel color) {
   (void)image;
   (void)input_area;
   (void)color;
@@ -197,4 +198,3 @@ const ImageBackend backend_cuda = {
     .detect_rotation = detect_rotation_cuda,
     .deskew = deskew_cuda,
 };
-

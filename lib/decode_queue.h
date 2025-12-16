@@ -17,19 +17,20 @@ struct Image;
 
 // A pre-decoded image ready for processing
 typedef struct {
-  struct AVFrame *frame;    // Decoded frame (may use pinned memory)
-  int job_index;            // Which job this belongs to
-  int input_index;          // Which input within the job (0 or 1)
-  bool valid;               // True if decoding succeeded
-  bool uses_pinned_memory;  // True if frame data is in pinned memory
+  struct AVFrame *frame;   // Decoded frame (may use pinned memory)
+  int job_index;           // Which job this belongs to
+  int input_index;         // Which input within the job (0 or 1)
+  bool valid;              // True if decoding succeeded
+  bool uses_pinned_memory; // True if frame data is in pinned memory
   // GPU decode fields (PR36+)
-  bool on_gpu;              // True if decoded directly to GPU via nvJPEG
-  void *gpu_ptr;            // GPU memory pointer (if on_gpu)
-  size_t gpu_pitch;         // Row pitch in bytes
-  int gpu_width;            // Image width in pixels
-  int gpu_height;           // Image height in pixels
-  int gpu_channels;         // Number of channels (1 for gray, 3 for RGB)
-  int gpu_format;           // AVPixelFormat equivalent (AV_PIX_FMT_GRAY8 or AV_PIX_FMT_RGB24)
+  bool on_gpu;      // True if decoded directly to GPU via nvJPEG
+  void *gpu_ptr;    // GPU memory pointer (if on_gpu)
+  size_t gpu_pitch; // Row pitch in bytes
+  int gpu_width;    // Image width in pixels
+  int gpu_height;   // Image height in pixels
+  int gpu_channels; // Number of channels (1 for gray, 3 for RGB)
+  int gpu_format;   // AVPixelFormat equivalent (AV_PIX_FMT_GRAY8 or
+                    // AV_PIX_FMT_RGB24)
 } DecodedImage;
 
 // Decode queue - bounded queue of pre-decoded images
@@ -37,12 +38,12 @@ typedef struct DecodeQueue DecodeQueue;
 
 // Statistics for the decode queue
 typedef struct {
-  size_t images_decoded;      // Total images decoded by producer
-  size_t images_consumed;     // Total images consumed by workers
-  size_t producer_waits;      // Times producer waited (queue full)
-  size_t consumer_waits;      // Times consumer waited (queue empty)
-  size_t pinned_allocations;  // Pinned memory allocations
-  size_t peak_queue_depth;    // Maximum queue occupancy observed
+  size_t images_decoded;     // Total images decoded by producer
+  size_t images_consumed;    // Total images consumed by workers
+  size_t producer_waits;     // Times producer waited (queue full)
+  size_t consumer_waits;     // Times consumer waited (queue empty)
+  size_t pinned_allocations; // Pinned memory allocations
+  size_t peak_queue_depth;   // Maximum queue occupancy observed
   // GPU decode stats (PR36+)
   size_t gpu_decodes;         // Images decoded via nvJPEG to GPU
   size_t cpu_decodes;         // Images decoded via FFmpeg to CPU
@@ -59,7 +60,8 @@ DecodeQueue *decode_queue_create(size_t queue_depth, bool use_pinned_memory);
 // - queue_depth: Maximum pre-decoded images to buffer
 // - use_pinned_memory: Allocate decoded frames in CUDA-pinned memory
 // - num_producers: Number of producer threads for parallel decoding
-DecodeQueue *decode_queue_create_parallel(size_t queue_depth, bool use_pinned_memory,
+DecodeQueue *decode_queue_create_parallel(size_t queue_depth,
+                                          bool use_pinned_memory,
                                           int num_producers);
 
 // Destroy the decode queue and free all resources
