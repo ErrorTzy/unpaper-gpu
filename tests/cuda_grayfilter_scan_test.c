@@ -8,8 +8,8 @@
 #include <string.h>
 
 #include "imageprocess/cuda_runtime.h"
-#include "imageprocess/npp_wrapper.h"
 #include "imageprocess/npp_integral.h"
+#include "imageprocess/npp_wrapper.h"
 
 // PTX for kernels
 extern const char unpaper_cuda_kernels_ptx[];
@@ -23,8 +23,8 @@ extern const char unpaper_cuda_kernels_ptx[];
 #define STEP_Y 8
 
 // Thresholds
-#define BLACK_THRESHOLD 32   // Pixels <= this are "dark"
-#define GRAY_THRESHOLD 10    // inverse_lightness must be < this to wipe
+#define BLACK_THRESHOLD 32 // Pixels <= this are "dark"
+#define GRAY_THRESHOLD 10  // inverse_lightness must be < this to wipe
 
 // Output structure must match kernel definition
 typedef struct {
@@ -51,8 +51,8 @@ static void ensure_kernel_loaded(void) {
 // - Light gray tiles (average ~250, inverse_lightness ~5)
 // - Mixed tiles with dark pixels
 // - Darker tiles (average ~200, inverse_lightness ~55)
-static void create_test_images(uint8_t *gray, uint8_t *dark_mask,
-                                int width, int height) {
+static void create_test_images(uint8_t *gray, uint8_t *dark_mask, int width,
+                               int height) {
   // Initialize everything to white (255) and no dark pixels (0 in mask)
   memset(gray, 255, (size_t)width * (size_t)height);
   memset(dark_mask, 0, (size_t)width * (size_t)height);
@@ -72,8 +72,8 @@ static void create_test_images(uint8_t *gray, uint8_t *dark_mask,
     }
   }
   // Add a dark pixel
-  gray[2 * width + 10] = 20;  // Dark pixel
-  dark_mask[2 * width + 10] = 255;  // Mark as dark in mask
+  gray[2 * width + 10] = 20;       // Dark pixel
+  dark_mask[2 * width + 10] = 255; // Mark as dark in mask
 
   // Tile (2,0) at (16,0): Darker gray, no dark pixels -> should NOT be wiped
   // Average lightness = 200, inverse = 55 > gray_threshold(10)
@@ -86,12 +86,12 @@ static void create_test_images(uint8_t *gray, uint8_t *dark_mask,
   // Tile (0,1) at (0,8): Very light gray, no dark pixels -> SHOULD BE WIPED
   for (int y = TILE_H; y < 2 * TILE_H; y++) {
     for (int x = 0; x < TILE_W; x++) {
-      gray[y * width + x] = 252;  // inverse = 3 < threshold
+      gray[y * width + x] = 252; // inverse = 3 < threshold
     }
   }
 
-  // Tile (1,1) at (8,8): Medium light gray, no dark pixels -> should NOT be wiped
-  // Average lightness = 240, inverse = 15 > gray_threshold(10)
+  // Tile (1,1) at (8,8): Medium light gray, no dark pixels -> should NOT be
+  // wiped Average lightness = 240, inverse = 15 > gray_threshold(10)
   for (int y = TILE_H; y < 2 * TILE_H; y++) {
     for (int x = TILE_W; x < 2 * TILE_W; x++) {
       gray[y * width + x] = 240;
@@ -105,9 +105,10 @@ static void create_test_images(uint8_t *gray, uint8_t *dark_mask,
 
 // CPU reference: compute which tiles should be wiped
 static int compute_expected_tiles(const uint8_t *gray, const uint8_t *dark_mask,
-                                   int width, int height, int tile_w, int tile_h,
-                                   int step_x, int step_y, uint8_t gray_threshold,
-                                   GrayfilterTile *out_tiles, int max_tiles) {
+                                  int width, int height, int tile_w, int tile_h,
+                                  int step_x, int step_y,
+                                  uint8_t gray_threshold,
+                                  GrayfilterTile *out_tiles, int max_tiles) {
   int tiles_per_row = (width - tile_w) / step_x + 1;
   int tiles_per_col = (height - tile_h) / step_y + 1;
   int64_t tile_pixels = (int64_t)tile_w * (int64_t)tile_h;
@@ -170,7 +171,8 @@ static void test_grayfilter_scan_basic(void) {
     exit(1);
   }
   unpaper_cuda_memcpy_h2d(gray_device, gray_host, TEST_WIDTH * TEST_HEIGHT);
-  unpaper_cuda_memcpy_h2d(dark_mask_device, dark_mask_host, TEST_WIDTH * TEST_HEIGHT);
+  unpaper_cuda_memcpy_h2d(dark_mask_device, dark_mask_host,
+                          TEST_WIDTH * TEST_HEIGHT);
 
   // Initialize NPP
   if (!unpaper_npp_init()) {
@@ -182,18 +184,19 @@ static void test_grayfilter_scan_basic(void) {
   UnpaperNppIntegral gray_integral;
   UnpaperNppIntegral dark_integral;
   if (!unpaper_npp_integral_8u32s(gray_device, TEST_WIDTH, TEST_HEIGHT,
-                                   TEST_WIDTH, NULL, &gray_integral)) {
+                                  TEST_WIDTH, NULL, &gray_integral)) {
     fprintf(stderr, "NPP gray integral failed\n");
     exit(1);
   }
   if (!unpaper_npp_integral_8u32s(dark_mask_device, TEST_WIDTH, TEST_HEIGHT,
-                                   TEST_WIDTH, NULL, &dark_integral)) {
+                                  TEST_WIDTH, NULL, &dark_integral)) {
     fprintf(stderr, "NPP dark integral failed\n");
     exit(1);
   }
 
   // Allocate output buffers on GPU
-  uint64_t out_tiles_device = unpaper_cuda_malloc(MAX_TILES * sizeof(GrayfilterTile));
+  uint64_t out_tiles_device =
+      unpaper_cuda_malloc(MAX_TILES * sizeof(GrayfilterTile));
   uint64_t out_count_device = unpaper_cuda_malloc(sizeof(int));
   if (out_tiles_device == 0 || out_count_device == 0) {
     fprintf(stderr, "GPU malloc for output failed\n");
@@ -213,7 +216,7 @@ static void test_grayfilter_scan_basic(void) {
   int tile_h = TILE_H;
   int step_x = STEP_X;
   int step_y = STEP_Y;
-  int gray_threshold = GRAY_THRESHOLD;  // Use int for CUDA alignment
+  int gray_threshold = GRAY_THRESHOLD; // Use int for CUDA alignment
   int max_tiles = MAX_TILES;
 
   void *args[] = {
@@ -248,7 +251,8 @@ static void test_grayfilter_scan_basic(void) {
   int gpu_count = 0;
   unpaper_cuda_memcpy_d2h(&gpu_count, out_count_device, sizeof(int));
 
-  GrayfilterTile *gpu_tiles = (GrayfilterTile *)malloc(gpu_count * sizeof(GrayfilterTile));
+  GrayfilterTile *gpu_tiles =
+      (GrayfilterTile *)malloc(gpu_count * sizeof(GrayfilterTile));
   if (gpu_tiles == NULL && gpu_count > 0) {
     fprintf(stderr, "malloc failed\n");
     exit(1);
@@ -259,7 +263,8 @@ static void test_grayfilter_scan_basic(void) {
   }
 
   // Compute expected results
-  GrayfilterTile *expected_tiles = (GrayfilterTile *)malloc(MAX_TILES * sizeof(GrayfilterTile));
+  GrayfilterTile *expected_tiles =
+      (GrayfilterTile *)malloc(MAX_TILES * sizeof(GrayfilterTile));
   if (expected_tiles == NULL) {
     fprintf(stderr, "malloc failed\n");
     exit(1);
@@ -295,7 +300,8 @@ static void test_grayfilter_scan_basic(void) {
       }
     }
     if (!found) {
-      fprintf(stderr, "FAILED: expected tile (%d, %d) not found in GPU output\n",
+      fprintf(stderr,
+              "FAILED: expected tile (%d, %d) not found in GPU output\n",
               expected_tiles[i].x, expected_tiles[i].y);
       exit(1);
     }
@@ -335,17 +341,19 @@ static void test_grayfilter_scan_no_light_tiles(void) {
   uint64_t gray_device = unpaper_cuda_malloc(TEST_WIDTH * TEST_HEIGHT);
   uint64_t dark_mask_device = unpaper_cuda_malloc(TEST_WIDTH * TEST_HEIGHT);
   unpaper_cuda_memcpy_h2d(gray_device, gray_host, TEST_WIDTH * TEST_HEIGHT);
-  unpaper_cuda_memcpy_h2d(dark_mask_device, dark_mask_host, TEST_WIDTH * TEST_HEIGHT);
+  unpaper_cuda_memcpy_h2d(dark_mask_device, dark_mask_host,
+                          TEST_WIDTH * TEST_HEIGHT);
 
   // Compute GPU integrals
   UnpaperNppIntegral gray_integral, dark_integral;
-  unpaper_npp_integral_8u32s(gray_device, TEST_WIDTH, TEST_HEIGHT,
-                              TEST_WIDTH, NULL, &gray_integral);
+  unpaper_npp_integral_8u32s(gray_device, TEST_WIDTH, TEST_HEIGHT, TEST_WIDTH,
+                             NULL, &gray_integral);
   unpaper_npp_integral_8u32s(dark_mask_device, TEST_WIDTH, TEST_HEIGHT,
-                              TEST_WIDTH, NULL, &dark_integral);
+                             TEST_WIDTH, NULL, &dark_integral);
 
   // Allocate output buffers
-  uint64_t out_tiles_device = unpaper_cuda_malloc(MAX_TILES * sizeof(GrayfilterTile));
+  uint64_t out_tiles_device =
+      unpaper_cuda_malloc(MAX_TILES * sizeof(GrayfilterTile));
   uint64_t out_count_device = unpaper_cuda_malloc(sizeof(int));
   int zero = 0;
   unpaper_cuda_memcpy_h2d(out_count_device, &zero, sizeof(int));
@@ -363,19 +371,28 @@ static void test_grayfilter_scan_no_light_tiles(void) {
   int max_tiles = MAX_TILES;
 
   void *args[] = {
-      &gray_integral.device_ptr, &dark_integral.device_ptr,
-      &gray_step, &dark_step, &img_w, &img_h,
-      &tile_w, &tile_h, &step_x, &step_y, &gray_threshold,
-      &out_tiles_device, &out_count_device, &max_tiles,
+      &gray_integral.device_ptr,
+      &dark_integral.device_ptr,
+      &gray_step,
+      &dark_step,
+      &img_w,
+      &img_h,
+      &tile_w,
+      &tile_h,
+      &step_x,
+      &step_y,
+      &gray_threshold,
+      &out_tiles_device,
+      &out_count_device,
+      &max_tiles,
   };
 
   int tiles_per_row = (TEST_WIDTH - TILE_W) / STEP_X + 1;
   int tiles_per_col = (TEST_HEIGHT - TILE_H) / STEP_Y + 1;
   int threads = 16;
-  unpaper_cuda_launch_kernel(k_grayfilter_scan,
-                             (tiles_per_row + threads - 1) / threads,
-                             (tiles_per_col + threads - 1) / threads, 1,
-                             threads, threads, 1, args);
+  unpaper_cuda_launch_kernel(
+      k_grayfilter_scan, (tiles_per_row + threads - 1) / threads,
+      (tiles_per_col + threads - 1) / threads, 1, threads, threads, 1, args);
   unpaper_cuda_stream_synchronize();
 
   // Download count
@@ -412,24 +429,26 @@ static void test_grayfilter_scan_all_dark_pixels(void) {
     fprintf(stderr, "malloc failed\n");
     exit(1);
   }
-  memset(gray_host, 255, TEST_WIDTH * TEST_HEIGHT);  // Very light
-  memset(dark_mask_host, 255, TEST_WIDTH * TEST_HEIGHT);  // But all marked dark
+  memset(gray_host, 255, TEST_WIDTH * TEST_HEIGHT);      // Very light
+  memset(dark_mask_host, 255, TEST_WIDTH * TEST_HEIGHT); // But all marked dark
 
   // Upload to GPU
   uint64_t gray_device = unpaper_cuda_malloc(TEST_WIDTH * TEST_HEIGHT);
   uint64_t dark_mask_device = unpaper_cuda_malloc(TEST_WIDTH * TEST_HEIGHT);
   unpaper_cuda_memcpy_h2d(gray_device, gray_host, TEST_WIDTH * TEST_HEIGHT);
-  unpaper_cuda_memcpy_h2d(dark_mask_device, dark_mask_host, TEST_WIDTH * TEST_HEIGHT);
+  unpaper_cuda_memcpy_h2d(dark_mask_device, dark_mask_host,
+                          TEST_WIDTH * TEST_HEIGHT);
 
   // Compute GPU integrals
   UnpaperNppIntegral gray_integral, dark_integral;
-  unpaper_npp_integral_8u32s(gray_device, TEST_WIDTH, TEST_HEIGHT,
-                              TEST_WIDTH, NULL, &gray_integral);
+  unpaper_npp_integral_8u32s(gray_device, TEST_WIDTH, TEST_HEIGHT, TEST_WIDTH,
+                             NULL, &gray_integral);
   unpaper_npp_integral_8u32s(dark_mask_device, TEST_WIDTH, TEST_HEIGHT,
-                              TEST_WIDTH, NULL, &dark_integral);
+                             TEST_WIDTH, NULL, &dark_integral);
 
   // Allocate output buffers
-  uint64_t out_tiles_device = unpaper_cuda_malloc(MAX_TILES * sizeof(GrayfilterTile));
+  uint64_t out_tiles_device =
+      unpaper_cuda_malloc(MAX_TILES * sizeof(GrayfilterTile));
   uint64_t out_count_device = unpaper_cuda_malloc(sizeof(int));
   int zero = 0;
   unpaper_cuda_memcpy_h2d(out_count_device, &zero, sizeof(int));
@@ -447,19 +466,28 @@ static void test_grayfilter_scan_all_dark_pixels(void) {
   int max_tiles = MAX_TILES;
 
   void *args[] = {
-      &gray_integral.device_ptr, &dark_integral.device_ptr,
-      &gray_step, &dark_step, &img_w, &img_h,
-      &tile_w, &tile_h, &step_x, &step_y, &gray_threshold,
-      &out_tiles_device, &out_count_device, &max_tiles,
+      &gray_integral.device_ptr,
+      &dark_integral.device_ptr,
+      &gray_step,
+      &dark_step,
+      &img_w,
+      &img_h,
+      &tile_w,
+      &tile_h,
+      &step_x,
+      &step_y,
+      &gray_threshold,
+      &out_tiles_device,
+      &out_count_device,
+      &max_tiles,
   };
 
   int tiles_per_row = (TEST_WIDTH - TILE_W) / STEP_X + 1;
   int tiles_per_col = (TEST_HEIGHT - TILE_H) / STEP_Y + 1;
   int threads = 16;
-  unpaper_cuda_launch_kernel(k_grayfilter_scan,
-                             (tiles_per_row + threads - 1) / threads,
-                             (tiles_per_col + threads - 1) / threads, 1,
-                             threads, threads, 1, args);
+  unpaper_cuda_launch_kernel(
+      k_grayfilter_scan, (tiles_per_row + threads - 1) / threads,
+      (tiles_per_col + threads - 1) / threads, 1, threads, threads, 1, args);
   unpaper_cuda_stream_synchronize();
 
   // Download count - no tiles should be wiped because all have dark pixels
@@ -467,7 +495,8 @@ static void test_grayfilter_scan_all_dark_pixels(void) {
   unpaper_cuda_memcpy_d2h(&gpu_count, out_count_device, sizeof(int));
 
   if (gpu_count != 0) {
-    fprintf(stderr, "FAILED: expected 0 tiles (all have dark pixels), got %d\n", gpu_count);
+    fprintf(stderr, "FAILED: expected 0 tiles (all have dark pixels), got %d\n",
+            gpu_count);
     exit(1);
   }
 
@@ -502,8 +531,8 @@ static void test_grayfilter_scan_all_white(void) {
   // Debug: print expected tile count
   int tiles_per_row_expected = (TEST_WIDTH - TILE_W) / STEP_X + 1;
   int tiles_per_col_expected = (TEST_HEIGHT - TILE_H) / STEP_Y + 1;
-  printf("\n  Debug: img=%dx%d, tile=%dx%d, step=%dx%d\n",
-         TEST_WIDTH, TEST_HEIGHT, TILE_W, TILE_H, STEP_X, STEP_Y);
+  printf("\n  Debug: img=%dx%d, tile=%dx%d, step=%dx%d\n", TEST_WIDTH,
+         TEST_HEIGHT, TILE_W, TILE_H, STEP_X, STEP_Y);
   printf("  Debug: tiles_per_row=%d, tiles_per_col=%d, total=%d\n",
          tiles_per_row_expected, tiles_per_col_expected,
          tiles_per_row_expected * tiles_per_col_expected);
@@ -512,17 +541,19 @@ static void test_grayfilter_scan_all_white(void) {
   uint64_t gray_device = unpaper_cuda_malloc(TEST_WIDTH * TEST_HEIGHT);
   uint64_t dark_mask_device = unpaper_cuda_malloc(TEST_WIDTH * TEST_HEIGHT);
   unpaper_cuda_memcpy_h2d(gray_device, gray_host, TEST_WIDTH * TEST_HEIGHT);
-  unpaper_cuda_memcpy_h2d(dark_mask_device, dark_mask_host, TEST_WIDTH * TEST_HEIGHT);
+  unpaper_cuda_memcpy_h2d(dark_mask_device, dark_mask_host,
+                          TEST_WIDTH * TEST_HEIGHT);
 
   // Compute GPU integrals
   UnpaperNppIntegral gray_integral, dark_integral;
-  unpaper_npp_integral_8u32s(gray_device, TEST_WIDTH, TEST_HEIGHT,
-                              TEST_WIDTH, NULL, &gray_integral);
+  unpaper_npp_integral_8u32s(gray_device, TEST_WIDTH, TEST_HEIGHT, TEST_WIDTH,
+                             NULL, &gray_integral);
   unpaper_npp_integral_8u32s(dark_mask_device, TEST_WIDTH, TEST_HEIGHT,
-                              TEST_WIDTH, NULL, &dark_integral);
+                             TEST_WIDTH, NULL, &dark_integral);
 
   // Allocate output buffers
-  uint64_t out_tiles_device = unpaper_cuda_malloc(MAX_TILES * sizeof(GrayfilterTile));
+  uint64_t out_tiles_device =
+      unpaper_cuda_malloc(MAX_TILES * sizeof(GrayfilterTile));
   uint64_t out_count_device = unpaper_cuda_malloc(sizeof(int));
   int zero = 0;
   unpaper_cuda_memcpy_h2d(out_count_device, &zero, sizeof(int));
@@ -542,10 +573,20 @@ static void test_grayfilter_scan_all_white(void) {
   printf("  Debug: gray_step=%d, dark_step=%d\n", gray_step, dark_step);
 
   void *args[] = {
-      &gray_integral.device_ptr, &dark_integral.device_ptr,
-      &gray_step, &dark_step, &img_w, &img_h,
-      &tile_w, &tile_h, &step_x, &step_y, &gray_threshold,
-      &out_tiles_device, &out_count_device, &max_tiles,
+      &gray_integral.device_ptr,
+      &dark_integral.device_ptr,
+      &gray_step,
+      &dark_step,
+      &img_w,
+      &img_h,
+      &tile_w,
+      &tile_h,
+      &step_x,
+      &step_y,
+      &gray_threshold,
+      &out_tiles_device,
+      &out_count_device,
+      &max_tiles,
   };
 
   int tiles_per_row = (TEST_WIDTH - TILE_W) / STEP_X + 1;
@@ -553,10 +594,11 @@ static void test_grayfilter_scan_all_white(void) {
   int threads = 16;
   int grid_x = (tiles_per_row + threads - 1) / threads;
   int grid_y = (tiles_per_col + threads - 1) / threads;
-  printf("  Debug: grid=(%d,%d), threads=(%d,%d)\n", grid_x, grid_y, threads, threads);
+  printf("  Debug: grid=(%d,%d), threads=(%d,%d)\n", grid_x, grid_y, threads,
+         threads);
 
-  unpaper_cuda_launch_kernel(k_grayfilter_scan, grid_x, grid_y, 1,
-                             threads, threads, 1, args);
+  unpaper_cuda_launch_kernel(k_grayfilter_scan, grid_x, grid_y, 1, threads,
+                             threads, 1, args);
   unpaper_cuda_stream_synchronize();
 
   // Download count - all tiles should be wiped
@@ -567,15 +609,18 @@ static void test_grayfilter_scan_all_white(void) {
   printf("  Debug: gpu_count=%d, expected=%d\n", gpu_count, expected_count);
   if (gpu_count != expected_count) {
     // Download tiles to see which are found
-    GrayfilterTile *gpu_tiles = (GrayfilterTile *)malloc(gpu_count * sizeof(GrayfilterTile));
+    GrayfilterTile *gpu_tiles =
+        (GrayfilterTile *)malloc(gpu_count * sizeof(GrayfilterTile));
     if (gpu_tiles != NULL && gpu_count > 0) {
-      unpaper_cuda_memcpy_d2h(gpu_tiles, out_tiles_device, gpu_count * sizeof(GrayfilterTile));
+      unpaper_cuda_memcpy_d2h(gpu_tiles, out_tiles_device,
+                              gpu_count * sizeof(GrayfilterTile));
       // Print found tiles
       int grid[6][8] = {0};
       for (int i = 0; i < gpu_count; i++) {
         int tx = gpu_tiles[i].x / STEP_X;
         int ty = gpu_tiles[i].y / STEP_Y;
-        if (tx < 8 && ty < 6) grid[ty][tx] = 1;
+        if (tx < 8 && ty < 6)
+          grid[ty][tx] = 1;
       }
       printf("  Tile grid (1=found):\n");
       for (int y = 0; y < 6; y++) {
@@ -587,7 +632,8 @@ static void test_grayfilter_scan_all_white(void) {
       }
       free(gpu_tiles);
     }
-    fprintf(stderr, "FAILED: expected %d tiles, got %d\n", expected_count, gpu_count);
+    fprintf(stderr, "FAILED: expected %d tiles, got %d\n", expected_count,
+            gpu_count);
     exit(1);
   }
 

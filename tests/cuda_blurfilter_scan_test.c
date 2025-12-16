@@ -8,8 +8,8 @@
 #include <string.h>
 
 #include "imageprocess/cuda_runtime.h"
-#include "imageprocess/npp_wrapper.h"
 #include "imageprocess/npp_integral.h"
+#include "imageprocess/npp_wrapper.h"
 
 // PTX for kernels
 extern const char unpaper_cuda_kernels_ptx[];
@@ -69,38 +69,39 @@ static void create_test_dark_mask(uint8_t *mask, int width, int height) {
   // Create a sparse isolated dark block at (16, 16) - block (2, 2)
   // Use only 2 dark pixels to ensure ratio (2/64 = 0.03125) <= intensity (0.05)
   // Its diagonal neighbors are (1,1), (3,1), (1,3), (3,3) - all empty
-  mask[16 * width + 16] = 255;  // Dark pixel
-  mask[17 * width + 17] = 255;  // Dark pixel
+  mask[16 * width + 16] = 255; // Dark pixel
+  mask[17 * width + 17] = 255; // Dark pixel
 
   // Create a non-isolated dark block at (40, 24) - block (5, 3)
   // Use only 2 dark pixels for the block itself (ratio <= intensity)
   // Its diagonal neighbors are (4,2), (6,2), (4,4), (6,4)
-  // We add dark content to (4, 2) to make it non-isolated (neighbor ratio > intensity)
-  mask[24 * width + 40] = 255;  // Dark pixel
-  mask[25 * width + 41] = 255;  // Dark pixel
+  // We add dark content to (4, 2) to make it non-isolated (neighbor ratio >
+  // intensity)
+  mask[24 * width + 40] = 255; // Dark pixel
+  mask[25 * width + 41] = 255; // Dark pixel
 
-  // Add enough dark content to upper-left diagonal block (4, 2) to exceed threshold
-  // Need > 3 pixels to make ratio > 0.05
+  // Add enough dark content to upper-left diagonal block (4, 2) to exceed
+  // threshold Need > 3 pixels to make ratio > 0.05
   for (int y = 16; y < 16 + 4; y++) {
-    mask[y * width + 32] = 255;  // 4 dark pixels - ratio = 4/64 = 0.0625 > 0.05
+    mask[y * width + 32] = 255; // 4 dark pixels - ratio = 4/64 = 0.0625 > 0.05
   }
 }
 
 // CPU reference: compute which blocks should be isolated
 // Returns number of isolated blocks found
 static int compute_expected_isolated_blocks(const uint8_t *mask, int width,
-                                             int height, int block_w,
-                                             int block_h, float intensity,
-                                             BlurfilterBlock *out_blocks,
-                                             int max_blocks) {
+                                            int height, int block_w,
+                                            int block_h, float intensity,
+                                            BlurfilterBlock *out_blocks,
+                                            int max_blocks) {
   int blocks_per_row = width / block_w;
   int blocks_per_col = height / block_h;
   int64_t total_pixels = (int64_t)block_w * (int64_t)block_h;
   int count = 0;
 
   // Compute dark counts for all blocks
-  int *dark_counts = (int *)calloc((size_t)blocks_per_row * (size_t)blocks_per_col,
-                                    sizeof(int));
+  int *dark_counts = (int *)calloc(
+      (size_t)blocks_per_row * (size_t)blocks_per_col, sizeof(int));
   if (dark_counts == NULL) {
     return 0;
   }
@@ -112,7 +113,7 @@ static int compute_expected_isolated_blocks(const uint8_t *mask, int width,
       int y0 = by * block_h;
       for (int y = y0; y < y0 + block_h; y++) {
         for (int x = x0; x < x0 + block_w; x++) {
-          if (mask[y * width + x] >= 128) {  // Dark threshold
+          if (mask[y * width + x] >= 128) { // Dark threshold
             dark_count++;
           }
         }
@@ -126,7 +127,7 @@ static int compute_expected_isolated_blocks(const uint8_t *mask, int width,
     for (int bx = 0; bx < blocks_per_row; bx++) {
       int self_count = dark_counts[by * blocks_per_row + bx];
       if (self_count == 0) {
-        continue;  // No dark pixels, not a candidate
+        continue; // No dark pixels, not a candidate
       }
 
       // Check 4 diagonal neighbors AND current block
@@ -137,28 +138,32 @@ static int compute_expected_isolated_blocks(const uint8_t *mask, int width,
       // Upper-left
       if (bx > 0 && by > 0) {
         int n = dark_counts[(by - 1) * blocks_per_row + (bx - 1)];
-        if (n > max_neighbor) max_neighbor = n;
+        if (n > max_neighbor)
+          max_neighbor = n;
       } else {
         max_neighbor = total_pixels;
       }
       // Upper-right
       if (bx < blocks_per_row - 1 && by > 0) {
         int n = dark_counts[(by - 1) * blocks_per_row + (bx + 1)];
-        if (n > max_neighbor) max_neighbor = n;
+        if (n > max_neighbor)
+          max_neighbor = n;
       } else {
         max_neighbor = total_pixels;
       }
       // Lower-left
       if (bx > 0 && by < blocks_per_col - 1) {
         int n = dark_counts[(by + 1) * blocks_per_row + (bx - 1)];
-        if (n > max_neighbor) max_neighbor = n;
+        if (n > max_neighbor)
+          max_neighbor = n;
       } else {
         max_neighbor = total_pixels;
       }
       // Lower-right
       if (bx < blocks_per_row - 1 && by < blocks_per_col - 1) {
         int n = dark_counts[(by + 1) * blocks_per_row + (bx + 1)];
-        if (n > max_neighbor) max_neighbor = n;
+        if (n > max_neighbor)
+          max_neighbor = n;
       } else {
         max_neighbor = total_pixels;
       }
@@ -208,13 +213,14 @@ static void test_blurfilter_scan_basic(void) {
   // Compute GPU integral
   UnpaperNppIntegral integral;
   if (!unpaper_npp_integral_8u32s(mask_device, TEST_WIDTH, TEST_HEIGHT,
-                                   TEST_WIDTH, NULL, &integral)) {
+                                  TEST_WIDTH, NULL, &integral)) {
     fprintf(stderr, "NPP integral failed\n");
     exit(1);
   }
 
   // Allocate output buffers on GPU
-  uint64_t out_blocks_device = unpaper_cuda_malloc(MAX_BLOCKS * sizeof(BlurfilterBlock));
+  uint64_t out_blocks_device =
+      unpaper_cuda_malloc(MAX_BLOCKS * sizeof(BlurfilterBlock));
   uint64_t out_count_device = unpaper_cuda_malloc(sizeof(int));
   if (out_blocks_device == 0 || out_count_device == 0) {
     fprintf(stderr, "GPU malloc for output failed\n");
@@ -226,7 +232,7 @@ static void test_blurfilter_scan_basic(void) {
   unpaper_cuda_memcpy_h2d(out_count_device, &zero, sizeof(int));
 
   // Run kernel
-  float intensity = 0.05f;  // 5% threshold
+  float intensity = 0.05f; // 5% threshold
   int integral_step = (int)integral.step_bytes;
   int img_w = TEST_WIDTH;
   int img_h = TEST_HEIGHT;
@@ -262,7 +268,8 @@ static void test_blurfilter_scan_basic(void) {
   int gpu_count = 0;
   unpaper_cuda_memcpy_d2h(&gpu_count, out_count_device, sizeof(int));
 
-  BlurfilterBlock *gpu_blocks = (BlurfilterBlock *)malloc(gpu_count * sizeof(BlurfilterBlock));
+  BlurfilterBlock *gpu_blocks =
+      (BlurfilterBlock *)malloc(gpu_count * sizeof(BlurfilterBlock));
   if (gpu_blocks == NULL && gpu_count > 0) {
     fprintf(stderr, "malloc failed\n");
     exit(1);
@@ -273,7 +280,8 @@ static void test_blurfilter_scan_basic(void) {
   }
 
   // Compute expected results
-  BlurfilterBlock *expected_blocks = (BlurfilterBlock *)malloc(MAX_BLOCKS * sizeof(BlurfilterBlock));
+  BlurfilterBlock *expected_blocks =
+      (BlurfilterBlock *)malloc(MAX_BLOCKS * sizeof(BlurfilterBlock));
   if (expected_blocks == NULL) {
     fprintf(stderr, "malloc failed\n");
     exit(1);
@@ -298,7 +306,8 @@ static void test_blurfilter_scan_basic(void) {
     exit(1);
   }
 
-  // Verify all expected blocks are found (order may differ due to parallel execution)
+  // Verify all expected blocks are found (order may differ due to parallel
+  // execution)
   for (int i = 0; i < expected_count; i++) {
     int found = 0;
     for (int j = 0; j < gpu_count; j++) {
@@ -309,7 +318,8 @@ static void test_blurfilter_scan_basic(void) {
       }
     }
     if (!found) {
-      fprintf(stderr, "FAILED: expected block (%d, %d) not found in GPU output\n",
+      fprintf(stderr,
+              "FAILED: expected block (%d, %d) not found in GPU output\n",
               expected_blocks[i].x, expected_blocks[i].y);
       exit(1);
     }
@@ -346,13 +356,14 @@ static void test_blurfilter_scan_empty(void) {
   // Compute GPU integral
   UnpaperNppIntegral integral;
   if (!unpaper_npp_integral_8u32s(mask_device, TEST_WIDTH, TEST_HEIGHT,
-                                   TEST_WIDTH, NULL, &integral)) {
+                                  TEST_WIDTH, NULL, &integral)) {
     fprintf(stderr, "NPP integral failed\n");
     exit(1);
   }
 
   // Allocate output buffers
-  uint64_t out_blocks_device = unpaper_cuda_malloc(MAX_BLOCKS * sizeof(BlurfilterBlock));
+  uint64_t out_blocks_device =
+      unpaper_cuda_malloc(MAX_BLOCKS * sizeof(BlurfilterBlock));
   uint64_t out_count_device = unpaper_cuda_malloc(sizeof(int));
   int zero = 0;
   unpaper_cuda_memcpy_h2d(out_count_device, &zero, sizeof(int));
@@ -367,18 +378,24 @@ static void test_blurfilter_scan_empty(void) {
   int max_blocks = MAX_BLOCKS;
 
   void *args[] = {
-      &integral.device_ptr, &integral_step, &img_w, &img_h,
-      &block_w, &block_h, &intensity, &out_blocks_device,
-      &out_count_device, &max_blocks,
+      &integral.device_ptr,
+      &integral_step,
+      &img_w,
+      &img_h,
+      &block_w,
+      &block_h,
+      &intensity,
+      &out_blocks_device,
+      &out_count_device,
+      &max_blocks,
   };
 
   int blocks_per_row = TEST_WIDTH / BLOCK_W;
   int blocks_per_col = TEST_HEIGHT / BLOCK_H;
   int threads = 16;
-  unpaper_cuda_launch_kernel(k_blurfilter_scan,
-                             (blocks_per_row + threads - 1) / threads,
-                             (blocks_per_col + threads - 1) / threads, 1,
-                             threads, threads, 1, args);
+  unpaper_cuda_launch_kernel(
+      k_blurfilter_scan, (blocks_per_row + threads - 1) / threads,
+      (blocks_per_col + threads - 1) / threads, 1, threads, threads, 1, args);
   unpaper_cuda_stream_synchronize();
 
   // Download count
@@ -420,13 +437,14 @@ static void test_blurfilter_scan_all_dark(void) {
   // Compute GPU integral
   UnpaperNppIntegral integral;
   if (!unpaper_npp_integral_8u32s(mask_device, TEST_WIDTH, TEST_HEIGHT,
-                                   TEST_WIDTH, NULL, &integral)) {
+                                  TEST_WIDTH, NULL, &integral)) {
     fprintf(stderr, "NPP integral failed\n");
     exit(1);
   }
 
   // Allocate output buffers
-  uint64_t out_blocks_device = unpaper_cuda_malloc(MAX_BLOCKS * sizeof(BlurfilterBlock));
+  uint64_t out_blocks_device =
+      unpaper_cuda_malloc(MAX_BLOCKS * sizeof(BlurfilterBlock));
   uint64_t out_count_device = unpaper_cuda_malloc(sizeof(int));
   int zero = 0;
   unpaper_cuda_memcpy_h2d(out_count_device, &zero, sizeof(int));
@@ -441,26 +459,34 @@ static void test_blurfilter_scan_all_dark(void) {
   int max_blocks = MAX_BLOCKS;
 
   void *args[] = {
-      &integral.device_ptr, &integral_step, &img_w, &img_h,
-      &block_w, &block_h, &intensity, &out_blocks_device,
-      &out_count_device, &max_blocks,
+      &integral.device_ptr,
+      &integral_step,
+      &img_w,
+      &img_h,
+      &block_w,
+      &block_h,
+      &intensity,
+      &out_blocks_device,
+      &out_count_device,
+      &max_blocks,
   };
 
   int blocks_per_row = TEST_WIDTH / BLOCK_W;
   int blocks_per_col = TEST_HEIGHT / BLOCK_H;
   int threads = 16;
-  unpaper_cuda_launch_kernel(k_blurfilter_scan,
-                             (blocks_per_row + threads - 1) / threads,
-                             (blocks_per_col + threads - 1) / threads, 1,
-                             threads, threads, 1, args);
+  unpaper_cuda_launch_kernel(
+      k_blurfilter_scan, (blocks_per_row + threads - 1) / threads,
+      (blocks_per_col + threads - 1) / threads, 1, threads, threads, 1, args);
   unpaper_cuda_stream_synchronize();
 
-  // Download count - with all blocks full, none should be isolated (neighbors all have 100%)
+  // Download count - with all blocks full, none should be isolated (neighbors
+  // all have 100%)
   int gpu_count = 0;
   unpaper_cuda_memcpy_d2h(&gpu_count, out_count_device, sizeof(int));
 
   if (gpu_count != 0) {
-    fprintf(stderr, "FAILED: expected 0 isolated blocks (all dark), got %d\n", gpu_count);
+    fprintf(stderr, "FAILED: expected 0 isolated blocks (all dark), got %d\n",
+            gpu_count);
     exit(1);
   }
 

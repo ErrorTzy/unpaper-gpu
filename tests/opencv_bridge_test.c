@@ -64,9 +64,9 @@ static void test_mask_extraction_gray8(void) {
   UnpaperOpencvMask mask = {0};
   const uint8_t min_white_level = 128;
 
-  bool ok = unpaper_opencv_extract_dark_mask(
-      src_dptr, width, height, pitch, (int)UNPAPER_CUDA_FMT_GRAY8,
-      min_white_level, NULL, &mask);
+  bool ok = unpaper_opencv_extract_dark_mask(src_dptr, width, height, pitch,
+                                             (int)UNPAPER_CUDA_FMT_GRAY8,
+                                             min_white_level, NULL, &mask);
 
   if (!unpaper_opencv_cuda_supported()) {
     printf("  OpenCV CUDA not supported, skipping mask extraction test\n");
@@ -143,9 +143,9 @@ static void test_mask_round_trip_determinism(void) {
 
   for (int run = 0; run < 3; run++) {
     UnpaperOpencvMask mask = {0};
-    bool ok = unpaper_opencv_extract_dark_mask(
-        src_dptr, width, height, pitch, (int)UNPAPER_CUDA_FMT_GRAY8,
-        min_white_level, NULL, &mask);
+    bool ok = unpaper_opencv_extract_dark_mask(src_dptr, width, height, pitch,
+                                               (int)UNPAPER_CUDA_FMT_GRAY8,
+                                               min_white_level, NULL, &mask);
     assert(ok);
 
     uint8_t *mask_host = malloc(mask.pitch_bytes * mask.height);

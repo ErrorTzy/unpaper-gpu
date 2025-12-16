@@ -92,7 +92,8 @@ static void test_batched_init(void) {
   }
 
   if (nvjpeg_batched_get_max_batch_size() != 8) {
-    printf("FAILED (wrong batch size: %d)\n", nvjpeg_batched_get_max_batch_size());
+    printf("FAILED (wrong batch size: %d)\n",
+           nvjpeg_batched_get_max_batch_size());
     exit(1);
   }
 
@@ -228,7 +229,8 @@ static void test_decode_batch_multiple(void) {
 
   free(jpeg_data);
 
-  printf("PASSED (4 images, each %dx%d)\n", outputs[0].width, outputs[0].height);
+  printf("PASSED (4 images, each %dx%d)\n", outputs[0].width,
+         outputs[0].height);
 }
 
 static void test_decode_batch_with_nulls(void) {
@@ -312,7 +314,8 @@ static void test_decode_batch_grayscale(void) {
 
   for (int i = 0; i < 2; i++) {
     if (outputs[i].channels != 1) {
-      printf("FAILED (wrong channels for grayscale: %d)\n", outputs[i].channels);
+      printf("FAILED (wrong channels for grayscale: %d)\n",
+             outputs[i].channels);
       free(jpeg_data);
       exit(1);
     }
@@ -403,13 +406,15 @@ static void test_output_pixel_verification(void) {
   }
 
   // Copy both to host and compare first row of pixels
-  size_t row_size = (size_t)single_out.width * 3;  // RGB
+  size_t row_size = (size_t)single_out.width * 3; // RGB
   uint8_t *single_row = malloc(row_size);
   uint8_t *batch_row = malloc(row_size);
 
   if (single_row != NULL && batch_row != NULL) {
-    cudaMemcpy(single_row, single_out.gpu_ptr, row_size, cudaMemcpyDeviceToHost);
-    cudaMemcpy(batch_row, batch_out[0].gpu_ptr, row_size, cudaMemcpyDeviceToHost);
+    cudaMemcpy(single_row, single_out.gpu_ptr, row_size,
+               cudaMemcpyDeviceToHost);
+    cudaMemcpy(batch_row, batch_out[0].gpu_ptr, row_size,
+               cudaMemcpyDeviceToHost);
 
     // Compare pixels (allow small tolerance for different decode paths)
     int max_diff = 0;
@@ -483,7 +488,7 @@ int main(void) {
   UnpaperCudaInitStatus st = unpaper_cuda_try_init();
   if (st != UNPAPER_CUDA_INIT_OK) {
     printf("Skipping tests: %s\n", unpaper_cuda_init_status_string(st));
-    return 77;  // Skip return code
+    return 77; // Skip return code
   }
 
   // Run tests
@@ -492,7 +497,7 @@ int main(void) {
   test_decode_batch_single();
   test_decode_batch_multiple();
   test_decode_batch_with_nulls();
-  test_batch_stats();  // Run before grayscale test which resets stats
+  test_batch_stats(); // Run before grayscale test which resets stats
   test_decode_batch_grayscale();
   test_output_pixel_verification();
   test_batched_cleanup();

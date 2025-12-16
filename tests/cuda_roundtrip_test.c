@@ -2,9 +2,9 @@
 //
 // SPDX-License-Identifier: GPL-2.0-only
 
+#include <libavutil/buffer.h>
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
-#include <libavutil/buffer.h>
 
 #include <stdint.h>
 #include <stdio.h>
@@ -56,8 +56,8 @@ static void run_roundtrip_for_format(enum AVPixelFormat fmt) {
     exit(1);
   }
 
-  const size_t bytes = (size_t)image.frame->linesize[0] *
-                       (size_t)image.frame->height;
+  const size_t bytes =
+      (size_t)image.frame->linesize[0] * (size_t)image.frame->height;
   if (bytes == 0) {
     fprintf(stderr, "invalid buffer size\n");
     exit(1);
@@ -78,7 +78,8 @@ static void run_roundtrip_for_format(enum AVPixelFormat fmt) {
   fill_pattern(image.frame->data[0], bytes, 0xA0);
   image_mark_cuda_dirty(&image);
   image_ensure_cpu(&image);
-  assert_buf_eq(image.frame->data[0], expected_a, bytes, "download after upload");
+  assert_buf_eq(image.frame->data[0], expected_a, bytes,
+                "download after upload");
 
   fill_pattern(image.frame->data[0], bytes, 0x33);
   memcpy(expected_c, image.frame->data[0], bytes);
@@ -88,7 +89,8 @@ static void run_roundtrip_for_format(enum AVPixelFormat fmt) {
   fill_pattern(image.frame->data[0], bytes, 0xCC);
   image_mark_cuda_dirty(&image);
   image_ensure_cpu(&image);
-  assert_buf_eq(image.frame->data[0], expected_c, bytes, "upload then download");
+  assert_buf_eq(image.frame->data[0], expected_c, bytes,
+                "upload then download");
 
   free(expected_a);
   free(expected_c);

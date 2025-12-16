@@ -18,9 +18,11 @@ static char test_jpeg_path[4096];
 static void init_test_paths(void) {
   const char *imgsrc_dir = getenv("TEST_IMGSRC_DIR");
   if (imgsrc_dir != NULL) {
-    snprintf(test_jpeg_path, sizeof(test_jpeg_path), "%stest_jpeg.jpg", imgsrc_dir);
+    snprintf(test_jpeg_path, sizeof(test_jpeg_path), "%stest_jpeg.jpg",
+             imgsrc_dir);
   } else {
-    snprintf(test_jpeg_path, sizeof(test_jpeg_path), "tests/source_images/test_jpeg.jpg");
+    snprintf(test_jpeg_path, sizeof(test_jpeg_path),
+             "tests/source_images/test_jpeg.jpg");
   }
 }
 
@@ -129,8 +131,8 @@ static void test_image_info(void) {
   }
 
   int width = 0, height = 0, channels = 0;
-  bool result =
-      nvjpeg_get_image_info(jpeg_data, (size_t)file_size, &width, &height, &channels);
+  bool result = nvjpeg_get_image_info(jpeg_data, (size_t)file_size, &width,
+                                      &height, &channels);
   free(jpeg_data);
 
   if (!result) {
@@ -451,7 +453,7 @@ int main(void) {
   UnpaperCudaInitStatus st = unpaper_cuda_try_init();
   if (st != UNPAPER_CUDA_INIT_OK) {
     printf("Skipping tests: %s\n", unpaper_cuda_init_status_string(st));
-    return 77;  // Skip return code
+    return 77; // Skip return code
   }
 
   // Run tests

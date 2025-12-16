@@ -5,11 +5,11 @@
 #include <assert.h>
 #include <math.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 
-#include <libavutil/mathematics.h>
 #include <libavutil/frame.h>
+#include <libavutil/mathematics.h>
 #include <libavutil/pixfmt.h>
 
 #include "imageprocess/backend.h"
@@ -73,14 +73,13 @@ static void assert_images_similar(const char *label, Image a, Image b,
 
   double diff_fraction = (double)diff_pixels / (double)total_pixels;
   if (diff_fraction > max_diff_fraction) {
-    fprintf(stderr,
-            "%s: too many differing pixels: %.2f%% > %.2f%%\n",
-            label, diff_fraction * 100.0, max_diff_fraction * 100.0);
+    fprintf(stderr, "%s: too many differing pixels: %.2f%% > %.2f%%\n", label,
+            diff_fraction * 100.0, max_diff_fraction * 100.0);
     assert(false);
   }
 
-  fprintf(stderr, "%s: PASS (%.2f%% pixels differ by >%d)\n",
-          label, diff_fraction * 100.0, max_per_pixel_diff);
+  fprintf(stderr, "%s: PASS (%.2f%% pixels differ by >%d)\n", label,
+          diff_fraction * 100.0, max_per_pixel_diff);
 }
 
 static void test_detect_rotation_and_deskew_parity(void) {
@@ -91,8 +90,8 @@ static void test_detect_rotation_and_deskew_parity(void) {
   Edges edges = {.left = true, .top = false, .right = true, .bottom = false};
   DeskewParameters params;
   edges.right = false;
-  assert(validate_deskew_parameters(&params, 5.0f, 0.1f, 10.0f, 400, 0.5f,
-                                   edges));
+  assert(
+      validate_deskew_parameters(&params, 5.0f, 0.1f, 10.0f, 400, 0.5f, edges));
 
   Image cpu = create_image(sz, AV_PIX_FMT_GRAY8, false, PIXEL_WHITE, 128);
   Image gpu = create_image(sz, AV_PIX_FMT_GRAY8, false, PIXEL_WHITE, 128);

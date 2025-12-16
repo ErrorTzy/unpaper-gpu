@@ -8,8 +8,8 @@
 #include <string.h>
 
 #include "imageprocess/cuda_runtime.h"
-#include "imageprocess/npp_wrapper.h"
 #include "imageprocess/npp_integral.h"
+#include "imageprocess/npp_wrapper.h"
 
 // Test image dimensions
 #define TEST_WIDTH 64
@@ -20,7 +20,7 @@
 // This means first row and first column are always zero.
 // I[y,x] for x>0,y>0 = sum of all pixels from (0,0) to (x-1,y-1)
 static void compute_cpu_integral(const uint8_t *src, int width, int height,
-                                  int src_step, int32_t *dst, int dst_step_i32) {
+                                 int src_step, int32_t *dst, int dst_step_i32) {
   // First row: all zeros
   for (int x = 0; x < width; x++) {
     dst[x] = 0;
@@ -32,7 +32,7 @@ static void compute_cpu_integral(const uint8_t *src, int width, int height,
     int32_t *dst_row = dst + (size_t)y * (size_t)dst_step_i32;
     const int32_t *prev_row = dst + (size_t)(y - 1) * (size_t)dst_step_i32;
 
-    dst_row[0] = 0;  // First column is zero
+    dst_row[0] = 0; // First column is zero
 
     // For x > 0: I[y,x] = I[y-1,x] + I[y,x-1] - I[y-1,x-1] + S[y-1,x-1]
     // where S is the source image
@@ -51,21 +51,26 @@ static void compute_cpu_integral(const uint8_t *src, int width, int height,
 // For rectangle (x0,y0) to (x1,y1) inclusive:
 //   sum = I[y1+1,x1+1] - I[y0,x1+1] - I[y1+1,x0] + I[y0,x0]
 static int64_t integral_rect_sum_cpu(const int32_t *integral, int width,
-                                      int height, int step_i32, int x0, int y0,
-                                      int x1, int y1) {
+                                     int height, int step_i32, int x0, int y0,
+                                     int x1, int y1) {
   // Clamp to valid range for the rectangle
-  if (x0 < 0) x0 = 0;
-  if (y0 < 0) y0 = 0;
-  if (x1 >= width) x1 = width - 1;
-  if (y1 >= height) y1 = height - 1;
+  if (x0 < 0)
+    x0 = 0;
+  if (y0 < 0)
+    y0 = 0;
+  if (x1 >= width)
+    x1 = width - 1;
+  if (y1 >= height)
+    y1 = height - 1;
 
   // For NPP format, we need I[y1+1,x1+1] which might be out of bounds
-  // The integral image has dimensions width x height, so valid indices are [0, width-1] x [0, height-1]
-  // We need to access (x1+1, y1+1), which for the full image would be (width, height)
-  // Since NPP produces width x height output, accessing (x1+1, y1+1) could be out of bounds
+  // The integral image has dimensions width x height, so valid indices are [0,
+  // width-1] x [0, height-1] We need to access (x1+1, y1+1), which for the full
+  // image would be (width, height) Since NPP produces width x height output,
+  // accessing (x1+1, y1+1) could be out of bounds
 
-  // For simplicity in the test, we'll compute a reference that doesn't go out of bounds
-  // The proper way is to check bounds and handle edge cases
+  // For simplicity in the test, we'll compute a reference that doesn't go out
+  // of bounds The proper way is to check bounds and handle edge cases
 
   // br = I[y1+1, x1+1] - but y1+1 or x1+1 might be out of bounds
   // For the test, we'll assume the indices are valid
@@ -73,10 +78,11 @@ static int64_t integral_rect_sum_cpu(const int32_t *integral, int width,
   // Actually for NPP format with width x height output:
   // - Valid x indices: 0 to width-1
   // - Valid y indices: 0 to height-1
-  // - To compute sum of (x0,y0)-(x1,y1), we need I at (y1+1, x1+1), (y0, x1+1), (y1+1, x0), (y0, x0)
+  // - To compute sum of (x0,y0)-(x1,y1), we need I at (y1+1, x1+1), (y0, x1+1),
+  // (y1+1, x0), (y0, x0)
 
-  // If any index is out of bounds, the contribution from that corner is based on
-  // the boundary behavior. For simplicity, we'll access only valid indices.
+  // If any index is out of bounds, the contribution from that corner is based
+  // on the boundary behavior. For simplicity, we'll access only valid indices.
 
   int64_t br = 0, tr = 0, bl = 0, tl = 0;
 
@@ -137,7 +143,7 @@ static void test_integral_basic(void) {
   // Compute GPU integral
   UnpaperNppIntegral gpu_integral;
   if (!unpaper_npp_integral_8u32s(src_device, TEST_WIDTH, TEST_HEIGHT,
-                                   TEST_WIDTH, NULL, &gpu_integral)) {
+                                  TEST_WIDTH, NULL, &gpu_integral)) {
     fprintf(stderr, "NPP integral failed\n");
     exit(1);
   }
@@ -153,8 +159,8 @@ static void test_integral_basic(void) {
                           gpu_integral.total_bytes);
 
   // Compute CPU reference integral
-  int32_t *cpu_integral =
-      (int32_t *)calloc((size_t)TEST_WIDTH * (size_t)TEST_HEIGHT, sizeof(int32_t));
+  int32_t *cpu_integral = (int32_t *)calloc(
+      (size_t)TEST_WIDTH * (size_t)TEST_HEIGHT, sizeof(int32_t));
   if (cpu_integral == NULL) {
     fprintf(stderr, "calloc failed\n");
     exit(1);
@@ -215,7 +221,7 @@ static void test_integral_rect_sum(void) {
   // Compute GPU integral
   UnpaperNppIntegral gpu_integral;
   if (!unpaper_npp_integral_8u32s(src_device, TEST_WIDTH, TEST_HEIGHT,
-                                   TEST_WIDTH, NULL, &gpu_integral)) {
+                                  TEST_WIDTH, NULL, &gpu_integral)) {
     fprintf(stderr, "NPP integral failed\n");
     exit(1);
   }
@@ -235,12 +241,12 @@ static void test_integral_rect_sum(void) {
     int x0, y0, x1, y1;
     int64_t expected;
   } test_cases[] = {
-      {0, 0, 0, 0, 1},                                           // Single pixel
-      {0, 0, 9, 9, 100},                                         // 10x10 at origin
-      {5, 5, 14, 14, 100},                                       // 10x10 offset
-      {10, 10, 19, 19, 100},                                     // 10x10 in middle
+      {0, 0, 0, 0, 1},       // Single pixel
+      {0, 0, 9, 9, 100},     // 10x10 at origin
+      {5, 5, 14, 14, 100},   // 10x10 offset
+      {10, 10, 19, 19, 100}, // 10x10 in middle
       {0, 0, TEST_WIDTH - 2, TEST_HEIGHT - 2,
-       (int64_t)(TEST_WIDTH - 1) * (TEST_HEIGHT - 1)},           // Almost full image
+       (int64_t)(TEST_WIDTH - 1) * (TEST_HEIGHT - 1)}, // Almost full image
   };
 
   int num_tests = sizeof(test_cases) / sizeof(test_cases[0]);
@@ -250,8 +256,7 @@ static void test_integral_rect_sum(void) {
         test_cases[i].y1, NULL);
 
     if (sum != test_cases[i].expected) {
-      fprintf(stderr,
-              "FAILED: rect (%d,%d)-(%d,%d) sum=%lld expected=%lld\n",
+      fprintf(stderr, "FAILED: rect (%d,%d)-(%d,%d) sum=%lld expected=%lld\n",
               test_cases[i].x0, test_cases[i].y0, test_cases[i].x1,
               test_cases[i].y1, (long long)sum,
               (long long)test_cases[i].expected);
@@ -312,7 +317,7 @@ static void test_npp_context_with_stream(void) {
   // Compute integral with stream context
   UnpaperNppIntegral gpu_integral;
   if (!unpaper_npp_integral_8u32s(src_device, TEST_WIDTH, TEST_HEIGHT,
-                                   TEST_WIDTH, ctx, &gpu_integral)) {
+                                  TEST_WIDTH, ctx, &gpu_integral)) {
     fprintf(stderr, "NPP integral with context failed\n");
     exit(1);
   }

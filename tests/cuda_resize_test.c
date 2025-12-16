@@ -5,8 +5,8 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
@@ -77,9 +77,10 @@ static void assert_images_similar(const char *label, Image a, Image b,
   double mean_error = total_error / (double)(total_pixels * 3);
 
   if (diff_fraction > max_diff_fraction) {
-    fprintf(stderr,
-            "%s: too many differing pixels: %.2f%% > %.2f%% (mean error: %.1f)\n",
-            label, diff_fraction * 100.0, max_diff_fraction * 100.0, mean_error);
+    fprintf(
+        stderr,
+        "%s: too many differing pixels: %.2f%% > %.2f%% (mean error: %.1f)\n",
+        label, diff_fraction * 100.0, max_diff_fraction * 100.0, mean_error);
     assert(false);
   }
 
@@ -107,12 +108,10 @@ static const char *interp_name(Interpolation i) {
 #define RESIZE_MAX_DIFF_FRACTION 0.60
 
 static void test_stretch_rgb24(Interpolation interp) {
-  Image cpu =
-      create_image((RectangleSize){.width = 31, .height = 19}, AV_PIX_FMT_RGB24,
-                   false, PIXEL_WHITE, 128);
-  Image gpu =
-      create_image((RectangleSize){.width = 31, .height = 19}, AV_PIX_FMT_RGB24,
-                   false, PIXEL_WHITE, 128);
+  Image cpu = create_image((RectangleSize){.width = 31, .height = 19},
+                           AV_PIX_FMT_RGB24, false, PIXEL_WHITE, 128);
+  Image gpu = create_image((RectangleSize){.width = 31, .height = 19},
+                           AV_PIX_FMT_RGB24, false, PIXEL_WHITE, 128);
   fill_pattern(cpu);
   fill_pattern(gpu);
 
@@ -133,12 +132,10 @@ static void test_stretch_rgb24(Interpolation interp) {
 }
 
 static void test_stretch_gray8(Interpolation interp) {
-  Image cpu =
-      create_image((RectangleSize){.width = 37, .height = 23}, AV_PIX_FMT_GRAY8,
-                   false, PIXEL_WHITE, 128);
-  Image gpu =
-      create_image((RectangleSize){.width = 37, .height = 23}, AV_PIX_FMT_GRAY8,
-                   false, PIXEL_WHITE, 128);
+  Image cpu = create_image((RectangleSize){.width = 37, .height = 23},
+                           AV_PIX_FMT_GRAY8, false, PIXEL_WHITE, 128);
+  Image gpu = create_image((RectangleSize){.width = 37, .height = 23},
+                           AV_PIX_FMT_GRAY8, false, PIXEL_WHITE, 128);
   fill_pattern(cpu);
   fill_pattern(gpu);
 
@@ -159,12 +156,10 @@ static void test_stretch_gray8(Interpolation interp) {
 }
 
 static void test_resize_rgb24(Interpolation interp) {
-  Image cpu =
-      create_image((RectangleSize){.width = 30, .height = 20}, AV_PIX_FMT_RGB24,
-                   false, PIXEL_WHITE, 128);
-  Image gpu =
-      create_image((RectangleSize){.width = 30, .height = 20}, AV_PIX_FMT_RGB24,
-                   false, PIXEL_WHITE, 128);
+  Image cpu = create_image((RectangleSize){.width = 30, .height = 20},
+                           AV_PIX_FMT_RGB24, false, PIXEL_WHITE, 128);
+  Image gpu = create_image((RectangleSize){.width = 30, .height = 20},
+                           AV_PIX_FMT_RGB24, false, PIXEL_WHITE, 128);
   fill_pattern(cpu);
   fill_pattern(gpu);
 

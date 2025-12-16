@@ -5,8 +5,8 @@
 #include <assert.h>
 #include <inttypes.h>
 #include <stdbool.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include <libavutil/frame.h>
 #include <libavutil/pixfmt.h>
@@ -78,10 +78,14 @@ static void test_copy_rectangle_gray_to_rgb(void) {
   const RectangleSize src_sz = {.width = 29, .height = 17};
   const RectangleSize dst_sz = {.width = 40, .height = 30};
 
-  Image src_cpu = create_image(src_sz, AV_PIX_FMT_GRAY8, false, PIXEL_WHITE, 128);
-  Image src_gpu = create_image(src_sz, AV_PIX_FMT_GRAY8, false, PIXEL_WHITE, 128);
-  Image dst_cpu = create_image(dst_sz, AV_PIX_FMT_RGB24, true, PIXEL_WHITE, 128);
-  Image dst_gpu = create_image(dst_sz, AV_PIX_FMT_RGB24, true, PIXEL_WHITE, 128);
+  Image src_cpu =
+      create_image(src_sz, AV_PIX_FMT_GRAY8, false, PIXEL_WHITE, 128);
+  Image src_gpu =
+      create_image(src_sz, AV_PIX_FMT_GRAY8, false, PIXEL_WHITE, 128);
+  Image dst_cpu =
+      create_image(dst_sz, AV_PIX_FMT_RGB24, true, PIXEL_WHITE, 128);
+  Image dst_gpu =
+      create_image(dst_sz, AV_PIX_FMT_RGB24, true, PIXEL_WHITE, 128);
 
   fill_pattern(src_cpu);
   fill_pattern(src_gpu);
@@ -106,21 +110,17 @@ static void test_copy_rectangle_gray_to_rgb(void) {
 
 static void test_center_image_rgb24(void) {
   image_backend_select(UNPAPER_DEVICE_CPU);
-  Image src_cpu =
-      create_image((RectangleSize){.width = 19, .height = 11}, AV_PIX_FMT_RGB24,
-                   false, PIXEL_WHITE, 128);
-  Image src_gpu =
-      create_image((RectangleSize){.width = 19, .height = 11}, AV_PIX_FMT_RGB24,
-                   false, PIXEL_WHITE, 128);
+  Image src_cpu = create_image((RectangleSize){.width = 19, .height = 11},
+                               AV_PIX_FMT_RGB24, false, PIXEL_WHITE, 128);
+  Image src_gpu = create_image((RectangleSize){.width = 19, .height = 11},
+                               AV_PIX_FMT_RGB24, false, PIXEL_WHITE, 128);
   fill_pattern(src_cpu);
   fill_pattern(src_gpu);
 
-  Image dst_cpu =
-      create_image((RectangleSize){.width = 40, .height = 30}, AV_PIX_FMT_RGB24,
-                   true, PIXEL_WHITE, 128);
-  Image dst_gpu =
-      create_image((RectangleSize){.width = 40, .height = 30}, AV_PIX_FMT_RGB24,
-                   true, PIXEL_WHITE, 128);
+  Image dst_cpu = create_image((RectangleSize){.width = 40, .height = 30},
+                               AV_PIX_FMT_RGB24, true, PIXEL_WHITE, 128);
+  Image dst_gpu = create_image((RectangleSize){.width = 40, .height = 30},
+                               AV_PIX_FMT_RGB24, true, PIXEL_WHITE, 128);
 
   image_backend_select(UNPAPER_DEVICE_CPU);
   center_image(src_cpu, dst_cpu, POINT_ORIGIN, size_of_image(dst_cpu));
