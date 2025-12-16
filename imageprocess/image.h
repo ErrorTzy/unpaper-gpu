@@ -15,8 +15,8 @@ typedef struct {
 } Image;
 
 #define EMPTY_IMAGE                                                            \
-  (Image) {                                                                   \
-    .frame = NULL, .background = PIXEL_WHITE, .abs_black_threshold = 0,       \
+  (Image) {                                                                    \
+    .frame = NULL, .background = PIXEL_WHITE, .abs_black_threshold = 0,        \
   }
 
 Image create_image(RectangleSize size, int pixel_format, bool fill,
@@ -38,11 +38,12 @@ void image_mark_cpu_dirty(Image *image);
 void image_mark_cuda_dirty(Image *image);
 
 // Create Image from existing GPU memory (for nvJPEG decoded images)
-// The gpu_ptr ownership is transferred to the Image; it will be freed when
-// the Image is freed. The pitch is the row stride in bytes.
+// If owns_memory is true, the GPU memory will be freed when the Image is freed.
+// If owns_memory is false, the caller retains ownership (e.g., pool-managed).
+// The pitch is the row stride in bytes.
 Image create_image_from_gpu(void *gpu_ptr, size_t pitch, int width, int height,
                             int pixel_format, Pixel background,
-                            uint8_t abs_black_threshold);
+                            uint8_t abs_black_threshold, bool owns_memory);
 
 // Check if image data is currently GPU-resident (valid on GPU)
 bool image_is_gpu_resident(Image *image);

@@ -100,17 +100,18 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
 #ifdef UNPAPER_WITH_CUDA
           // Check if image was decoded directly to GPU
           if (decoded->on_gpu && decoded->gpu_ptr != NULL) {
-            // Create Image from GPU memory (ownership transfers to Image)
+            // Create Image from GPU memory
+            // NOTE: owns_memory=false because batch decode uses pool-managed
+            // buffers from nvjpegDecodeBatched that should not be freed by
+            // individual Images - the pool manages their lifetime.
             Image gpu_image = create_image_from_gpu(
                 decoded->gpu_ptr, decoded->gpu_pitch, decoded->gpu_width,
                 decoded->gpu_height, decoded->gpu_format,
                 ctx->options->sheet_background,
-                ctx->options->abs_black_threshold);
+                ctx->options->abs_black_threshold, false);
 
             if (gpu_image.frame != NULL) {
-              // Transfer GPU pointer ownership
-              decoded->gpu_ptr = NULL;
-              decoded->on_gpu = false;
+              // Don't clear gpu_ptr - we don't own this memory
               sheet_process_state_set_gpu_decoded_image(&state, gpu_image, i);
             }
           } else
@@ -138,11 +139,13 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
           // Check if image was decoded directly to GPU
           if (decoded->on_gpu && decoded->gpu_ptr != NULL) {
             // Create Image from GPU memory (ownership transfers to Image)
+            // NOTE: owns_memory=true because per-image decode uses
+            // cudaMallocAsync which allocates individual buffers.
             Image gpu_image = create_image_from_gpu(
                 decoded->gpu_ptr, decoded->gpu_pitch, decoded->gpu_width,
                 decoded->gpu_height, decoded->gpu_format,
                 ctx->options->sheet_background,
-                ctx->options->abs_black_threshold);
+                ctx->options->abs_black_threshold, true);
 
             if (gpu_image.frame != NULL) {
               // Transfer GPU pointer ownership - don't free in

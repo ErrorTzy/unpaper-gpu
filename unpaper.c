@@ -1119,6 +1119,20 @@ int main(int argc, char *argv[]) {
 
   verboseLog(VERBOSE_NORMAL, WELCOME); // welcome message
 
+  // Validate decode-mode for CPU backend
+  if (options.device == UNPAPER_DEVICE_CPU &&
+      options.decode_mode != DECODE_MODE_AUTO) {
+    fprintf(stderr,
+            "WARNING: --decode-mode has no effect with CPU backend "
+            "(nvJPEG requires CUDA)\n");
+    options.decode_mode = DECODE_MODE_AUTO;
+  }
+  if (options.device == UNPAPER_DEVICE_CPU && options.decode_chunk_size > 0) {
+    fprintf(stderr,
+            "WARNING: --decode-chunk-size has no effect with CPU backend\n");
+    options.decode_chunk_size = 0;
+  }
+
   image_backend_select(options.device);
 
   // Initialize batch queue
@@ -1427,6 +1441,17 @@ int main(int argc, char *argv[]) {
                                options.decode_mode == DECODE_MODE_BATCHED);
 
       if (try_batch_decode) {
+        // For batch decode with "decode all at once" approach, queue depth
+        // must be >= total number of images to avoid deadlock:
+        // - Orchestrator places images in I/O completion order (random)
+        // - Workers request specific job_index images
+        // - If queue is too small, orchestrator blocks before placing all
+        //   images, while workers wait for their specific images = DEADLOCK
+        size_t total_inputs = batch_queue.count; // Upper bound (1-2 per job)
+        if (total_inputs > decode_queue_depth) {
+          decode_queue_depth = total_inputs;
+        }
+
         // For CUDA with auto-tuned buffers, ensure decode queue can keep GPU
         // fed
         if (auto_buffer_count > decode_queue_depth) {

@@ -43,13 +43,14 @@ typedef struct {
   bool valid;              // True if decoding succeeded
   bool uses_pinned_memory; // True if frame data is in pinned memory
   // GPU decode fields
-  bool on_gpu;      // True if decoded directly to GPU via nvJPEG
-  void *gpu_ptr;    // GPU memory pointer (if on_gpu)
-  size_t gpu_pitch; // Row pitch in bytes
-  int gpu_width;    // Image width in pixels
-  int gpu_height;   // Image height in pixels
-  int gpu_channels; // Number of channels (1 for gray, 3 for RGB)
-  int gpu_format;   // AVPixelFormat equivalent
+  bool on_gpu;         // True if decoded directly to GPU via nvJPEG
+  void *gpu_ptr;       // GPU memory pointer (if on_gpu)
+  size_t gpu_pitch;    // Row pitch in bytes
+  int gpu_width;       // Image width in pixels
+  int gpu_height;      // Image height in pixels
+  int gpu_channels;    // Number of channels (1 for gray, 3 for RGB)
+  int gpu_format;      // AVPixelFormat equivalent
+  bool gpu_pool_owned; // True if gpu_ptr is from batch pool (don't free)
 } BatchDecodedImage;
 
 // Batch decode queue - opaque structure

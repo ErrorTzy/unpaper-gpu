@@ -57,8 +57,9 @@ typedef struct {
 // Maximum I/O threads
 #define MAX_IO_THREADS 16
 
-// Maximum configurable chunk size for batch decode
-#define MAX_DECODE_CHUNK_SIZE 64
+// Maximum batch size for decode - processes all images at once
+// to avoid pool buffer reuse issues with chunking
+#define MAX_DECODE_CHUNK_SIZE 256
 
 // Maximum JPEG file size to buffer (100MB)
 #define MAX_JPEG_FILE_SIZE (100 * 1024 * 1024)
@@ -562,7 +563,7 @@ static void process_chunk(BatchDecodeQueue *queue, CollectedFile *files,
       BatchDecodedImage img = {0};
 
       if (outputs[i].gpu_ptr != NULL) {
-        // Successfully decoded to GPU
+        // Successfully decoded to GPU (pool buffer - don't free)
         img.valid = true;
         img.on_gpu = true;
         img.gpu_ptr = outputs[i].gpu_ptr;
@@ -573,6 +574,7 @@ static void process_chunk(BatchDecodeQueue *queue, CollectedFile *files,
         img.gpu_format =
             (outputs[i].channels == 1) ? AV_PIX_FMT_GRAY8 : AV_PIX_FMT_RGB24;
         img.frame = NULL;
+        img.gpu_pool_owned = true; // Pool buffer - managed by nvjpeg_batched
         atomic_fetch_add(&queue->gpu_batched_decodes, 1);
       } else {
         // Batch decode failed for this image - try single decode fallback
@@ -597,6 +599,7 @@ static void process_chunk(BatchDecodeQueue *queue, CollectedFile *files,
             img.gpu_format =
                 (nvout.channels == 1) ? AV_PIX_FMT_GRAY8 : AV_PIX_FMT_RGB24;
             img.frame = NULL;
+            img.gpu_pool_owned = false; // Individual allocation - must free
             atomic_fetch_add(&queue->gpu_single_decodes, 1);
           } else {
             // GPU decode completely failed - fall back to CPU
@@ -708,18 +711,10 @@ static void *orchestrator_thread_fn(void *arg) {
   BatchDecodeQueue *queue = (BatchDecodeQueue *)arg;
 
 #ifdef UNPAPER_WITH_CUDA
-  // Initialize CUDA in this thread
+  // Initialize CUDA in this thread (but NOT batched decoder yet -
+  // we need to know the total image count first)
   if (queue->use_gpu_decode) {
     unpaper_cuda_try_init();
-
-    // Initialize batched decoder if GPU decode is enabled
-    // Use RGB format for maximum compatibility
-    int effective_chunk_size = get_effective_chunk_size(queue);
-    if (!nvjpeg_batched_init(effective_chunk_size, queue->max_width,
-                             queue->max_height, NVJPEG_FMT_RGB)) {
-      verboseLog(VERBOSE_DEBUG, "batch_decode: nvjpeg_batched_init failed, "
-                                "using single-image decode\n");
-    }
   }
 #endif
 
@@ -728,6 +723,25 @@ static void *orchestrator_thread_fn(void *arg) {
   if (queue->io_work_total == 0) {
     return NULL;
   }
+
+#ifdef UNPAPER_WITH_CUDA
+  // Now initialize batched decoder with the ACTUAL image count.
+  // This ensures we can decode ALL images in one batch call, avoiding
+  // pool buffer reuse issues that occur with chunking.
+  if (queue->use_gpu_decode) {
+    int batch_size = (int)queue->io_work_total;
+    // Cap at reasonable limit to avoid excessive GPU memory usage
+    // (each buffer is max_width * max_height * 3 bytes)
+    if (batch_size > 256) {
+      batch_size = 256;
+    }
+    if (!nvjpeg_batched_init(batch_size, queue->max_width, queue->max_height,
+                             NVJPEG_FMT_RGB)) {
+      verboseLog(VERBOSE_DEBUG, "batch_decode: nvjpeg_batched_init failed, "
+                                "using single-image decode\n");
+    }
+  }
+#endif
 
   // Allocate collected files buffer (sized for chunk processing)
   queue->collected_capacity = queue->io_work_total;
@@ -772,15 +786,17 @@ static void *orchestrator_thread_fn(void *arg) {
     pthread_join(queue->io_threads[i], NULL);
   }
 
-  // Process all collected files in chunks
+  // Process all collected files in one batch (or chunks if >256 images)
+  // With batched decode initialized to match image count, we can decode
+  // all images at once - no pool buffer reuse issues.
   size_t total_collected = atomic_load(&queue->collected_count);
-  int eff_chunk_size = get_effective_chunk_size(queue);
+  size_t max_chunk = 256; // Match the cap in nvjpeg_batched_init
   for (size_t offset = 0;
        offset < total_collected && atomic_load(&queue->running);
-       offset += (size_t)eff_chunk_size) {
+       offset += max_chunk) {
     size_t chunk_size = total_collected - offset;
-    if (chunk_size > (size_t)eff_chunk_size) {
-      chunk_size = (size_t)eff_chunk_size;
+    if (chunk_size > max_chunk) {
+      chunk_size = max_chunk;
     }
     process_chunk(queue, &queue->collected_files[offset], chunk_size);
   }
@@ -873,10 +889,12 @@ void batch_decode_queue_destroy(BatchDecodeQueue *queue) {
   batch_decode_queue_stop(queue);
 
   // Free any remaining resources in slots
+  // Note: pool-managed GPU buffers are freed by nvjpeg_batched_cleanup
   for (size_t i = 0; i < queue->queue_depth; i++) {
     DecodeSlot *slot = &queue->slots[i];
 #ifdef UNPAPER_WITH_CUDA
-    if (slot->image.on_gpu && slot->image.gpu_ptr != NULL) {
+    if (slot->image.on_gpu && slot->image.gpu_ptr != NULL &&
+        !slot->image.gpu_pool_owned) {
       cudaFree(slot->image.gpu_ptr);
       slot->image.gpu_ptr = NULL;
     }
@@ -1026,7 +1044,12 @@ void batch_decode_queue_release(BatchDecodeQueue *queue,
       DecodeSlot *slot = &queue->slots[i];
 
 #ifdef UNPAPER_WITH_CUDA
-      if (slot->image.on_gpu && slot->image.gpu_ptr != NULL) {
+      // Only free GPU memory if it's NOT from the batch pool.
+      // Pool buffers are managed by nvjpeg_batched and freed in cleanup.
+      // CRITICAL: cudaFree is synchronous and would add ~10-50ms overhead
+      // per image if called on pool buffers (50 images = 500-2500ms).
+      if (slot->image.on_gpu && slot->image.gpu_ptr != NULL &&
+          !slot->image.gpu_pool_owned) {
         cudaFree(slot->image.gpu_ptr);
         slot->image.gpu_ptr = NULL;
         slot->image.on_gpu = false;
