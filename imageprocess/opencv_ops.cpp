@@ -46,10 +46,10 @@ static inline cv::cuda::Stream get_cv_stream(UnpaperCudaStream *stream) {
   return cv::cuda::StreamAccessor::wrapStream(cuda_stream);
 }
 
-bool unpaper_opencv_wipe_rect(uint64_t dst_device, int dst_width, int dst_height,
-                              size_t dst_pitch, int dst_format, int x0, int y0,
-                              int x1, int y1, uint8_t r, uint8_t g, uint8_t b,
-                              UnpaperCudaStream *stream) {
+bool unpaper_opencv_wipe_rect(uint64_t dst_device, int dst_width,
+                              int dst_height, size_t dst_pitch, int dst_format,
+                              int x0, int y0, int x1, int y1, uint8_t r,
+                              uint8_t g, uint8_t b, UnpaperCudaStream *stream) {
 #ifdef HAVE_OPENCV_CUDAARITHM
   auto fmt = static_cast<UnpaperCudaFormat>(dst_format);
   if (is_mono_format(fmt)) {
@@ -65,10 +65,14 @@ bool unpaper_opencv_wipe_rect(uint64_t dst_device, int dst_width, int dst_height
   if (x0 > x1 || y0 > y1) {
     return true; // Empty rectangle, nothing to do
   }
-  if (x0 < 0) x0 = 0;
-  if (y0 < 0) y0 = 0;
-  if (x1 >= dst_width) x1 = dst_width - 1;
-  if (y1 >= dst_height) y1 = dst_height - 1;
+  if (x0 < 0)
+    x0 = 0;
+  if (y0 < 0)
+    y0 = 0;
+  if (x1 >= dst_width)
+    x1 = dst_width - 1;
+  if (y1 >= dst_height)
+    y1 = dst_height - 1;
   if (x0 > x1 || y0 > y1) {
     return true; // Rectangle fully outside image
   }
@@ -125,12 +129,13 @@ bool unpaper_opencv_wipe_rect(uint64_t dst_device, int dst_width, int dst_height
 #endif
 }
 
-bool unpaper_opencv_copy_rect(uint64_t src_device, int src_width, int src_height,
-                              size_t src_pitch, int src_format,
-                              uint64_t dst_device, int dst_width, int dst_height,
-                              size_t dst_pitch, int dst_format, int src_x0,
-                              int src_y0, int dst_x0, int dst_y0, int copy_w,
-                              int copy_h, UnpaperCudaStream *stream) {
+bool unpaper_opencv_copy_rect(uint64_t src_device, int src_width,
+                              int src_height, size_t src_pitch, int src_format,
+                              uint64_t dst_device, int dst_width,
+                              int dst_height, size_t dst_pitch, int dst_format,
+                              int src_x0, int src_y0, int dst_x0, int dst_y0,
+                              int copy_w, int copy_h,
+                              UnpaperCudaStream *stream) {
 #ifdef HAVE_OPENCV_CUDAARITHM
   auto sfmt = static_cast<UnpaperCudaFormat>(src_format);
   auto dfmt = static_cast<UnpaperCudaFormat>(dst_format);
@@ -207,8 +212,9 @@ bool unpaper_opencv_copy_rect(uint64_t src_device, int src_width, int src_height
 }
 
 bool unpaper_opencv_mirror(uint64_t src_device, uint64_t dst_device, int width,
-                           int height, size_t pitch, int format, bool horizontal,
-                           bool vertical, UnpaperCudaStream *stream) {
+                           int height, size_t pitch, int format,
+                           bool horizontal, bool vertical,
+                           UnpaperCudaStream *stream) {
 #ifdef HAVE_OPENCV_CUDAARITHM
   auto fmt = static_cast<UnpaperCudaFormat>(format);
   if (is_mono_format(fmt)) {
@@ -223,9 +229,18 @@ bool unpaper_opencv_mirror(uint64_t src_device, uint64_t dst_device, int width,
   if (!horizontal && !vertical) {
     // No flip needed, just copy if src != dst
     if (src_device != dst_device) {
-      cudaMemcpy(reinterpret_cast<void *>(dst_device),
-                 reinterpret_cast<void *>(src_device), pitch * height,
-                 cudaMemcpyDeviceToDevice);
+      // Use async copy with stream to avoid serializing all streams
+      cudaStream_t cuda_stream = nullptr;
+      if (stream != nullptr) {
+        cuda_stream = static_cast<cudaStream_t>(
+            unpaper_cuda_stream_get_raw_handle(stream));
+      }
+      cudaMemcpyAsync(reinterpret_cast<void *>(dst_device),
+                      reinterpret_cast<void *>(src_device), pitch * height,
+                      cudaMemcpyDeviceToDevice, cuda_stream);
+      if (cuda_stream != nullptr) {
+        cudaStreamSynchronize(cuda_stream);
+      }
     }
     return true;
   }
@@ -319,9 +334,10 @@ bool unpaper_opencv_rotate90(uint64_t src_device, int src_width, int src_height,
       // RGB24: Use cv::cuda::warpAffine() which supports 3 channels
       // warpAffine uses inverse mapping: for each dst pixel, compute src coords
       //
-      // IMPORTANT: By default, warpAffine expects a FORWARD transformation matrix
-      // (source to destination) and internally inverts it. Since we provide an
-      // INVERSE matrix (destination to source), we must set WARP_INVERSE_MAP.
+      // IMPORTANT: By default, warpAffine expects a FORWARD transformation
+      // matrix (source to destination) and internally inverts it. Since we
+      // provide an INVERSE matrix (destination to source), we must set
+      // WARP_INVERSE_MAP.
       //
       // For 90° clockwise rotation of WxH image to HxW:
       //   src_col = dst_row, src_row = src_height - 1 - dst_col
@@ -426,20 +442,22 @@ bool unpaper_opencv_resize(uint64_t src_device, int src_width, int src_height,
     cv::cuda::resize(src, resized, cv::Size(dst_width, dst_height), 0, 0,
                      cv_interp, cv_stream);
 
-    // Wait for resize to complete before copying
-    cv_stream.waitForCompletion();
-
-    // Copy to destination with correct pitch using cudaMemcpy2D
-    // This properly handles different source/destination pitches
-    cudaError_t err = cudaMemcpy2D(
+    // Copy to destination with correct pitch using cudaMemcpy2DAsync
+    // Use the same stream to avoid serializing all streams (default stream
+    // sync) The async copy will wait for resize to complete since it's on the
+    // same stream
+    cudaStream_t cuda_stream = cv::cuda::StreamAccessor::getStream(cv_stream);
+    cudaError_t err = cudaMemcpy2DAsync(
         reinterpret_cast<void *>(dst_device), dst_pitch, resized.data,
         resized.step, (size_t)dst_width * elem_size, (size_t)dst_height,
-        cudaMemcpyDeviceToDevice);
+        cudaMemcpyDeviceToDevice, cuda_stream);
     if (err != cudaSuccess) {
-      fprintf(stderr, "OpenCV resize cudaMemcpy2D failed: %s\n",
+      fprintf(stderr, "OpenCV resize cudaMemcpy2DAsync failed: %s\n",
               cudaGetErrorString(err));
       return false;
     }
+    // Sync this stream to ensure copy completes before resized buffer is freed
+    cv_stream.waitForCompletion();
 
     return true;
   } catch (const std::exception &e) {
@@ -498,12 +516,14 @@ bool unpaper_opencv_deskew(uint64_t src_device, int src_width, int src_height,
                          reinterpret_cast<void *>(src_device), src_pitch);
 
     // Unpaper deskew coordinate mapping (inverse, dst -> src):
-    //   sx = src_center_x + (x - dst_center_x) * cosval + (y - dst_center_y) * sinval
-    //   sy = src_center_y + (y - dst_center_y) * cosval - (x - dst_center_x) * sinval
+    //   sx = src_center_x + (x - dst_center_x) * cosval + (y - dst_center_y) *
+    //   sinval sy = src_center_y + (y - dst_center_y) * cosval - (x -
+    //   dst_center_x) * sinval
     //
     // Expanding:
-    //   sx = cosval * x + sinval * y + (src_center_x - dst_center_x * cosval - dst_center_y * sinval)
-    //   sy = -sinval * x + cosval * y + (src_center_y + dst_center_x * sinval - dst_center_y * cosval)
+    //   sx = cosval * x + sinval * y + (src_center_x - dst_center_x * cosval -
+    //   dst_center_y * sinval) sy = -sinval * x + cosval * y + (src_center_y +
+    //   dst_center_x * sinval - dst_center_y * cosval)
     //
     // Affine matrix for inverse mapping:
     // | cosval,   sinval,   tx |
@@ -532,19 +552,22 @@ bool unpaper_opencv_deskew(uint64_t src_device, int src_width, int src_height,
                          cv_interp | cv::WARP_INVERSE_MAP, cv::BORDER_CONSTANT,
                          border_color, cv_stream);
 
-    // Wait for warp to complete before copying
-    cv_stream.waitForCompletion();
-
-    // Copy to destination with correct pitch using cudaMemcpy2D
-    cudaError_t err = cudaMemcpy2D(
+    // Copy to destination with correct pitch using cudaMemcpy2DAsync
+    // Use the same stream to avoid serializing all streams (default stream
+    // sync) The async copy will wait for warp to complete since it's on the
+    // same stream
+    cudaStream_t cuda_stream = cv::cuda::StreamAccessor::getStream(cv_stream);
+    cudaError_t err = cudaMemcpy2DAsync(
         reinterpret_cast<void *>(dst_device), dst_pitch, warped.data,
         warped.step, (size_t)dst_width * elem_size, (size_t)dst_height,
-        cudaMemcpyDeviceToDevice);
+        cudaMemcpyDeviceToDevice, cuda_stream);
     if (err != cudaSuccess) {
-      fprintf(stderr, "OpenCV deskew cudaMemcpy2D failed: %s\n",
+      fprintf(stderr, "OpenCV deskew cudaMemcpy2DAsync failed: %s\n",
               cudaGetErrorString(err));
       return false;
     }
+    // Sync this stream to ensure copy completes before warped buffer is freed
+    cv_stream.waitForCompletion();
 
     return true;
   } catch (const std::exception &e) {

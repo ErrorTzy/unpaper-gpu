@@ -4,8 +4,8 @@
 
 #include "imageprocess/opencv_bridge.h"
 #include "imageprocess/cuda_kernels_format.h"
-#include "imageprocess/npp_wrapper.h"
 #include "imageprocess/npp_integral.h"
+#include "imageprocess/npp_wrapper.h"
 
 #include <atomic>
 #include <cstring>
@@ -14,9 +14,9 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include <cuda_runtime.h>
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/core/cuda_stream_accessor.hpp>
-#include <cuda_runtime.h>
 
 // PTX kernel for GPU-accelerated blurfilter scan
 extern "C" {
@@ -123,13 +123,15 @@ bool unpaper_opencv_cuda_ccl(uint64_t mask_device, int width, int height,
       cuda_stream =
           static_cast<cudaStream_t>(unpaper_cuda_stream_get_raw_handle(stream));
     }
-    cv::cuda::Stream cv_stream = cv::cuda::StreamAccessor::wrapStream(cuda_stream);
+    cv::cuda::Stream cv_stream =
+        cv::cuda::StreamAccessor::wrapStream(cuda_stream);
 
     // Wrap the mask directly as GpuMat - memory is now compatible (Runtime API)
     cv::cuda::GpuMat mask(height, width, CV_8UC1,
                           reinterpret_cast<void *>(mask_device), pitch_bytes);
 
-    // Convert mask to binary if needed (OpenCV CCL expects non-zero = foreground)
+    // Convert mask to binary if needed (OpenCV CCL expects non-zero =
+    // foreground)
     cv::cuda::GpuMat binary;
     if (foreground_value == 255) {
       binary = mask;
@@ -233,7 +235,8 @@ bool unpaper_opencv_extract_dark_mask(uint64_t src_device, int src_width,
       cuda_stream =
           static_cast<cudaStream_t>(unpaper_cuda_stream_get_raw_handle(stream));
     }
-    cv::cuda::Stream cv_stream = cv::cuda::StreamAccessor::wrapStream(cuda_stream);
+    cv::cuda::Stream cv_stream =
+        cv::cuda::StreamAccessor::wrapStream(cuda_stream);
 
     auto fmt = static_cast<UnpaperCudaFormat>(src_format);
 
@@ -375,7 +378,8 @@ static inline int64_t integral_rect_sum(const cv::Mat &integral, int x0, int y0,
   if (x0 > x1 || y0 > y1) {
     return 0;
   }
-  // Integral image formula: sum = I[y1+1][x1+1] - I[y0][x1+1] - I[y1+1][x0] + I[y0][x0]
+  // Integral image formula: sum = I[y1+1][x1+1] - I[y0][x1+1] - I[y1+1][x0] +
+  // I[y0][x0]
   int64_t a = integral.at<int32_t>(y0, x0);
   int64_t b = integral.at<int32_t>(y0, x1 + 1);
   int64_t c = integral.at<int32_t>(y1 + 1, x0);
@@ -460,12 +464,13 @@ bool unpaper_opencv_grayfilter(uint64_t src_device, int width, int height,
     // Compute GPU integrals for both gray and dark_mask (no CPU download!)
     UnpaperNppIntegral gray_integral, dark_integral;
 
-    bool gray_integral_ok = unpaper_npp_integral_8u32s(
-        reinterpret_cast<uint64_t>(gray.data), width, height,
-        gray.step, npp_ctx, &gray_integral);
+    bool gray_integral_ok =
+        unpaper_npp_integral_8u32s(reinterpret_cast<uint64_t>(gray.data), width,
+                                   height, gray.step, npp_ctx, &gray_integral);
 
     if (!gray_integral_ok) {
-      if (npp_ctx != nullptr) unpaper_npp_context_destroy(npp_ctx);
+      if (npp_ctx != nullptr)
+        unpaper_npp_context_destroy(npp_ctx);
       fprintf(stderr, "NPP gray integral failed in grayfilter\n");
       return false;
     }
@@ -493,24 +498,25 @@ bool unpaper_opencv_grayfilter(uint64_t src_device, int width, int height,
       return false;
     }
 
-    // Allocate GPU output buffers for kernel
+    // Allocate GPU output buffers for kernel (stream-ordered to avoid blocking)
     int max_tiles = tiles_per_row * tiles_per_col;
-    uint64_t out_tiles_device =
-        unpaper_cuda_malloc(static_cast<size_t>(max_tiles) * sizeof(GrayfilterTile));
-    uint64_t out_count_device = unpaper_cuda_malloc(sizeof(int));
+    uint64_t out_tiles_device = unpaper_cuda_malloc_async(
+        stream, static_cast<size_t>(max_tiles) * sizeof(GrayfilterTile));
+    uint64_t out_count_device = unpaper_cuda_malloc_async(stream, sizeof(int));
 
     if (out_tiles_device == 0 || out_count_device == 0) {
       fprintf(stderr, "GPU malloc failed for grayfilter output\n");
       unpaper_npp_integral_free(gray_integral.device_ptr);
       unpaper_npp_integral_free(dark_integral.device_ptr);
-      if (out_tiles_device != 0) unpaper_cuda_free(out_tiles_device);
-      if (out_count_device != 0) unpaper_cuda_free(out_count_device);
+      if (out_tiles_device != 0)
+        unpaper_cuda_free_async(stream, out_tiles_device);
+      if (out_count_device != 0)
+        unpaper_cuda_free_async(stream, out_count_device);
       return false;
     }
 
-    // Initialize count to 0
-    int zero = 0;
-    unpaper_cuda_memcpy_h2d(out_count_device, &zero, sizeof(int));
+    // Initialize count to 0 (use memset_async for stream-ordered init)
+    unpaper_cuda_memset_async(stream, out_count_device, 0, sizeof(int));
 
     // Launch GPU scan kernel
     int gray_step = static_cast<int>(gray_integral.step_bytes);
@@ -541,9 +547,9 @@ bool unpaper_opencv_grayfilter(uint64_t src_device, int width, int height,
     uint32_t grid_y = static_cast<uint32_t>(
         (tiles_per_col + threads_per_block - 1) / threads_per_block);
 
-    unpaper_cuda_launch_kernel_on_stream(
-        stream, g_grayfilter_scan_kernel, grid_x, grid_y, 1,
-        threads_per_block, threads_per_block, 1, kernel_args);
+    unpaper_cuda_launch_kernel_on_stream(stream, g_grayfilter_scan_kernel,
+                                         grid_x, grid_y, 1, threads_per_block,
+                                         threads_per_block, 1, kernel_args);
 
     // Sync stream to ensure kernel is complete
     if (stream != nullptr) {
@@ -564,14 +570,14 @@ bool unpaper_opencv_grayfilter(uint64_t src_device, int width, int height,
     std::vector<GrayfilterTile> tiles_to_wipe;
     if (tile_count > 0) {
       tiles_to_wipe.resize(static_cast<size_t>(tile_count));
-      unpaper_cuda_memcpy_d2h(
-          tiles_to_wipe.data(), out_tiles_device,
-          static_cast<size_t>(tile_count) * sizeof(GrayfilterTile));
+      unpaper_cuda_memcpy_d2h(tiles_to_wipe.data(), out_tiles_device,
+                              static_cast<size_t>(tile_count) *
+                                  sizeof(GrayfilterTile));
     }
 
-    // Free GPU output buffers
-    unpaper_cuda_free(out_tiles_device);
-    unpaper_cuda_free(out_count_device);
+    // Free GPU output buffers (stream-ordered)
+    unpaper_cuda_free_async(stream, out_tiles_device);
+    unpaper_cuda_free_async(stream, out_count_device);
 
     // Wipe collected tiles on GPU using OpenCV
     for (const auto &tile : tiles_to_wipe) {
@@ -706,23 +712,24 @@ bool unpaper_opencv_blurfilter(uint64_t src_device, int width, int height,
       return false;
     }
 
-    // Allocate GPU output buffers for kernel
+    // Allocate GPU output buffers for kernel (stream-ordered to avoid blocking)
     int max_blocks = blocks_per_row * blocks_per_col;
-    uint64_t out_blocks_device =
-        unpaper_cuda_malloc(static_cast<size_t>(max_blocks) * sizeof(BlurfilterBlock));
-    uint64_t out_count_device = unpaper_cuda_malloc(sizeof(int));
+    uint64_t out_blocks_device = unpaper_cuda_malloc_async(
+        stream, static_cast<size_t>(max_blocks) * sizeof(BlurfilterBlock));
+    uint64_t out_count_device = unpaper_cuda_malloc_async(stream, sizeof(int));
 
     if (out_blocks_device == 0 || out_count_device == 0) {
       fprintf(stderr, "GPU malloc failed for blurfilter output\n");
       unpaper_npp_integral_free(npp_integral.device_ptr);
-      if (out_blocks_device != 0) unpaper_cuda_free(out_blocks_device);
-      if (out_count_device != 0) unpaper_cuda_free(out_count_device);
+      if (out_blocks_device != 0)
+        unpaper_cuda_free_async(stream, out_blocks_device);
+      if (out_count_device != 0)
+        unpaper_cuda_free_async(stream, out_count_device);
       return false;
     }
 
-    // Initialize count to 0
-    int zero = 0;
-    unpaper_cuda_memcpy_h2d(out_count_device, &zero, sizeof(int));
+    // Initialize count to 0 (use memset_async for stream-ordered init)
+    unpaper_cuda_memset_async(stream, out_count_device, 0, sizeof(int));
 
     // Launch GPU scan kernel
     int integral_step = static_cast<int>(npp_integral.step_bytes);
@@ -746,9 +753,9 @@ bool unpaper_opencv_blurfilter(uint64_t src_device, int width, int height,
     uint32_t grid_y = static_cast<uint32_t>(
         (blocks_per_col + threads_per_block - 1) / threads_per_block);
 
-    unpaper_cuda_launch_kernel_on_stream(
-        stream, g_blurfilter_scan_kernel, grid_x, grid_y, 1,
-        threads_per_block, threads_per_block, 1, kernel_args);
+    unpaper_cuda_launch_kernel_on_stream(stream, g_blurfilter_scan_kernel,
+                                         grid_x, grid_y, 1, threads_per_block,
+                                         threads_per_block, 1, kernel_args);
 
     // Sync stream to ensure kernel is complete
     if (stream != nullptr) {
@@ -768,14 +775,14 @@ bool unpaper_opencv_blurfilter(uint64_t src_device, int width, int height,
     std::vector<BlurfilterBlock> blocks_to_wipe;
     if (block_count > 0) {
       blocks_to_wipe.resize(static_cast<size_t>(block_count));
-      unpaper_cuda_memcpy_d2h(
-          blocks_to_wipe.data(), out_blocks_device,
-          static_cast<size_t>(block_count) * sizeof(BlurfilterBlock));
+      unpaper_cuda_memcpy_d2h(blocks_to_wipe.data(), out_blocks_device,
+                              static_cast<size_t>(block_count) *
+                                  sizeof(BlurfilterBlock));
     }
 
-    // Free GPU output buffers
-    unpaper_cuda_free(out_blocks_device);
-    unpaper_cuda_free(out_count_device);
+    // Free GPU output buffers (stream-ordered)
+    unpaper_cuda_free_async(stream, out_blocks_device);
+    unpaper_cuda_free_async(stream, out_count_device);
 
     // Wipe collected blocks on GPU using OpenCV
     for (const auto &block : blocks_to_wipe) {
@@ -813,15 +820,12 @@ bool unpaper_opencv_blurfilter(uint64_t src_device, int width, int height,
 #endif
 }
 
-bool unpaper_opencv_blackfilter(uint64_t src_device, int width, int height,
-                                size_t pitch_bytes, int format, int scan_size_w,
-                                int scan_size_h, int scan_depth_h,
-                                int scan_depth_v, int scan_step_h,
-                                int scan_step_v, bool scan_dir_h,
-                                bool scan_dir_v, uint8_t black_threshold,
-                                uint8_t area_threshold, uint64_t intensity,
-                                const int32_t *exclusions, int exclusion_count,
-                                UnpaperCudaStream *stream) {
+bool unpaper_opencv_blackfilter(
+    uint64_t src_device, int width, int height, size_t pitch_bytes, int format,
+    int scan_size_w, int scan_size_h, int scan_depth_h, int scan_depth_v,
+    int scan_step_h, int scan_step_v, bool scan_dir_h, bool scan_dir_v,
+    uint8_t black_threshold, uint8_t area_threshold, uint64_t intensity,
+    const int32_t *exclusions, int exclusion_count, UnpaperCudaStream *stream) {
   // Blackfilter uses flood-fill which is inherently sequential.
   // The OpenCV CCL approach doesn't directly map to the original algorithm.
   // Return false to fall back to custom CUDA implementation.
@@ -867,10 +871,14 @@ bool unpaper_opencv_sum_rect(uint64_t src_device, int width, int height,
   if (x0 > x1 || y0 > y1) {
     return true; // Empty rectangle, sum is 0
   }
-  if (x0 < 0) x0 = 0;
-  if (y0 < 0) y0 = 0;
-  if (x1 >= width) x1 = width - 1;
-  if (y1 >= height) y1 = height - 1;
+  if (x0 < 0)
+    x0 = 0;
+  if (y0 < 0)
+    y0 = 0;
+  if (x1 >= width)
+    x1 = width - 1;
+  if (y1 >= height)
+    y1 = height - 1;
   if (x0 > x1 || y0 > y1) {
     return true; // Rectangle fully outside image
   }
@@ -954,10 +962,14 @@ bool unpaper_opencv_count_brightness_range(uint64_t src_device, int width,
   if (x0 > x1 || y0 > y1) {
     return true; // Empty rectangle, count is 0
   }
-  if (x0 < 0) x0 = 0;
-  if (y0 < 0) y0 = 0;
-  if (x1 >= width) x1 = width - 1;
-  if (y1 >= height) y1 = height - 1;
+  if (x0 < 0)
+    x0 = 0;
+  if (y0 < 0)
+    y0 = 0;
+  if (x1 >= width)
+    x1 = width - 1;
+  if (y1 >= height)
+    y1 = height - 1;
   if (x0 > x1 || y0 > y1) {
     return true; // Rectangle fully outside image
   }
@@ -1053,8 +1065,8 @@ bool unpaper_opencv_detect_edge_rotation_peaks(
   // launches (remap → reduce → gradient) vs the single optimized custom kernel.
   //
   // The custom kernel unpaper_detect_edge_rotation_peaks in cuda_kernels.cu
-  // is specifically designed for this operation and outperforms any OpenCV-based
-  // implementation.
+  // is specifically designed for this operation and outperforms any
+  // OpenCV-based implementation.
 
   (void)src_device;
   (void)width;
@@ -1078,4 +1090,44 @@ bool unpaper_opencv_detect_edge_rotation_peaks(
 
   // Return false to fall back to the optimized custom CUDA kernel
   return false;
+}
+
+bool unpaper_opencv_rgb_to_gray(uint64_t src_device, int width, int height,
+                                size_t src_pitch, uint64_t dst_device,
+                                size_t dst_pitch, UnpaperCudaStream *stream) {
+#ifdef HAVE_OPENCV_CUDAIMGPROC
+  if (src_device == 0 || dst_device == 0) {
+    return false;
+  }
+
+  try {
+    cv::cuda::Stream cv_stream = get_cv_stream(stream);
+
+    // Wrap source RGB24 image
+    cv::cuda::GpuMat src(height, width, CV_8UC3,
+                         reinterpret_cast<void *>(src_device), src_pitch);
+
+    // Wrap destination grayscale buffer
+    cv::cuda::GpuMat dst(height, width, CV_8UC1,
+                         reinterpret_cast<void *>(dst_device), dst_pitch);
+
+    // Convert RGB to grayscale
+    cv::cuda::cvtColor(src, dst, cv::COLOR_RGB2GRAY, 0, cv_stream);
+
+    cv_stream.waitForCompletion();
+    return true;
+  } catch (const std::exception &e) {
+    fprintf(stderr, "OpenCV RGB to gray failed: %s\n", e.what());
+    return false;
+  }
+#else
+  (void)src_device;
+  (void)width;
+  (void)height;
+  (void)src_pitch;
+  (void)dst_device;
+  (void)dst_pitch;
+  (void)stream;
+  return false;
+#endif
 }

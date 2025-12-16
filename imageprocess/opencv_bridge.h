@@ -24,7 +24,8 @@ typedef struct {
   int width;
   int height;
   size_t pitch_bytes;
-  bool opencv_allocated; // true if allocated via OpenCV/cudart, false via unpaper
+  bool opencv_allocated; // true if allocated via OpenCV/cudart, false via
+                         // unpaper
 } UnpaperOpencvMask;
 
 bool unpaper_opencv_enabled(void);
@@ -119,15 +120,12 @@ bool unpaper_opencv_blurfilter(uint64_t src_device, int width, int height,
  * @param stream           Optional CUDA stream (may be NULL)
  * @return true on success, false if operation not supported
  */
-bool unpaper_opencv_blackfilter(uint64_t src_device, int width, int height,
-                                size_t pitch_bytes, int format, int scan_size_w,
-                                int scan_size_h, int scan_depth_h,
-                                int scan_depth_v, int scan_step_h,
-                                int scan_step_v, bool scan_dir_h,
-                                bool scan_dir_v, uint8_t black_threshold,
-                                uint8_t area_threshold, uint64_t intensity,
-                                const int32_t *exclusions, int exclusion_count,
-                                UnpaperCudaStream *stream);
+bool unpaper_opencv_blackfilter(
+    uint64_t src_device, int width, int height, size_t pitch_bytes, int format,
+    int scan_size_w, int scan_size_h, int scan_depth_h, int scan_depth_v,
+    int scan_step_h, int scan_step_v, bool scan_dir_h, bool scan_dir_v,
+    uint8_t black_threshold, uint8_t area_threshold, uint64_t intensity,
+    const int32_t *exclusions, int exclusion_count, UnpaperCudaStream *stream);
 
 /**
  * Sum grayscale values in a rectangle using OpenCV CUDA.
@@ -204,6 +202,22 @@ bool unpaper_opencv_detect_edge_rotation_peaks(
     int shift_x, int shift_y, int mask_x0, int mask_y0, int mask_x1,
     int mask_y1, int max_blackness_abs, int rotations_count,
     UnpaperCudaStream *stream, int *peaks_out);
+
+/**
+ * Convert RGB24 image to grayscale using OpenCV CUDA.
+ *
+ * @param src_device     Device pointer to source RGB24 image
+ * @param width          Image width in pixels
+ * @param height         Image height in pixels
+ * @param src_pitch      Source row stride in bytes
+ * @param dst_device     Device pointer to destination grayscale image
+ * @param dst_pitch      Destination row stride in bytes
+ * @param stream         Optional CUDA stream (may be NULL)
+ * @return true on success, false if operation not supported
+ */
+bool unpaper_opencv_rgb_to_gray(uint64_t src_device, int width, int height,
+                                size_t src_pitch, uint64_t dst_device,
+                                size_t dst_pitch, UnpaperCudaStream *stream);
 
 #ifdef __cplusplus
 }

@@ -28,10 +28,10 @@ extern "C" {
  * @param stream      Optional CUDA stream (may be NULL)
  * @return true on success, false if operation not supported (e.g., mono format)
  */
-bool unpaper_opencv_wipe_rect(uint64_t dst_device, int dst_width, int dst_height,
-                              size_t dst_pitch, int dst_format, int x0, int y0,
-                              int x1, int y1, uint8_t r, uint8_t g, uint8_t b,
-                              UnpaperCudaStream *stream);
+bool unpaper_opencv_wipe_rect(uint64_t dst_device, int dst_width,
+                              int dst_height, size_t dst_pitch, int dst_format,
+                              int x0, int y0, int x1, int y1, uint8_t r,
+                              uint8_t g, uint8_t b, UnpaperCudaStream *stream);
 
 /**
  * Copy a rectangle region from source to destination using OpenCV CUDA.
@@ -52,12 +52,13 @@ bool unpaper_opencv_wipe_rect(uint64_t dst_device, int dst_width, int dst_height
  * @param stream      Optional CUDA stream (may be NULL)
  * @return true on success, false if operation not supported
  */
-bool unpaper_opencv_copy_rect(uint64_t src_device, int src_width, int src_height,
-                              size_t src_pitch, int src_format,
-                              uint64_t dst_device, int dst_width, int dst_height,
-                              size_t dst_pitch, int dst_format, int src_x0,
-                              int src_y0, int dst_x0, int dst_y0, int copy_w,
-                              int copy_h, UnpaperCudaStream *stream);
+bool unpaper_opencv_copy_rect(uint64_t src_device, int src_width,
+                              int src_height, size_t src_pitch, int src_format,
+                              uint64_t dst_device, int dst_width,
+                              int dst_height, size_t dst_pitch, int dst_format,
+                              int src_x0, int src_y0, int dst_x0, int dst_y0,
+                              int copy_w, int copy_h,
+                              UnpaperCudaStream *stream);
 
 /**
  * Mirror an image horizontally and/or vertically using OpenCV CUDA.
@@ -74,11 +75,13 @@ bool unpaper_opencv_copy_rect(uint64_t src_device, int src_width, int src_height
  * @return true on success, false if operation not supported (e.g., mono format)
  */
 bool unpaper_opencv_mirror(uint64_t src_device, uint64_t dst_device, int width,
-                           int height, size_t pitch, int format, bool horizontal,
-                           bool vertical, UnpaperCudaStream *stream);
+                           int height, size_t pitch, int format,
+                           bool horizontal, bool vertical,
+                           UnpaperCudaStream *stream);
 
 /**
- * Rotate an image by 90 degrees clockwise or counter-clockwise using OpenCV CUDA.
+ * Rotate an image by 90 degrees clockwise or counter-clockwise using OpenCV
+ * CUDA.
  *
  * @param src_device   Device pointer to source image
  * @param src_width    Source image width in pixels
