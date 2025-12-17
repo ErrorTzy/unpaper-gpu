@@ -240,7 +240,8 @@ if have_cuda
         install : false,
     )
 
-    test('cuda roundtrip', cuda_roundtrip_test, is_parallel: false)
+    # cuda_roundtrip_test doesn't switch backends, can run in parallel
+    test('cuda roundtrip', cuda_roundtrip_test)
 
     cuda_primitives_test = executable(
         'cuda_primitives_test',
@@ -419,7 +420,8 @@ if have_cuda
         install : false,
     )
 
-    test('cuda stream', cuda_stream_test, is_parallel: false)
+    # cuda_stream_test doesn't switch backends, can run in parallel
+    test('cuda stream', cuda_stream_test)
 
     opencv_bridge_test = executable(
         'opencv_bridge_test',
@@ -456,7 +458,8 @@ if have_cuda
         install : false,
     )
 
-    test('npp integral', npp_integral_test, is_parallel: false)
+    # npp_integral_test doesn't switch backends, can run in parallel
+    test('npp integral', npp_integral_test)
 
     cuda_blurfilter_scan_test = executable(
         'cuda_blurfilter_scan_test',
@@ -474,7 +477,8 @@ if have_cuda
         install : false,
     )
 
-    test('cuda blurfilter scan', cuda_blurfilter_scan_test, is_parallel: false)
+    # cuda_blurfilter_scan_test doesn't switch backends, can run in parallel
+    test('cuda blurfilter scan', cuda_blurfilter_scan_test)
 
     cuda_grayfilter_scan_test = executable(
         'cuda_grayfilter_scan_test',
@@ -492,7 +496,8 @@ if have_cuda
         install : false,
     )
 
-    test('cuda grayfilter scan', cuda_grayfilter_scan_test, is_parallel: false)
+    # cuda_grayfilter_scan_test doesn't switch backends, can run in parallel
+    test('cuda grayfilter scan', cuda_grayfilter_scan_test)
 
     nvjpeg_decode_test = executable(
         'nvjpeg_decode_test',
@@ -507,10 +512,11 @@ if have_cuda
         install : false,
     )
 
+    # nvjpeg_decode_test doesn't switch backends, can run in parallel
+    # CUDA_LAUNCH_BLOCKING=1 needed to avoid async race in test
     test('nvjpeg decode', nvjpeg_decode_test,
          env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/',
-               'CUDA_LAUNCH_BLOCKING=1'],
-         is_parallel: false)
+               'CUDA_LAUNCH_BLOCKING=1'])
 
     nvjpeg_batched_test = executable(
         'nvjpeg_batched_test',
@@ -525,9 +531,9 @@ if have_cuda
         install : false,
     )
 
+    # nvjpeg_batched_test doesn't switch backends, can run in parallel
     test('nvjpeg batched decode', nvjpeg_batched_test,
-         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'],
-         is_parallel: false)
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
 
     nvjpeg_encode_test = executable(
         'nvjpeg_encode_test',
@@ -543,10 +549,11 @@ if have_cuda
         install : false,
     )
 
+    # nvjpeg_encode_test doesn't switch backends, can run in parallel
     test('nvjpeg encode', nvjpeg_encode_test,
-         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'],
-         is_parallel: false)
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
 
+    # gpu jpeg pipeline test runs the unpaper binary, can run in parallel
     test(
         'gpu jpeg pipeline',
         python,
@@ -561,6 +568,5 @@ if have_cuda
             'TEST_UNPAPER_BINARY=' + unpaper.full_path(),
         ],
         timeout : -1,
-        is_parallel: false,
     )
 endif

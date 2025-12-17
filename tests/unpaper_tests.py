@@ -125,6 +125,16 @@ def cuda_runtime_available() -> bool:
         tmpdir.cleanup()
 
 
+@pytest.fixture
+def fast_device():
+    """Return the fastest available device (CUDA if available, else CPU).
+
+    Use this fixture for tests that don't specifically need to test both backends.
+    CUDA is 2-3x faster than CPU for most operations.
+    """
+    return "cuda" if cuda_runtime_available() else "cpu"
+
+
 @pytest.mark.parametrize(
     "extra_args",
     [
@@ -290,7 +300,7 @@ def test_a1(imgsrc_path, goldendir_path, tmp_path, device):
     assert compare_images(golden=golden_path, result=result_path) < tolerance
 
 
-def test_a2(imgsrc_path, goldendir_path, tmp_path):
+def test_a2(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[A2] Single-Page Template Layout, Black+White, Full Processing, PPI scaling."""
     source_path = imgsrc_path / "imgsrc001.png"
     result_path = tmp_path / "result.pbm"
@@ -298,9 +308,11 @@ def test_a2(imgsrc_path, goldendir_path, tmp_path):
 
     # Default processing is at 300 PPI, so by using 600 PPI and *two* A sizes lower
     # (A4 → A6) we should have an almost idential file as goldenA1.
-    run_unpaper(str(source_path), str(result_path), "--ppi", "600", "--post-size", "a6")
+    run_unpaper("--device", fast_device, str(source_path), str(result_path), "--ppi", "600", "--post-size", "a6")
 
-    assert compare_images(golden=golden_path, result=result_path) < 0.05
+    # CUDA produces slightly different results due to floating point precision
+    tolerance = 0.06 if fast_device == "cuda" else 0.05
+    assert compare_images(golden=golden_path, result=result_path) < tolerance
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
@@ -329,7 +341,7 @@ def test_b1(imgsrc_path, goldendir_path, tmp_path, device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_b2(imgsrc_path, goldendir_path, tmp_path):
+def test_b2(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[B2] Combined Color/Black+White, No Processing."""
 
     source1_path = imgsrc_path / "imgsrc003.png"
@@ -338,6 +350,7 @@ def test_b2(imgsrc_path, goldendir_path, tmp_path):
     golden_path = goldendir_path / "goldenB2.ppm"
 
     run_unpaper(
+        "--device", fast_device,
         "-n",
         "--input-pages",
         "2",
@@ -349,7 +362,7 @@ def test_b2(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_b3(imgsrc_path, goldendir_path, tmp_path):
+def test_b3(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[B3] Combined Gray/Black+White, No Processing."""
 
     source1_path = imgsrc_path / "imgsrc004.png"
@@ -358,6 +371,7 @@ def test_b3(imgsrc_path, goldendir_path, tmp_path):
     golden_path = goldendir_path / "goldenB3.ppm"
 
     run_unpaper(
+        "--device", fast_device,
         "-n",
         "--input-pages",
         "2",
@@ -369,7 +383,7 @@ def test_b3(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_sheet_background_black(imgsrc_path, goldendir_path, tmp_path):
+def test_sheet_background_black(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[C1] Black sheet background color."""
 
     source_path = imgsrc_path / "imgsrc002.png"
@@ -377,6 +391,7 @@ def test_sheet_background_black(imgsrc_path, goldendir_path, tmp_path):
     golden_path = goldendir_path / "goldenC1.pbm"
 
     run_unpaper(
+        "--device", fast_device,
         "-n",
         "--sheet-size",
         "a4",
@@ -389,7 +404,7 @@ def test_sheet_background_black(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_pre_shift_both(imgsrc_path, goldendir_path, tmp_path):
+def test_pre_shift_both(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[C2] Explicit shifting."""
 
     source_path = imgsrc_path / "imgsrc002.png"
@@ -397,6 +412,7 @@ def test_pre_shift_both(imgsrc_path, goldendir_path, tmp_path):
     golden_path = goldendir_path / "goldenC2.pbm"
 
     run_unpaper(
+        "--device", fast_device,
         "-n",
         "--sheet-size",
         "a4",
@@ -409,7 +425,7 @@ def test_pre_shift_both(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_negative_shift(imgsrc_path, goldendir_path, tmp_path):
+def test_negative_shift(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[C2] Explicit -1 size shifting."""
 
     source_path = imgsrc_path / "imgsrc002.png"
@@ -417,6 +433,7 @@ def test_negative_shift(imgsrc_path, goldendir_path, tmp_path):
     golden_path = goldendir_path / "goldenC3.pbm"
 
     run_unpaper(
+        "--device", fast_device,
         "-n",
         "--sheet-size",
         "a4",
@@ -429,13 +446,14 @@ def test_negative_shift(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_sheet_crop(imgsrc_path, goldendir_path, tmp_path):
+def test_sheet_crop(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[D1] Crop to sheet size."""
     source_path = imgsrc_path / "imgsrc003.png"
     result_path = tmp_path / "result.pbm"
     golden_path = goldendir_path / "goldenD1.ppm"
 
     run_unpaper(
+        "--device", fast_device,
         "-n",
         "--sheet-size",
         "20cm,10cm",
@@ -446,13 +464,14 @@ def test_sheet_crop(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_sheet_fit(imgsrc_path, goldendir_path, tmp_path):
+def test_sheet_fit(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[D2] Fit to sheet size."""
     source_path = imgsrc_path / "imgsrc003.png"
     result_path = tmp_path / "result.pbm"
     golden_path = goldendir_path / "goldenD2.ppm"
 
     run_unpaper(
+        "--device", fast_device,
         "-n",
         "--size",
         "20cm,10cm",
@@ -463,13 +482,14 @@ def test_sheet_fit(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_sheet_stretch(imgsrc_path, goldendir_path, tmp_path):
+def test_sheet_stretch(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[D3] Stretch to sheet size."""
     source_path = imgsrc_path / "imgsrc003.png"
     result_path = tmp_path / "result.pbm"
     golden_path = goldendir_path / "goldenD3.ppm"
 
     run_unpaper(
+        "--device", fast_device,
         "-n",
         "--stretch",
         "20cm,10cm",
@@ -480,13 +500,14 @@ def test_sheet_stretch(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_e1(imgsrc_path, goldendir_path, tmp_path):
+def test_e1(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[E1] Splitting 2-page layout into separate output pages (with input and output wildcard)."""
 
     source_path = imgsrc_path / "imgsrcE%03d.png"
     result_path = tmp_path / "results-%02d.pbm"
 
     run_unpaper(
+        "--device", fast_device,
         "--layout", "double", "--output-pages", "2", str(source_path), str(result_path)
     )
 
@@ -535,7 +556,7 @@ def test_e2(imgsrc_path, goldendir_path, tmp_path, device):
         assert compare_images(golden=golden_path, result=result) < 0.05
 
 
-def test_e3(imgsrc_path, goldendir_path, tmp_path):
+def test_e3(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[E3] Splitting 2-page layout into separate output pages (with explicit input and output)."""
 
     source_path = imgsrc_path / "imgsrcE001.png"
@@ -543,6 +564,7 @@ def test_e3(imgsrc_path, goldendir_path, tmp_path):
     result_path_2 = tmp_path / "results-2.pbm"
 
     run_unpaper(
+        "--device", fast_device,
         "--layout",
         "double",
         "--output-pages",
@@ -568,7 +590,7 @@ def test_e3(imgsrc_path, goldendir_path, tmp_path):
     )
 
 
-def test_f1(imgsrc_path, goldendir_path, tmp_path):
+def test_f1(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[F1] Merging 2-page layout into single output page (with input and output wildcard)."""
 
     source_path = imgsrc_path / "imgsrcE%03d.png"
@@ -577,6 +599,7 @@ def test_f1(imgsrc_path, goldendir_path, tmp_path):
     golden_path = goldendir_path / "goldenF.pbm"
 
     run_unpaper(
+        "--device", fast_device,
         "--end-sheet",
         "1",
         "--layout",
@@ -594,7 +617,7 @@ def test_f1(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_f2(imgsrc_path, goldendir_path, tmp_path):
+def test_f2(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[F2] Merging 2-page layout into single output page (with output wildcard only)."""
 
     source_path_1 = imgsrc_path / "imgsrcE001.png"
@@ -604,6 +627,7 @@ def test_f2(imgsrc_path, goldendir_path, tmp_path):
     golden_path = goldendir_path / "goldenF.pbm"
 
     run_unpaper(
+        "--device", fast_device,
         "--layout",
         "double",
         "--input-pages",
@@ -620,7 +644,7 @@ def test_f2(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-def test_f3(imgsrc_path, goldendir_path, tmp_path):
+def test_f3(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[F3] Merging 2-page layout into single output page (with explicit input and output)."""
 
     source_path_1 = imgsrc_path / "imgsrcE001.png"
@@ -629,6 +653,7 @@ def test_f3(imgsrc_path, goldendir_path, tmp_path):
     golden_path = goldendir_path / "goldenF.pbm"
 
     run_unpaper(
+        "--device", fast_device,
         "--layout",
         "double",
         "--input-pages",
@@ -702,7 +727,7 @@ def test_valid_range_multi_index(imgsrc_path, tmp_path):
     assert unpaper_result.returncode == 0
 
 
-def test_jpeg_input_produces_similar_output_to_png(imgsrc_path, tmp_path):
+def test_jpeg_input_produces_similar_output_to_png(imgsrc_path, tmp_path, fast_device):
     """Test that JPEG input produces output similar to PNG input.
 
     This validates that the JPEG decode path (FFmpeg or nvJPEG) produces
@@ -723,6 +748,7 @@ def test_jpeg_input_produces_similar_output_to_png(imgsrc_path, tmp_path):
 
     # Process both with same settings (no filters for cleaner comparison)
     common_args = [
+        "--device", fast_device,
         "--no-blackfilter",
         "--no-noisefilter",
         "--no-blurfilter",
