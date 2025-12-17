@@ -105,6 +105,9 @@ static void test_single_page_pdf(void) {
   int32_t middleWipe[2] = {0, 0};
   Rectangle blackfilterExclude[MAX_MASKS];
 
+  // Initialize filter parameters with defaults
+  options_init_filter_defaults(&options, blackfilterExclude);
+
   SheetProcessConfig config;
   sheet_process_config_init(&config, &options, preMasks, 0, points, 0,
                             middleWipe, blackfilterExclude, 0);
@@ -171,6 +174,8 @@ static void test_multi_page_pdf(void) {
   int32_t middleWipe[2] = {0, 0};
   Rectangle blackfilterExclude[MAX_MASKS];
 
+  options_init_filter_defaults(&options, blackfilterExclude);
+
   SheetProcessConfig config;
   sheet_process_config_init(&config, &options, preMasks, 0, points, 0,
                             middleWipe, blackfilterExclude, 0);
@@ -215,6 +220,8 @@ static void test_invalid_input(void) {
   Point points[MAX_POINTS];
   int32_t middleWipe[2] = {0, 0};
   Rectangle blackfilterExclude[MAX_MASKS];
+
+  options_init_filter_defaults(&options, blackfilterExclude);
 
   SheetProcessConfig config;
   sheet_process_config_init(&config, &options, preMasks, 0, points, 0,
@@ -276,6 +283,8 @@ static void test_output_quality(void) {
   Point points[MAX_POINTS];
   int32_t middleWipe[2] = {0, 0};
   Rectangle blackfilterExclude[MAX_MASKS];
+
+  options_init_filter_defaults(&options, blackfilterExclude);
 
   SheetProcessConfig config;
   sheet_process_config_init(&config, &options, preMasks, 0, points, 0,

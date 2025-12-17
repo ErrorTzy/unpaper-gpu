@@ -21,6 +21,11 @@ typedef enum {
   UNPAPER_DEVICE_CUDA = 1,
 } UnpaperDevice;
 
+typedef enum {
+  PDF_QUALITY_FAST = 0, // JPEG output (lossy, faster)
+  PDF_QUALITY_HIGH = 1, // JP2 lossless output (archival)
+} PdfQualityMode;
+
 typedef struct {
   UnpaperDevice device;
 
@@ -35,6 +40,10 @@ typedef struct {
   bool batch_progress; // Show progress output
   int cuda_streams;    // Number of CUDA streams (0 = auto-detect)
   int jpeg_quality;    // JPEG output quality (1-100, 0 = default 85)
+
+  // PDF processing options
+  int pdf_quality_mode; // 0 = fast (JPEG), 1 = high (JP2 lossless)
+  int pdf_render_dpi;   // DPI for rendering fallback (default 300)
 
   Layout layout;
   int start_sheet;
@@ -109,6 +118,11 @@ typedef struct {
 } Options;
 
 void options_init(Options *o);
+
+// Initialize filter parameters with default values.
+// blackfilter_exclude must point to a valid array of at least MAX_MASKS
+// elements.
+void options_init_filter_defaults(Options *o, Rectangle *blackfilter_exclude);
 
 bool parse_symmetric_integers(const char *str, int32_t *value_1,
                               int32_t *value_2);

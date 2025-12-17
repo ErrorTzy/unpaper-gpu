@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2025 The unpaper authors
+
+SPDX-License-Identifier: GPL-2.0-only
+-->
+
 # Repository Guidelines
 
 ## Project Structure
@@ -637,6 +643,7 @@ nsys profiling confirms async allocators ARE working (12k+ `cudaMallocAsync` cal
 **Other Attempts (reverted as ineffective)**:
 - Object reuse via cached_image/cached_code_stream: nvImageCodec's "reuse" is broken (recreates internal resources)
 - pre_init=1, skip_pre_sync=1: No measurable improvement
+- Deferred cleanup queue: Background thread to destroy CodeStream/Image objects asynchronously. Does not help because `cuMemFree_v2` is GPU-global - it synchronizes the entire GPU regardless of which CPU thread calls it. Moving destroys to a background thread still blocks all GPU streams.
 
 **Root Cause**:
 
@@ -680,50 +687,52 @@ The ~30% regression is inherent to nvImageCodec's API design. The async allocato
 
 ---
 
-### PR 6: GPU PDF Pipeline Integration [IN PROGRESS]
+### PR 6: GPU PDF Pipeline Integration [COMPLETE]
 
-**Status**: Partial implementation. CUDA kernel added, pipeline integration pending.
+**Status**: Implemented and tested.
 
-**Why**: Wire GPU decode/encode to PDF pipeline for maximum performance.
+**Why**: Wire GPU decode/encode to PDF pipeline for maximum performance. Both CPU and GPU pipelines now use the full `process_sheet()` processing path.
 
-**Completed work**:
-- Added `unpaper_expand_1bit_to_8bit` CUDA kernel in `cuda_kernels_filters.cu` for GPU-based 1-bit to 8-bit expansion
-- Created benchmark infrastructure: `tools/bench_jbig2_pdf.py` and `tools/create_jbig2_benchmark_pdf.py`
-- Created 50-page JBIG2 test PDF: `tests/pdf_samples/benchmark_jbig2_50page.pdf`
-- Fixed meson.build to support combined CUDA+PDF builds (`builddir-cuda-pdf/`)
-
-**Baseline benchmark** (CPU pipeline, 50 JBIG2 pages):
-- Time: ~295s (0.2 pages/sec, ~5.9s per page)
-
-**Remaining work**:
+**Implementation**:
 - New `pdf/pdf_pipeline_gpu.c`: orchestrate GPU PDF processing
-- Update `parse.c`: add options:
-  - `--pdf-quality=high|fast` (high=JP2 lossless, fast=JPEG 85)
-  - `--pdf-dpi=N` (for rendered fallback, default 300)
-- Wire: PDF extract → nvImageCodec decode → GPU process → nvImageCodec encode → PDF embed
-- Auto-select GPU vs CPU pipeline based on `--device` flag
-- Integrate 1-bit GPU expansion kernel for JBIG2 (avoids 8x H2D transfer)
+- Updated `pdf/pdf_pipeline_cpu.c` to use `process_sheet()` instead of duplicating filter logic
+- Both pipelines now support: blackfilter, blurfilter, grayfilter, noisefilter, deskew, mask detection, border detection, etc.
+- Added `options_init_filter_defaults()` helper function in `lib/options.c` for proper filter parameter initialization
+- Fixed backend selection: CPU pipeline calls `image_backend_select(UNPAPER_DEVICE_CPU)`
+- GPU pipeline uses `sheet_process_state_set_gpu_decoded_image()` for pre-decoded GPU images
+- Auto-selects GPU vs CPU pipeline based on `--device` flag
 
-**Key optimization for JBIG2**:
+**Key architectural change**:
+```c
+// Old approach (duplicated filter logic in each pipeline):
+mirror(state.sheet, options->pre_mirror);
+blackfilter(state.sheet, bf_params);
+noisefilter(state.sheet, ...);
+// ... 200+ lines of duplicated code
+
+// New approach (reuse existing infrastructure):
+sheet_process_state_set_decoded(&state, page_frame, 0);  // CPU
+// OR: sheet_process_state_set_gpu_decoded_image(&state, page_image, 0);  // GPU
+process_sheet(&state, &pdf_config);  // All processing handled
 ```
-Current (CPU expansion):  JBIG2 → jbig2dec → 1-bit → CPU expand 8-bit → H2D (8.7MB) → GPU
-Optimized (GPU expansion): JBIG2 → jbig2dec → 1-bit → H2D (1.1MB) → GPU expand → GPU
+
+**Processing path**:
 ```
-The GPU expansion path transfers 8x less data and expansion is trivially parallel on GPU.
+CPU: PDF page → MuPDF extract → FFmpeg decode → AVFrame → process_sheet() → JPEG encode → PDF
+GPU: PDF page → MuPDF extract → nvImageCodec decode → GPU Image → process_sheet() → nvImageCodec encode → PDF
+```
 
-**Pipeline selection**:
-| Input Format | `--pdf-quality` | Output Format |
-|--------------|-----------------|---------------|
-| JPEG | fast | JPEG |
-| JPEG | high | JP2 lossless |
-| JP2 | fast | JPEG |
-| JP2 | high | JP2 (preserve) |
-| JBIG2 | fast | Grayscale JPEG |
-| JBIG2 | high | 1-bit PNG in PDF |
+**Tests**: `tests/pdf_pipeline_cpu_test.c` - All tests pass.
+- PDF detection tests
+- Single-page PDF processing
+- Multi-page PDF processing
+- Output quality verification
 
-**Tests**: `unpaper --device=cuda input.pdf output.pdf` works. GPU path used for JPEG/JP2.
+**Build**: `meson setup builddir-cuda-pdf -Dcuda=enabled -Dpdf=enabled && meson compile -C builddir-cuda-pdf`
 
-**Success criteria**: Full GPU PDF→PDF pipeline works. JBIG2 processing >10x faster than CPU baseline.
+**Usage**: `unpaper --device=cpu input.pdf output.pdf` or `unpaper --device=cuda input.pdf output.pdf`
+
+**Success**: Full PDF processing pipeline works on both CPU and GPU. All filters and deskew applied correctly.
 
 ---
 

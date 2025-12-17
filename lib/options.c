@@ -10,6 +10,9 @@
 #include <string.h>
 #include <strings.h>
 
+#include "imageprocess/deskew.h"
+#include "imageprocess/filters.h"
+#include "imageprocess/masks.h"
 #include "imageprocess/pixel.h"
 #include "lib/options.h"
 
@@ -32,6 +35,10 @@ void options_init(Options *o) {
       .batch_progress = false,
       .cuda_streams = 0, // 0 = auto-detect
       .jpeg_quality = 0, // 0 = use default (85)
+
+      // PDF processing defaults
+      .pdf_quality_mode = PDF_QUALITY_FAST, // JPEG output (faster)
+      .pdf_render_dpi = 300,                // Default render DPI
 
       .layout = LAYOUT_SINGLE,
       .start_sheet = 1,
@@ -97,6 +104,71 @@ void options_init(Options *o) {
       .interpolate_type = INTERP_CUBIC,
       .noisefilter_intensity = 4,
   };
+}
+
+void options_init_filter_defaults(Options *o, Rectangle *blackfilter_exclude) {
+  // Initialize blackfilter parameters with defaults
+  validate_blackfilter_parameters(&o->blackfilter_parameters,
+                                  (RectangleSize){20, 20}, // scan_size
+                                  (Delta){5, 5},           // scan_step
+                                  500, 500,                // scan_depth h/v
+                                  DIRECTION_BOTH,          // scan_direction
+                                  0.95f,                   // threshold
+                                  20,                      // intensity
+                                  0,                       // exclusions_count
+                                  blackfilter_exclude);    // exclusions array
+
+  // Initialize blurfilter parameters with defaults
+  validate_blurfilter_parameters(&o->blurfilter_parameters,
+                                 (RectangleSize){100, 100}, // scan_size
+                                 (Delta){50, 50},           // scan_step
+                                 0.01f);                    // intensity
+
+  // Initialize grayfilter parameters with defaults
+  validate_grayfilter_parameters(&o->grayfilter_parameters,
+                                 (RectangleSize){50, 50}, // scan_size
+                                 (Delta){20, 20},         // scan_step
+                                 0.5f);                   // threshold
+
+  // Initialize deskew parameters with defaults
+  Edges deskew_edges = {
+      .left = true, .top = false, .right = true, .bottom = false};
+  validate_deskew_parameters(&o->deskew_parameters,
+                             5.0f,          // scan_range
+                             0.1f,          // scan_step
+                             1.0f,          // scan_deviation
+                             1500,          // scan_size
+                             0.5f,          // scan_depth
+                             deskew_edges); // scan_edges
+
+  // Initialize mask detection parameters with defaults
+  int32_t mask_depth[2] = {-1, -1};
+  float mask_threshold[2] = {0.1f, 0.1f};
+  int mask_minimum[2] = {100, 100};
+  int mask_maximum[2] = {-1, -1};
+  validate_mask_detection_parameters(&o->mask_detection_parameters,
+                                     DIRECTION_HORIZONTAL,    // scan_direction
+                                     (RectangleSize){50, 50}, // scan_size
+                                     mask_depth,              // scan_depth
+                                     (Delta){5, 5},           // scan_step
+                                     mask_threshold,          // scan_threshold
+                                     mask_minimum,            // scan_minimum
+                                     mask_maximum);           // scan_maximum
+
+  // Initialize mask alignment parameters with defaults (center - no alignment)
+  Edges no_align = {
+      .left = false, .top = false, .right = false, .bottom = false};
+  validate_mask_alignment_parameters(&o->mask_alignment_parameters,
+                                     no_align,       // align edges
+                                     (Delta){0, 0}); // margin
+
+  // Initialize border scan parameters with defaults
+  int32_t border_threshold[2] = {5, 5};
+  validate_border_scan_parameters(&o->border_scan_parameters,
+                                  DIRECTION_VERTICAL,    // scan_direction
+                                  (RectangleSize){5, 5}, // scan_size
+                                  (Delta){5, 5},         // scan_step
+                                  border_threshold);     // scan_threshold
 }
 
 bool parse_rectangle(const char *str, Rectangle *rect) {

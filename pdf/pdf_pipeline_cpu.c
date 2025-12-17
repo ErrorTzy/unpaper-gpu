@@ -4,16 +4,13 @@
 
 #include "pdf_pipeline_cpu.h"
 
-#include "imageprocess/blit.h"
-#include "imageprocess/deskew.h"
-#include "imageprocess/filters.h"
+#include "imageprocess/backend.h"
 #include "imageprocess/image.h"
-#include "imageprocess/masks.h"
-#include "imageprocess/pixel.h"
 #include "lib/logging.h"
 #include "lib/perf.h"
 #include "pdf_reader.h"
 #include "pdf_writer.h"
+#include "sheet_process.h"
 
 #ifdef UNPAPER_WITH_JBIG2
 #include "lib/jbig2_decode.h"
@@ -26,6 +23,7 @@
 #include <libavutil/imgutils.h>
 #include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
+#include <libswscale/swscale.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,13 +38,11 @@ bool pdf_pipeline_is_pdf(const char *filename) {
   return pdf_is_pdf_file(filename);
 }
 
-// Decode JBIG2 image using jbig2dec library
-// Returns an allocated Image on success, EMPTY_IMAGE on failure
+// Decode JBIG2 image to AVFrame
 #ifdef UNPAPER_WITH_JBIG2
-static Image decode_jbig2_image(const PdfImage *pdf_img, Pixel background,
-                                uint8_t abs_black_threshold) {
+static AVFrame *decode_jbig2_to_frame(const PdfImage *pdf_img) {
   if (pdf_img == NULL || pdf_img->data == NULL || pdf_img->size == 0) {
-    return EMPTY_IMAGE;
+    return NULL;
   }
 
   Jbig2DecodedImage jbig2_img = {0};
@@ -54,34 +50,39 @@ static Image decode_jbig2_image(const PdfImage *pdf_img, Pixel background,
                     pdf_img->jbig2_globals_size, &jbig2_img)) {
     verboseLog(VERBOSE_MORE, "JBIG2 decode failed: %s\n",
                jbig2_get_last_error());
-    return EMPTY_IMAGE;
+    return NULL;
   }
 
-  // Create grayscale image and expand 1-bit to 8-bit
-  RectangleSize size = {.width = (int)jbig2_img.width,
-                        .height = (int)jbig2_img.height};
-  Image img = create_image(size, AV_PIX_FMT_GRAY8, false, background,
-                           abs_black_threshold);
-
-  if (img.frame == NULL) {
+  // Create grayscale AVFrame
+  AVFrame *frame = av_frame_alloc();
+  if (frame == NULL) {
     jbig2_free_image(&jbig2_img);
-    return EMPTY_IMAGE;
+    return NULL;
+  }
+
+  frame->width = (int)jbig2_img.width;
+  frame->height = (int)jbig2_img.height;
+  frame->format = AV_PIX_FMT_GRAY8;
+
+  if (av_frame_get_buffer(frame, 0) < 0) {
+    av_frame_free(&frame);
+    jbig2_free_image(&jbig2_img);
+    return NULL;
   }
 
   // Expand 1-bit to 8-bit grayscale
   // JBIG2 typically uses 1=black, 0=white (inverted from typical grayscale)
-  // So we invert during expansion to get 0=black, 255=white
-  if (!jbig2_expand_to_gray8(&jbig2_img, img.frame->data[0],
-                             (size_t)img.frame->linesize[0], true)) {
+  if (!jbig2_expand_to_gray8(&jbig2_img, frame->data[0],
+                             (size_t)frame->linesize[0], true)) {
     verboseLog(VERBOSE_MORE, "JBIG2 expand failed: %s\n",
                jbig2_get_last_error());
-    free_image(&img);
+    av_frame_free(&frame);
     jbig2_free_image(&jbig2_img);
-    return EMPTY_IMAGE;
+    return NULL;
   }
 
   jbig2_free_image(&jbig2_img);
-  return img;
+  return frame;
 }
 #endif // UNPAPER_WITH_JBIG2
 
@@ -94,8 +95,6 @@ static AVFrame *decode_image_bytes(const uint8_t *data, size_t size,
   }
 
   // Only decode JPEG and PNG with FFmpeg
-  // JBIG2 is handled separately by decode_jbig2_image()
-  // Other formats (CCITT, JP2) would need specialized decoders
   if (format != PDF_IMAGE_JPEG && format != PDF_IMAGE_PNG &&
       format != PDF_IMAGE_FLATE) {
     return NULL;
@@ -189,155 +188,63 @@ static AVFrame *decode_image_bytes(const uint8_t *data, size_t size,
   if (ret < 0) {
     av_frame_free(&frame);
     frame = NULL;
-    goto cleanup;
   }
 
 cleanup:
-  av_packet_free(&pkt);
-  avcodec_free_context(&codec_ctx);
+  if (pkt) {
+    av_packet_free(&pkt);
+  }
+  if (codec_ctx) {
+    avcodec_free_context(&codec_ctx);
+  }
   if (fmt_ctx) {
-    // Note: avformat_close_input will free avio_ctx_buffer via avio_ctx
     avformat_close_input(&fmt_ctx);
   }
   if (avio_ctx) {
-    av_freep(&avio_ctx->buffer);
     avio_context_free(&avio_ctx);
   }
 
   return frame;
 }
 
-// Create an Image from an AVFrame
-static Image image_from_frame(AVFrame *frame, Pixel background,
-                              uint8_t abs_black_threshold) {
-  if (frame == NULL) {
-    return EMPTY_IMAGE;
+// Render page to AVFrame
+static AVFrame *render_page_to_frame(PdfDocument *doc, int page_idx, int dpi) {
+  int width = 0, height = 0, stride = 0;
+  uint8_t *pixels =
+      pdf_render_page(doc, page_idx, dpi, &width, &height, &stride);
+  if (!pixels) {
+    return NULL;
   }
 
-  RectangleSize size = {.width = frame->width, .height = frame->height};
-  Image img;
-
-  switch (frame->format) {
-  case AV_PIX_FMT_Y400A:
-  case AV_PIX_FMT_GRAY8:
-  case AV_PIX_FMT_RGB24:
-  case AV_PIX_FMT_MONOBLACK:
-  case AV_PIX_FMT_MONOWHITE:
-    img = create_image(size, frame->format, false, background,
-                       abs_black_threshold);
-    av_frame_free(&img.frame);
-    img.frame = av_frame_clone(frame);
-    break;
-
-  case AV_PIX_FMT_PAL8: {
-    // Convert palette to RGB24
-    img = create_image(size, AV_PIX_FMT_RGB24, false, background,
-                       abs_black_threshold);
-    const uint32_t *palette = (const uint32_t *)frame->data[1];
-    for (int y = 0; y < frame->height; y++) {
-      for (int x = 0; x < frame->width; x++) {
-        const uint8_t idx = frame->data[0][y * frame->linesize[0] + x];
-        set_pixel(img, (Point){x, y}, pixel_from_value(palette[idx]));
-      }
-    }
-  } break;
-
-  case AV_PIX_FMT_YUV420P:
-  case AV_PIX_FMT_YUVJ420P:
-  case AV_PIX_FMT_YUV422P:
-  case AV_PIX_FMT_YUVJ422P:
-  case AV_PIX_FMT_YUV444P:
-  case AV_PIX_FMT_YUVJ444P: {
-    // Convert YUV to RGB24 manually
-    img = create_image(size, AV_PIX_FMT_RGB24, false, background,
-                       abs_black_threshold);
-
-    // Determine subsampling
-    int ss_h = 1, ss_v = 1;
-    if (frame->format == AV_PIX_FMT_YUV420P ||
-        frame->format == AV_PIX_FMT_YUVJ420P) {
-      ss_h = 2;
-      ss_v = 2;
-    } else if (frame->format == AV_PIX_FMT_YUV422P ||
-               frame->format == AV_PIX_FMT_YUVJ422P) {
-      ss_h = 2;
-      ss_v = 1;
-    }
-
-    for (int y = 0; y < frame->height; y++) {
-      for (int x = 0; x < frame->width; x++) {
-        int Y = frame->data[0][y * frame->linesize[0] + x];
-        int U = frame->data[1][(y / ss_v) * frame->linesize[1] + (x / ss_h)];
-        int V = frame->data[2][(y / ss_v) * frame->linesize[2] + (x / ss_h)];
-
-        // YUV to RGB conversion (BT.601)
-        int C = Y - 16;
-        int D = U - 128;
-        int E = V - 128;
-
-        int R = (298 * C + 409 * E + 128) >> 8;
-        int G = (298 * C - 100 * D - 208 * E + 128) >> 8;
-        int B = (298 * C + 516 * D + 128) >> 8;
-
-        // Clamp
-        if (R < 0)
-          R = 0;
-        if (R > 255)
-          R = 255;
-        if (G < 0)
-          G = 0;
-        if (G > 255)
-          G = 255;
-        if (B < 0)
-          B = 0;
-        if (B > 255)
-          B = 255;
-
-        uint8_t *dst = img.frame->data[0] + y * img.frame->linesize[0] + x * 3;
-        dst[0] = (uint8_t)R;
-        dst[1] = (uint8_t)G;
-        dst[2] = (uint8_t)B;
-      }
-    }
-  } break;
-
-  default:
-    // Unsupported format
-    return EMPTY_IMAGE;
+  AVFrame *frame = av_frame_alloc();
+  if (!frame) {
+    free(pixels);
+    return NULL;
   }
 
-  return img;
-}
+  frame->width = width;
+  frame->height = height;
+  frame->format = AV_PIX_FMT_RGB24;
 
-// Create an Image from raw RGB/gray pixels
-static Image image_from_pixels(const uint8_t *pixels, int width, int height,
-                               int stride, int components, Pixel background,
-                               uint8_t abs_black_threshold) {
-  if (pixels == NULL || width <= 0 || height <= 0) {
-    return EMPTY_IMAGE;
+  if (av_frame_get_buffer(frame, 0) < 0) {
+    av_frame_free(&frame);
+    free(pixels);
+    return NULL;
   }
 
-  enum AVPixelFormat fmt =
-      (components == 1) ? AV_PIX_FMT_GRAY8 : AV_PIX_FMT_RGB24;
-  RectangleSize size = {.width = width, .height = height};
-
-  Image img = create_image(size, fmt, false, background, abs_black_threshold);
-
-  // Copy pixels
-  int bytes_per_row = width * components;
+  // Copy pixels to frame
   for (int y = 0; y < height; y++) {
-    memcpy(img.frame->data[0] + y * img.frame->linesize[0], pixels + y * stride,
-           bytes_per_row);
+    memcpy(frame->data[0] + y * frame->linesize[0], pixels + y * stride,
+           width * 3);
   }
 
-  return img;
+  free(pixels);
+  return frame;
 }
 
-// Encode an image to JPEG using FFmpeg
-// Returns allocated buffer and size, caller must free
-static uint8_t *encode_image_jpeg(const Image *img, int quality,
-                                  size_t *out_len) {
-  if (img == NULL || img->frame == NULL || out_len == NULL) {
+// Encode Image to JPEG bytes
+static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
+  if (image == NULL || image->frame == NULL || out_len == NULL) {
     return NULL;
   }
 
@@ -353,130 +260,80 @@ static uint8_t *encode_image_jpeg(const Image *img, int quality,
     return NULL;
   }
 
-  // Determine input format and set encoder parameters
-  ctx->width = img->frame->width;
-  ctx->height = img->frame->height;
-  ctx->time_base = (AVRational){1, 1};
+  ctx->width = image->frame->width;
+  ctx->height = image->frame->height;
+  ctx->time_base = (AVRational){1, 25};
+  ctx->pix_fmt = AV_PIX_FMT_YUVJ420P;
 
-  // MJPEG encoder requires YUVJ420P or YUVJ444P
-  // We'll convert from RGB24 or GRAY8
-  if (img->frame->format == AV_PIX_FMT_GRAY8) {
-    ctx->pix_fmt = AV_PIX_FMT_YUVJ420P;
-  } else {
-    ctx->pix_fmt = AV_PIX_FMT_YUVJ420P;
-  }
-
-  // Set quality (1-100 -> qmin/qmax mapping)
-  // FFmpeg MJPEG uses 2-31 qscale, lower = better
-  int qscale = 31 - (quality * 29 / 100);
-  if (qscale < 2)
-    qscale = 2;
-  if (qscale > 31)
-    qscale = 31;
-
-  av_opt_set_int(ctx->priv_data, "qscale", qscale, 0);
+  // Set quality
+  ctx->qmin = 1;
+  ctx->qmax = 31;
+  int q = 31 - (quality * 30 / 100);
+  if (q < 1)
+    q = 1;
+  if (q > 31)
+    q = 31;
+  ctx->global_quality = q * FF_QP2LAMBDA;
   ctx->flags |= AV_CODEC_FLAG_QSCALE;
-  ctx->global_quality = FF_QP2LAMBDA * qscale;
 
-  int ret = avcodec_open2(ctx, codec, NULL);
-  if (ret < 0) {
+  if (avcodec_open2(ctx, codec, NULL) < 0) {
     avcodec_free_context(&ctx);
     return NULL;
   }
 
-  // Create frame for encoding (convert format if needed)
-  AVFrame *enc_frame = av_frame_alloc();
-  if (!enc_frame) {
-    avcodec_free_context(&ctx);
-    return NULL;
+  // Convert to YUV if needed
+  AVFrame *yuv_frame = NULL;
+  struct SwsContext *sws_ctx = NULL;
+
+  if (image->frame->format != AV_PIX_FMT_YUVJ420P) {
+    yuv_frame = av_frame_alloc();
+    if (!yuv_frame) {
+      avcodec_free_context(&ctx);
+      return NULL;
+    }
+    yuv_frame->width = ctx->width;
+    yuv_frame->height = ctx->height;
+    yuv_frame->format = AV_PIX_FMT_YUVJ420P;
+
+    if (av_frame_get_buffer(yuv_frame, 0) < 0) {
+      av_frame_free(&yuv_frame);
+      avcodec_free_context(&ctx);
+      return NULL;
+    }
+
+    sws_ctx =
+        sws_getContext(image->frame->width, image->frame->height,
+                       image->frame->format, ctx->width, ctx->height,
+                       AV_PIX_FMT_YUVJ420P, SWS_BILINEAR, NULL, NULL, NULL);
+
+    if (!sws_ctx) {
+      av_frame_free(&yuv_frame);
+      avcodec_free_context(&ctx);
+      return NULL;
+    }
+
+    sws_scale(sws_ctx, (const uint8_t *const *)image->frame->data,
+              image->frame->linesize, 0, image->frame->height, yuv_frame->data,
+              yuv_frame->linesize);
+
+    sws_freeContext(sws_ctx);
   }
 
-  enc_frame->width = ctx->width;
-  enc_frame->height = ctx->height;
-  enc_frame->format = ctx->pix_fmt;
+  AVFrame *enc_frame = yuv_frame ? yuv_frame : image->frame;
 
-  ret = av_frame_get_buffer(enc_frame, 0);
-  if (ret < 0) {
-    av_frame_free(&enc_frame);
-    avcodec_free_context(&ctx);
-    return NULL;
-  }
-
-  // Convert input to YUVJ420P
-  if (img->frame->format == AV_PIX_FMT_GRAY8) {
-    // Grayscale -> YUVJ420P: Y = gray, U = V = 128
-    for (int y = 0; y < ctx->height; y++) {
-      memcpy(enc_frame->data[0] + y * enc_frame->linesize[0],
-             img->frame->data[0] + y * img->frame->linesize[0], ctx->width);
-    }
-    // Fill UV with 128 (neutral gray)
-    int uv_height = (ctx->height + 1) / 2;
-    int uv_width = (ctx->width + 1) / 2;
-    for (int y = 0; y < uv_height; y++) {
-      memset(enc_frame->data[1] + y * enc_frame->linesize[1], 128, uv_width);
-      memset(enc_frame->data[2] + y * enc_frame->linesize[2], 128, uv_width);
-    }
-  } else if (img->frame->format == AV_PIX_FMT_RGB24) {
-    // RGB24 -> YUVJ420P conversion
-    for (int y = 0; y < ctx->height; y++) {
-      const uint8_t *src = img->frame->data[0] + y * img->frame->linesize[0];
-      uint8_t *dst_y = enc_frame->data[0] + y * enc_frame->linesize[0];
-      for (int x = 0; x < ctx->width; x++) {
-        int R = src[x * 3 + 0];
-        int G = src[x * 3 + 1];
-        int B = src[x * 3 + 2];
-        // BT.601 full-range
-        dst_y[x] = (uint8_t)((66 * R + 129 * G + 25 * B + 128) / 256 + 16);
-      }
-    }
-    // UV planes (subsampled)
-    int uv_height = (ctx->height + 1) / 2;
-    int uv_width = (ctx->width + 1) / 2;
-    for (int y = 0; y < uv_height; y++) {
-      const uint8_t *src0 =
-          img->frame->data[0] + (y * 2) * img->frame->linesize[0];
-      const uint8_t *src1 =
-          (y * 2 + 1 < ctx->height)
-              ? img->frame->data[0] + (y * 2 + 1) * img->frame->linesize[0]
-              : src0;
-      uint8_t *dst_u = enc_frame->data[1] + y * enc_frame->linesize[1];
-      uint8_t *dst_v = enc_frame->data[2] + y * enc_frame->linesize[2];
-      for (int x = 0; x < uv_width; x++) {
-        // Average 2x2 block
-        int x0 = x * 2;
-        int x1 = (x * 2 + 1 < ctx->width) ? x * 2 + 1 : x0;
-        int R = (src0[x0 * 3 + 0] + src0[x1 * 3 + 0] + src1[x0 * 3 + 0] +
-                 src1[x1 * 3 + 0] + 2) /
-                4;
-        int G = (src0[x0 * 3 + 1] + src0[x1 * 3 + 1] + src1[x0 * 3 + 1] +
-                 src1[x1 * 3 + 1] + 2) /
-                4;
-        int B = (src0[x0 * 3 + 2] + src0[x1 * 3 + 2] + src1[x0 * 3 + 2] +
-                 src1[x1 * 3 + 2] + 2) /
-                4;
-        dst_u[x] = (uint8_t)((-38 * R - 74 * G + 112 * B + 128) / 256 + 128);
-        dst_v[x] = (uint8_t)((112 * R - 94 * G - 18 * B + 128) / 256 + 128);
-      }
-    }
-  } else {
-    // Unsupported input format
-    av_frame_free(&enc_frame);
-    avcodec_free_context(&ctx);
-    return NULL;
-  }
-
-  // Encode
   AVPacket *pkt = av_packet_alloc();
   if (!pkt) {
-    av_frame_free(&enc_frame);
+    if (yuv_frame)
+      av_frame_free(&yuv_frame);
     avcodec_free_context(&ctx);
     return NULL;
   }
 
-  ret = avcodec_send_frame(ctx, enc_frame);
+  int ret = avcodec_send_frame(ctx, enc_frame);
   if (ret < 0) {
     av_packet_free(&pkt);
-    av_frame_free(&enc_frame);
+    if (yuv_frame)
+      av_frame_free(&yuv_frame);
     avcodec_free_context(&ctx);
     return NULL;
   }
@@ -484,23 +341,25 @@ static uint8_t *encode_image_jpeg(const Image *img, int quality,
   ret = avcodec_receive_packet(ctx, pkt);
   if (ret < 0) {
     av_packet_free(&pkt);
-    av_frame_free(&enc_frame);
+    if (yuv_frame)
+      av_frame_free(&yuv_frame);
     avcodec_free_context(&ctx);
     return NULL;
   }
 
-  // Copy output
-  uint8_t *out = malloc(pkt->size);
-  if (out) {
-    memcpy(out, pkt->data, pkt->size);
+  // Copy packet data
+  uint8_t *jpeg_data = malloc(pkt->size);
+  if (jpeg_data) {
+    memcpy(jpeg_data, pkt->data, pkt->size);
     *out_len = pkt->size;
   }
 
   av_packet_free(&pkt);
-  av_frame_free(&enc_frame);
+  if (yuv_frame)
+    av_frame_free(&yuv_frame);
   avcodec_free_context(&ctx);
 
-  return out;
+  return jpeg_data;
 }
 
 int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
@@ -514,6 +373,9 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
 
   verboseLog(VERBOSE_NORMAL, "PDF pipeline: %s -> %s\n", input_path,
              output_path);
+
+  // Select CPU backend
+  image_backend_select(UNPAPER_DEVICE_CPU);
 
   // Open input PDF
   PdfDocument *doc = pdf_open(input_path);
@@ -547,25 +409,34 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
 
   pdf_free_metadata(&meta);
 
+  // Create modified options with write_output = false
+  // so process_sheet() doesn't try to save files
+  Options pdf_options = *options;
+  pdf_options.write_output = false;
+
+  // Create config with modified options
+  SheetProcessConfig pdf_config = *config;
+  pdf_config.options = &pdf_options;
+
   int failed_pages = 0;
   PerfRecorder perf;
 
+  int quality = (options->jpeg_quality > 0) ? options->jpeg_quality
+                                            : PDF_OUTPUT_JPEG_QUALITY;
+
   // Process each page
   for (int page_idx = 0; page_idx < page_count; page_idx++) {
-    perf_recorder_init(&perf, options->perf,
-                       options->device == UNPAPER_DEVICE_CUDA);
+    perf_recorder_init(&perf, options->perf, false);
 
     verboseLog(VERBOSE_NORMAL, "PDF pipeline: processing page %d/%d\n",
                page_idx + 1, page_count);
 
-    Image page_image = EMPTY_IMAGE;
-    int width = 0, height = 0;
-    bool extracted = false;
+    AVFrame *page_frame = NULL;
 
-    // Stage 1: Extract or render page
+    // Stage 1: Decode page to AVFrame
     perf_stage_begin(&perf, PERF_STAGE_DECODE);
 
-    // Try to extract embedded image first (zero-copy path)
+    // Try to extract embedded image
     PdfImage pdf_img = {0};
     if (pdf_extract_page_image(doc, page_idx, &pdf_img)) {
       verboseLog(VERBOSE_MORE, "PDF pipeline: extracted %s image %dx%d\n",
@@ -573,56 +444,42 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
                  pdf_img.height);
 
 #ifdef UNPAPER_WITH_JBIG2
-      // Handle JBIG2 images with dedicated decoder
       if (pdf_img.format == PDF_IMAGE_JBIG2) {
-        page_image = decode_jbig2_image(&pdf_img, options->sheet_background,
-                                        options->abs_black_threshold);
-        if (page_image.frame != NULL) {
-          width = page_image.frame->width;
-          height = page_image.frame->height;
-          extracted = true;
-          verboseLog(VERBOSE_MORE,
-                     "PDF pipeline: decoded JBIG2 B&W image to grayscale\n");
+        page_frame = decode_jbig2_to_frame(&pdf_img);
+        if (page_frame) {
+          verboseLog(VERBOSE_MORE, "PDF pipeline: JBIG2 decoded %dx%d\n",
+                     page_frame->width, page_frame->height);
         }
       } else
-#endif // UNPAPER_WITH_JBIG2
-      {
-        // Try to decode with FFmpeg (JPEG, PNG, etc.)
-        AVFrame *frame =
+#endif
+          if (pdf_img.format == PDF_IMAGE_JPEG ||
+              pdf_img.format == PDF_IMAGE_PNG ||
+              pdf_img.format == PDF_IMAGE_FLATE) {
+        page_frame =
             decode_image_bytes(pdf_img.data, pdf_img.size, pdf_img.format);
-        if (frame) {
-          page_image = image_from_frame(frame, options->sheet_background,
-                                        options->abs_black_threshold);
-          av_frame_free(&frame);
-          if (page_image.frame != NULL) {
-            width = page_image.frame->width;
-            height = page_image.frame->height;
-            extracted = true;
-          }
+        if (page_frame) {
+          verboseLog(VERBOSE_MORE, "PDF pipeline: decoded %s %dx%d\n",
+                     pdf_image_format_name(pdf_img.format), page_frame->width,
+                     page_frame->height);
         }
       }
+
       pdf_free_image(&pdf_img);
     }
 
     // Fall back to rendering if extraction failed
-    if (!extracted) {
-      int stride = 0;
-      uint8_t *pixels = pdf_render_page(doc, page_idx, PDF_RENDER_DPI, &width,
-                                        &height, &stride);
-      if (pixels) {
+    if (!page_frame) {
+      page_frame = render_page_to_frame(doc, page_idx, PDF_RENDER_DPI);
+      if (page_frame) {
         verboseLog(VERBOSE_MORE,
                    "PDF pipeline: rendered page at %d DPI (%dx%d)\n",
-                   PDF_RENDER_DPI, width, height);
-        page_image = image_from_pixels(pixels, width, height, stride, 3,
-                                       options->sheet_background,
-                                       options->abs_black_threshold);
-        free(pixels);
+                   PDF_RENDER_DPI, page_frame->width, page_frame->height);
       }
     }
 
     perf_stage_end(&perf, PERF_STAGE_DECODE);
 
-    if (page_image.frame == NULL) {
+    if (!page_frame) {
       verboseLog(VERBOSE_NORMAL,
                  "PDF pipeline: failed to get image for page %d\n",
                  page_idx + 1);
@@ -630,97 +487,43 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
       continue;
     }
 
-    // Stage 2: Process the image using existing sheet processing
-    // We create a BatchJob-like structure for process_sheet
+    // Stage 2: Process using process_sheet()
     BatchJob job = {0};
     job.sheet_nr = page_idx + 1;
     job.input_count = 1;
-    job.output_count = 1;
-    job.input_files[0] = NULL;  // We're passing the image directly
-    job.output_files[0] = NULL; // We'll encode after processing
+    job.output_count = 0; // No file output
+    job.input_files[0] = NULL;
 
     SheetProcessState state;
-    sheet_process_state_init(&state, config, &job);
+    sheet_process_state_init(&state, &pdf_config, &job);
 
-    // Transfer ownership of the page image to the state
-    // The sheet processing expects images in state.page or state.sheet
-    state.page = page_image;
-    state.sheet = EMPTY_IMAGE;
-    state.input_size = size_of_image(page_image);
+    // Set the decoded frame - process_sheet will use it
+    sheet_process_state_set_decoded(&state, page_frame, 0);
 
-    // Create sheet from page (single-page layout)
-    state.sheet =
-        create_image(state.input_size, AV_PIX_FMT_RGB24, true,
-                     options->sheet_background, options->abs_black_threshold);
+    // Process the sheet (all filters, deskew, etc.)
+    bool process_ok = process_sheet(&state, &pdf_config);
 
-    // Copy page to sheet
-    center_image(state.page, state.sheet, POINT_ORIGIN, state.input_size);
-    free_image(&state.page);
-    state.page = EMPTY_IMAGE;
-
-    // Run the processing pipeline (filters, deskew, etc.)
-    perf_stage_begin(&state.perf, PERF_STAGE_FILTERS);
-
-    // Apply processing operations that don't require parameter initialization
-    // Note: Filters (blackfilter, blurfilter, grayfilter) are disabled by
-    // default in PDF mode because their parameters aren't initialized through
-    // command-line parsing. Use the full unpaper CLI for filter support.
-
-    // Pre-mirroring
-    if (options->pre_mirror.horizontal || options->pre_mirror.vertical) {
-      mirror(state.sheet, options->pre_mirror);
+    if (!process_ok || state.sheet.frame == NULL) {
+      verboseLog(VERBOSE_NORMAL,
+                 "PDF pipeline: processing failed for page %d\n", page_idx + 1);
+      sheet_process_state_cleanup(&state);
+      failed_pages++;
+      continue;
     }
 
-    // Pre-shifting
-    if (options->pre_shift.horizontal != 0 ||
-        options->pre_shift.vertical != 0) {
-      shift_image(&state.sheet, options->pre_shift);
-    }
-
-    // Noisefilter - only requires intensity, which is initialized by
-    // options_init
-    if (!isExcluded(state.sheet_nr, options->no_noisefilter_multi_index,
-                    options->ignore_multi_index)) {
-      noisefilter(state.sheet, options->noisefilter_intensity,
-                  options->abs_white_threshold);
-    }
-
-    // Post-mirroring
-    if (options->post_mirror.horizontal || options->post_mirror.vertical) {
-      mirror(state.sheet, options->post_mirror);
-    }
-
-    // Post-shifting
-    if (options->post_shift.horizontal != 0 ||
-        options->post_shift.vertical != 0) {
-      shift_image(&state.sheet, options->post_shift);
-    }
-
-    // Post-rotating
-    if (options->post_rotate != 0) {
-      flip_rotate_90(&state.sheet, options->post_rotate / 90);
-    }
-
-    perf_stage_end(&state.perf, PERF_STAGE_FILTERS);
-
-    // Stage 3: Encode processed image and add to output PDF
+    // Stage 3: Encode and add to output PDF
     perf_stage_begin(&perf, PERF_STAGE_ENCODE);
 
-    // Ensure image is on CPU
     image_ensure_cpu(&state.sheet);
 
     int out_width = state.sheet.frame->width;
     int out_height = state.sheet.frame->height;
 
-    // Encode to JPEG
     size_t jpeg_len = 0;
-    int quality = (options->jpeg_quality > 0) ? options->jpeg_quality
-                                              : PDF_OUTPUT_JPEG_QUALITY;
     uint8_t *jpeg_data = encode_image_jpeg(&state.sheet, quality, &jpeg_len);
 
     bool page_success = false;
     if (jpeg_data && jpeg_len > 0) {
-      // Add JPEG page to output PDF
       page_success = pdf_writer_add_page_jpeg(
           writer, jpeg_data, jpeg_len, out_width, out_height, PDF_RENDER_DPI);
       free(jpeg_data);
@@ -748,10 +551,8 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
       failed_pages++;
     }
 
-    // Cleanup
     sheet_process_state_cleanup(&state);
 
-    // Print per-page perf stats
     if (options->perf) {
       perf_recorder_print(&perf, page_idx + 1, "cpu");
     }
@@ -762,10 +563,9 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
   if (!write_success) {
     verboseLog(VERBOSE_NORMAL, "PDF pipeline: failed to save output: %s\n",
                pdf_writer_get_last_error());
-    failed_pages = page_count; // Mark all as failed
+    failed_pages = page_count;
   }
 
-  // Close input PDF
   pdf_close(doc);
 
   verboseLog(VERBOSE_NORMAL,

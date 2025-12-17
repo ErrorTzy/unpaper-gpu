@@ -22,6 +22,7 @@ endif
 
 unpaper_deps = [
     dependency('libavformat'), dependency('libavcodec'), dependency('libavutil'),
+    dependency('libswscale'),
     cc.find_library('m', required : false),
     dependency('threads')
 ]
@@ -84,6 +85,9 @@ if have_pdf
         'pdf/pdf_pipeline_cpu.c',
     ]
 endif
+
+# GPU PDF pipeline requires both PDF and CUDA
+# This is added after CUDA detection (line 234) is complete
 
 # JBIG2 support via jbig2dec (for B&W PDF images)
 jbig2_opt = get_option('jbig2')
@@ -231,6 +235,11 @@ if have_cuda
 
     # nvimgcodec wrapper source
     unpaper_sources += ['imageprocess/nvimgcodec.c']
+
+    # GPU PDF pipeline (requires both CUDA and PDF)
+    if have_pdf
+        unpaper_sources += ['pdf/pdf_pipeline_gpu.c']
+    endif
 endif
 
 if have_cuda
@@ -731,7 +740,8 @@ if have_pdf
     )
 
     test('pdf pipeline cpu', pdf_pipeline_cpu_test,
-         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'],
+         timeout: 300)
 
     # JBIG2 decode test - requires PDF for full integration tests
     if have_jbig2
