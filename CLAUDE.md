@@ -551,38 +551,29 @@ int nvimgcodec_decode_batch(
 
 ---
 
-### PR 5.5: Migrate decode_queue.c and Remove Redundant Fallback
+### PR 5.5: Migrate decode_queue.c and Remove Redundant Fallback [COMPLETE]
 
-**Status**: Not started.
+**Status**: Implemented and tested.
 
-**Why**: Currently has redundant manual fallback to nvjpeg that duplicates nvimgcodec's internal handling.
+**Why**: Had redundant manual fallback to nvjpeg that duplicates nvimgcodec's internal handling.
 
-**Current** (decode_queue.c):
-```c
-#include "imageprocess/nvimgcodec.h"
-#include "imageprocess/nvjpeg_decode.h"  // REMOVE
-...
-if (!nvimgcodec_decode(...)) {
-    goto legacy_nvjpeg;  // REMOVE this fallback
-}
-...
-legacy_nvjpeg:  // REMOVE ~66 lines
-    nvjpeg_decode_to_gpu(...);
-```
-
-**After**:
-```c
-#include "imageprocess/nvimgcodec.h"
-// No nvjpeg include, no fallback
-if (!nvimgcodec_decode(...)) {
-    // Fall back to CPU (FFmpeg), not nvjpeg
-}
-```
+**Implementation**:
+- Removed `#include "imageprocess/nvjpeg_decode.h"` from decode_queue.c
+- Removed `goto legacy_nvjpeg` fallback logic (~10 lines)
+- Removed `legacy_nvjpeg:` label and ~66 lines of fallback code
+- Replaced `nvjpeg_release_completion_event()` with `nvimgcodec_release_completion_event()`
+- Updated unpaper.c to use nvimgcodec for decode context:
+  - Changed `#include "imageprocess/nvjpeg_decode.h"` to `#include "imageprocess/nvimgcodec.h"`
+  - Replaced `nvjpeg_context_init()` with `nvimgcodec_init()`
+  - Replaced `nvjpeg_context_cleanup()` with `nvimgcodec_cleanup()`
+  - Replaced `nvjpeg_print_stats()` with `nvimgcodec_print_stats()`
+  - Removed batch stats printing (nvimgcodec handles stats internally)
 
 **Files changed**:
-- `lib/decode_queue.c` - Remove ~70 lines of redundant fallback
+- `lib/decode_queue.c` - Removed ~70 lines of redundant fallback
+- `unpaper.c` - Updated to use nvimgcodec for decode initialization/cleanup/stats
 
-**Success criteria**: decode_queue.c uses only nvimgcodec. All tests pass.
+**Success**: decode_queue.c uses only nvimgcodec. All 17 CUDA tests pass.
 
 ---
 

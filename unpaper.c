@@ -29,7 +29,7 @@
 #include "imageprocess/image.h"
 #include "imageprocess/interpolate.h"
 #include "imageprocess/masks.h"
-#include "imageprocess/nvjpeg_decode.h"
+#include "imageprocess/nvimgcodec.h"
 #include "imageprocess/nvjpeg_encode.h"
 #include "imageprocess/opencv_bridge.h"
 #include "imageprocess/pixel.h"
@@ -1547,16 +1547,16 @@ int main(int argc, char *argv[]) {
 #ifdef UNPAPER_WITH_CUDA
           // Enable GPU decode for JPEG files when using CUDA
           if (options.device == UNPAPER_DEVICE_CUDA) {
-            int nvjpeg_streams =
+            int nvimgcodec_streams =
                 num_decode_threads > 1 ? num_decode_threads : 4;
-            if (nvjpeg_context_init(nvjpeg_streams)) {
+            if (nvimgcodec_init(nvimgcodec_streams)) {
               decode_queue_enable_gpu_decode(decode_queue, true);
               verboseLog(VERBOSE_NORMAL,
-                         "nvJPEG GPU decode: enabled (%d streams)\n",
-                         nvjpeg_streams);
+                         "nvImageCodec GPU decode: enabled (%d streams)\n",
+                         nvimgcodec_streams);
             } else {
               verboseLog(VERBOSE_NORMAL,
-                         "nvJPEG GPU decode: unavailable, using CPU decode\n");
+                         "nvImageCodec GPU decode: unavailable, using CPU decode\n");
             }
           }
 #endif
@@ -1698,26 +1698,10 @@ int main(int argc, char *argv[]) {
         decode_queue_destroy(decode_queue);
       }
 #ifdef UNPAPER_WITH_CUDA
-      // Cleanup nvJPEG context
+      // Print nvImageCodec decode statistics
       if (options.perf) {
-        nvjpeg_print_stats();
-        // Print batched decode stats if available
-        NvJpegBatchStats batch_stats = nvjpeg_batched_get_stats();
-        if (batch_stats.total_batch_calls > 0) {
-          fprintf(stderr,
-                  "nvJPEG Batched Decode Statistics:\n"
-                  "  Batch API calls: %zu\n"
-                  "  Total images decoded: %zu\n"
-                  "  Failed decodes: %zu\n"
-                  "  Max batch size used: %zu\n",
-                  batch_stats.total_batch_calls,
-                  batch_stats.total_images_decoded, batch_stats.failed_decodes,
-                  batch_stats.max_batch_size_used);
-        }
+        nvimgcodec_print_stats();
       }
-      // NOTE: nvjpeg_context_cleanup moved below - must happen AFTER encode
-      // cleanup because nvjpeg_encode uses the shared handle from
-      // nvjpeg_context
 #endif
 
       // Cleanup encode queue - wait for all pending encodes to complete
@@ -1739,8 +1723,8 @@ int main(int argc, char *argv[]) {
         nvjpeg_encode_cleanup();
       }
 
-      // Now cleanup nvJPEG decode context (destroys shared handle)
-      nvjpeg_context_cleanup();
+      // Cleanup nvImageCodec decode context
+      nvimgcodec_cleanup();
 #endif
 
 #ifdef UNPAPER_WITH_CUDA
