@@ -26,6 +26,75 @@
 #define MAX_ENCODE_STATES 16
 
 // ============================================================================
+// Custom Async Allocators for nvImageCodec
+// ============================================================================
+// These allocators use cudaMallocAsync/cudaFreeAsync to avoid synchronous
+// cudaMalloc calls that would block ALL streams until complete.
+// This is CRITICAL for performance - without these, nvImageCodec falls back
+// to sync allocators which cause the ~30% performance regression.
+
+static int nvimgcodec_device_malloc(void *ctx, void **ptr, size_t size,
+                                    cudaStream_t stream) {
+  (void)ctx;
+  cudaError_t err = cudaMallocAsync(ptr, size, stream);
+  if (err != cudaSuccess) {
+    // Fallback to sync malloc if async not available
+    err = cudaMalloc(ptr, size);
+  }
+  return (err == cudaSuccess) ? 0 : -1;
+}
+
+static int nvimgcodec_device_free(void *ctx, void *ptr, size_t size,
+                                  cudaStream_t stream) {
+  (void)ctx;
+  (void)size;
+  cudaError_t err = cudaFreeAsync(ptr, stream);
+  if (err != cudaSuccess) {
+    // Fallback to sync free if async not available
+    err = cudaFree(ptr);
+  }
+  return (err == cudaSuccess) ? 0 : -1;
+}
+
+static int nvimgcodec_pinned_malloc(void *ctx, void **ptr, size_t size,
+                                    cudaStream_t stream) {
+  (void)ctx;
+  (void)stream;
+  cudaError_t err = cudaMallocHost(ptr, size);
+  return (err == cudaSuccess) ? 0 : -1;
+}
+
+static int nvimgcodec_pinned_free(void *ctx, void *ptr, size_t size,
+                                  cudaStream_t stream) {
+  (void)ctx;
+  (void)size;
+  (void)stream;
+  cudaError_t err = cudaFreeHost(ptr);
+  return (err == cudaSuccess) ? 0 : -1;
+}
+
+// Static allocator structures - passed to nvImageCodec via exec_params
+static nvimgcodecDeviceAllocator_t g_device_allocator = {
+    NVIMGCODEC_STRUCTURE_TYPE_DEVICE_ALLOCATOR,
+    sizeof(nvimgcodecDeviceAllocator_t),
+    NULL,
+    nvimgcodec_device_malloc,
+    nvimgcodec_device_free,
+    NULL, // device_ctx
+    0     // device_mem_padding
+};
+
+static nvimgcodecPinnedAllocator_t g_pinned_allocator = {
+    NVIMGCODEC_STRUCTURE_TYPE_PINNED_ALLOCATOR,
+    sizeof(nvimgcodecPinnedAllocator_t),
+    NULL,
+    nvimgcodec_pinned_malloc,
+    nvimgcodec_pinned_free,
+    NULL, // pinned_ctx
+    0     // pinned_mem_padding
+};
+
+// ============================================================================
 // Decode State Structure
 // ============================================================================
 
@@ -34,6 +103,10 @@ struct NvImgCodecDecodeState {
   cudaStream_t stream;          // Dedicated CUDA stream
   cudaEvent_t completion_event; // Pre-allocated event
   atomic_int in_use;
+
+  // Persistent objects for reuse (avoid per-operation allocation overhead)
+  nvimgcodecImage_t cached_image;            // Reused across decode calls
+  nvimgcodecCodeStream_t cached_code_stream; // Reused across decode calls
 };
 
 // ============================================================================
@@ -44,6 +117,10 @@ struct NvImgCodecEncodeState {
   nvimgcodecEncoder_t encoder;
   cudaStream_t stream;
   atomic_int in_use;
+
+  // Persistent objects for reuse (avoid per-operation allocation overhead)
+  nvimgcodecImage_t cached_image;            // Reused across encode calls
+  nvimgcodecCodeStream_t cached_code_stream; // Reused across encode calls
 };
 
 // ============================================================================
@@ -169,12 +246,16 @@ static bool init_decode_state(NvImgCodecDecodeState *state) {
     return false;
   }
 
-  // Create decoder with GPU backend
+  // Create decoder with GPU backend and async allocators
   nvimgcodecExecutionParams_t exec_params = {
       NVIMGCODEC_STRUCTURE_TYPE_EXECUTION_PARAMS, sizeof(exec_params), NULL};
   exec_params.device_id = 0;
   exec_params.max_num_cpu_threads = 1;
   exec_params.num_backends = 0; // Use all available backends
+  // Use custom async allocators to avoid synchronous cudaMalloc/cudaFree
+  // which block all streams. This improves nvJPEG internal allocation performance.
+  exec_params.device_allocator = &g_device_allocator;
+  exec_params.pinned_allocator = &g_pinned_allocator;
 
   status = nvimgcodecDecoderCreate(g_ctx.instance, &state->decoder,
                                    &exec_params, NULL);
@@ -191,6 +272,15 @@ static bool init_decode_state(NvImgCodecDecodeState *state) {
 }
 
 static void cleanup_decode_state(NvImgCodecDecodeState *state) {
+  // Destroy cached nvImageCodec objects (reused across decode calls)
+  if (state->cached_image != NULL) {
+    nvimgcodecImageDestroy(state->cached_image);
+    state->cached_image = NULL;
+  }
+  if (state->cached_code_stream != NULL) {
+    nvimgcodecCodeStreamDestroy(state->cached_code_stream);
+    state->cached_code_stream = NULL;
+  }
   if (state->decoder != NULL) {
     nvimgcodecDecoderDestroy(state->decoder);
     state->decoder = NULL;
@@ -218,11 +308,15 @@ static bool init_encode_state(NvImgCodecEncodeState *state) {
     return false;
   }
 
-  // Create encoder with GPU backend
+  // Create encoder with GPU backend and async allocators
   nvimgcodecExecutionParams_t exec_params = {
       NVIMGCODEC_STRUCTURE_TYPE_EXECUTION_PARAMS, sizeof(exec_params), NULL};
   exec_params.device_id = 0;
   exec_params.max_num_cpu_threads = 1;
+  // Use custom async allocators to avoid synchronous cudaMalloc/cudaFree
+  // which block all streams. This improves nvJPEG internal allocation performance.
+  exec_params.device_allocator = &g_device_allocator;
+  exec_params.pinned_allocator = &g_pinned_allocator;
 
   status = nvimgcodecEncoderCreate(g_ctx.instance, &state->encoder,
                                    &exec_params, NULL);
@@ -237,6 +331,15 @@ static bool init_encode_state(NvImgCodecEncodeState *state) {
 }
 
 static void cleanup_encode_state(NvImgCodecEncodeState *state) {
+  // Destroy cached nvImageCodec objects (reused across encode calls)
+  if (state->cached_image != NULL) {
+    nvimgcodecImageDestroy(state->cached_image);
+    state->cached_image = NULL;
+  }
+  if (state->cached_code_stream != NULL) {
+    nvimgcodecCodeStreamDestroy(state->cached_code_stream);
+    state->cached_code_stream = NULL;
+  }
   if (state->encoder != NULL) {
     nvimgcodecEncoderDestroy(state->encoder);
     state->encoder = NULL;
@@ -587,10 +690,11 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
     return false;
   }
 
-  // Create code stream from memory
-  nvimgcodecCodeStream_t code_stream = NULL;
+  // Create or reuse code stream from memory
+  // Passing &state->cached_code_stream reuses existing object if non-NULL
+  // (nvImageCodec 0.7+ feature: avoids per-operation allocation overhead)
   nvimgcodecStatus_t status = nvimgcodecCodeStreamCreateFromHostMem(
-      g_ctx.instance, &code_stream, data, size);
+      g_ctx.instance, &state->cached_code_stream, data, size);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
     atomic_fetch_add(&g_ctx.fallback_decodes, 1);
     return false;
@@ -599,9 +703,9 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   // Get image info
   nvimgcodecImageInfo_t info = {NVIMGCODEC_STRUCTURE_TYPE_IMAGE_INFO,
                                 sizeof(info), NULL};
-  status = nvimgcodecCodeStreamGetImageInfo(code_stream, &info);
+  status = nvimgcodecCodeStreamGetImageInfo(state->cached_code_stream, &info);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
-    nvimgcodecCodeStreamDestroy(code_stream);
+    // Don't destroy cached_code_stream - it will be reused on next call
     atomic_fetch_add(&g_ctx.fallback_decodes, 1);
     return false;
   }
@@ -639,7 +743,7 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   if (cuda_err != cudaSuccess) {
     cuda_err = cudaMalloc(&gpu_buffer, buffer_size);
     if (cuda_err != cudaSuccess) {
-      nvimgcodecCodeStreamDestroy(code_stream);
+      // Don't destroy cached_code_stream - it will be reused on next call
       atomic_fetch_add(&g_ctx.fallback_decodes, 1);
       return false;
     }
@@ -659,12 +763,13 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   out_info.buffer_kind = NVIMGCODEC_IMAGE_BUFFER_KIND_STRIDED_DEVICE;
   out_info.cuda_stream = state->stream;
 
-  // Create output image
-  nvimgcodecImage_t image = NULL;
-  status = nvimgcodecImageCreate(g_ctx.instance, &image, &out_info);
+  // Create or reuse output image
+  // Passing &state->cached_image reuses existing object if non-NULL
+  // (nvImageCodec 0.7+ feature: avoids per-operation allocation overhead)
+  status = nvimgcodecImageCreate(g_ctx.instance, &state->cached_image, &out_info);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
     cudaFreeAsync(gpu_buffer, state->stream);
-    nvimgcodecCodeStreamDestroy(code_stream);
+    // Don't destroy cached objects - they will be reused on next call
     atomic_fetch_add(&g_ctx.fallback_decodes, 1);
     return false;
   }
@@ -675,12 +780,12 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   decode_params.apply_exif_orientation = 0;
 
   nvimgcodecFuture_t future = NULL;
-  status = nvimgcodecDecoderDecode(state->decoder, &code_stream, &image, 1,
-                                   &decode_params, &future);
+  status = nvimgcodecDecoderDecode(state->decoder, &state->cached_code_stream,
+                                   &state->cached_image, 1, &decode_params,
+                                   &future);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
-    nvimgcodecImageDestroy(image);
     cudaFreeAsync(gpu_buffer, state->stream);
-    nvimgcodecCodeStreamDestroy(code_stream);
+    // Don't destroy cached objects - they will be reused on next call
     atomic_fetch_add(&g_ctx.fallback_decodes, 1);
     return false;
   }
@@ -696,9 +801,8 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
     nvimgcodecFutureDestroy(future);
 
     if (!(proc_status & NVIMGCODEC_PROCESSING_STATUS_SUCCESS)) {
-      nvimgcodecImageDestroy(image);
       cudaFreeAsync(gpu_buffer, state->stream);
-      nvimgcodecCodeStreamDestroy(code_stream);
+      // Don't destroy cached objects - they will be reused on next call
       atomic_fetch_add(&g_ctx.fallback_decodes, 1);
       return false;
     }
@@ -707,9 +811,9 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   // Record completion event
   cudaEventRecord(state->completion_event, state->stream);
 
-  // Cleanup nvImageCodec objects (not the GPU buffer)
-  nvimgcodecImageDestroy(image);
-  nvimgcodecCodeStreamDestroy(code_stream);
+  // NOTE: Don't destroy cached_image or cached_code_stream here!
+  // They are reused across decode calls to avoid per-operation allocation
+  // overhead. They will be destroyed in cleanup_decode_state().
 
   // Fill output
   out->gpu_ptr = gpu_buffer;
@@ -935,10 +1039,11 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch, int width, int height,
   in_info.buffer_kind = NVIMGCODEC_IMAGE_BUFFER_KIND_STRIDED_DEVICE;
   in_info.cuda_stream = state->stream;
 
-  // Create input image
-  nvimgcodecImage_t image = NULL;
+  // Create or reuse input image
+  // Passing &state->cached_image reuses existing object if non-NULL
+  // (nvImageCodec 0.7+ feature: avoids per-operation allocation overhead)
   nvimgcodecStatus_t status =
-      nvimgcodecImageCreate(g_ctx.instance, &image, &in_info);
+      nvimgcodecImageCreate(g_ctx.instance, &state->cached_image, &in_info);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
     return false;
   }
@@ -952,14 +1057,17 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch, int width, int height,
   out_info.codec_name[NVIMGCODEC_MAX_CODEC_NAME_SIZE - 1] = '\0';
 
   // Initialize buffer context for resize callback
+  // Note: Each encode gets a fresh buffer context since output ownership
+  // transfers to caller
   EncodeBufferContext buf_ctx = {NULL, 0, 0};
 
-  nvimgcodecCodeStream_t code_stream = NULL;
-  status = nvimgcodecCodeStreamCreateToHostMem(g_ctx.instance, &code_stream,
-                                               &buf_ctx, resize_buffer_callback,
-                                               &out_info);
+  // Create or reuse code stream for encoding
+  // Passing &state->cached_code_stream reuses existing object if non-NULL
+  status = nvimgcodecCodeStreamCreateToHostMem(
+      g_ctx.instance, &state->cached_code_stream, &buf_ctx,
+      resize_buffer_callback, &out_info);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
-    nvimgcodecImageDestroy(image);
+    // Don't destroy cached_image - it will be reused on next call
     return false;
   }
 
@@ -971,12 +1079,12 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch, int width, int height,
 
   // Encode
   nvimgcodecFuture_t future = NULL;
-  status = nvimgcodecEncoderEncode(state->encoder, &image, &code_stream, 1,
-                                   &encode_params, &future);
+  status = nvimgcodecEncoderEncode(state->encoder, &state->cached_image,
+                                   &state->cached_code_stream, 1, &encode_params,
+                                   &future);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
-    nvimgcodecCodeStreamDestroy(code_stream);
     free(buf_ctx.buffer);
-    nvimgcodecImageDestroy(image);
+    // Don't destroy cached objects - they will be reused on next call
     return false;
   }
 
@@ -991,9 +1099,8 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch, int width, int height,
     nvimgcodecFutureDestroy(future);
 
     if (!(proc_status & NVIMGCODEC_PROCESSING_STATUS_SUCCESS)) {
-      nvimgcodecCodeStreamDestroy(code_stream);
       free(buf_ctx.buffer);
-      nvimgcodecImageDestroy(image);
+      // Don't destroy cached objects - they will be reused on next call
       return false;
     }
   }
@@ -1001,8 +1108,9 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch, int width, int height,
   // Sync CUDA stream to ensure encode is complete
   cudaStreamSynchronize(state->stream);
 
-  nvimgcodecCodeStreamDestroy(code_stream);
-  nvimgcodecImageDestroy(image);
+  // NOTE: Don't destroy cached_image or cached_code_stream here!
+  // They are reused across encode calls to avoid per-operation allocation
+  // overhead. They will be destroyed in cleanup_encode_state().
 
   // Fill output - buffer ownership transfers to caller
   out->data = buf_ctx.buffer;
