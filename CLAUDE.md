@@ -59,6 +59,27 @@ Requires OpenCV with CUDA modules (`cudaarithm`, `cudaimgproc`, `cudawarping`).
 Custom kernels for: mono formats, blackfilter flood-fill, rotation detection.
 Performance: ~7x speedup vs CPU (A1 benchmark).
 
+### Pipeline Auto-Selection
+
+The system automatically selects the optimal pipeline based on device and file formats:
+
+| Backend | Input Format | Output Format | Pipeline |
+|---------|--------------|---------------|----------|
+| CPU | Any | Any | FFmpeg decode → CPU → FFmpeg encode |
+| GPU | JPEG | JPEG | nvJPEG decode → GPU → nvJPEG encode (zero-copy) |
+| GPU | JPEG | non-JPEG | nvJPEG decode → GPU → D2H → FFmpeg encode |
+| GPU | non-JPEG | JPEG | FFmpeg decode → H2D → GPU → nvJPEG encode |
+| GPU | non-JPEG | non-JPEG | FFmpeg decode → H2D → GPU → D2H → FFmpeg encode |
+
+**User controls:**
+- `--device=cpu|cuda` - Backend selection
+- `--jpeg-quality=N` - JPEG output quality (1-100, default 85)
+
+**Automatic behaviors:**
+- GPU backend auto-enables nvJPEG decode for JPEG inputs
+- GPU backend auto-enables nvJPEG encode when any output is JPEG
+- Per-image decode mode is always used (faster than batched)
+
 ## Build Commands
 
 **Set PATH for meson**: `PATH="/home/scott/Documents/unpaper/.venv/bin:/usr/bin:$PATH"`
@@ -117,40 +138,99 @@ meson test -C builddir-cuda/ -v
 | PR36C | Performance validation | **completed** |
 | PR37 | nvJPEG encode | **completed** |
 | PR38 | Full GPU pipeline | **completed** |
+| PR39 | Async stream scaling | **in progress** |
 
 ---
 
-## GPU Batch Scaling Pipeline (PR36-PR38)
+## GPU Stream Scaling Status
 
-### Problem: Per-Image Decode Cannot Scale
+### Current State: Stream Scaling Does NOT Work
 
-Testing revealed that per-image `nvjpegDecode()` **cannot achieve >~1x scaling** regardless of optimizations:
+Testing revealed that **neither decode mode achieves stream scaling**:
 
-| Configuration | 1 Stream | 8 Streams | Scaling |
-|--------------|----------|-----------|---------|
-| JPEG decode-only | 1.1s | 1.1s | **~1x** |
-| JPEG full processing | 19.1s | 14.2s | **1.35x** |
+| Mode | 1 Stream | 8 Streams | Scaling | Expected |
+|------|----------|-----------|---------|----------|
+| Decode-only (batched) | 1504ms | 1517ms | **0.99x** | 4x+ |
+| Decode-only (per-image) | 1249ms | 1263ms | **0.99x** | 4x+ |
+| Full pipeline (batched) | 3030ms | 2520ms | **1.20x** | 4x+ |
+| Full pipeline (per-image) | 2757ms | 2536ms | **1.09x** | 4x+ |
 
-**Root cause**: `nvjpegDecode()` performs internal `cudaMalloc` calls that serialize across streams. Even with custom stream-ordered allocators, the GPU Huffman decode phase serializes.
+**Root cause**: `cudaStreamSynchronize()` calls after each decode/encode operation serialize GPU work on the CPU side. Even with 8 CUDA streams, only ONE stream is ever active because the CPU blocks after each operation.
 
-**Solution**: Migrate to `nvjpegDecodeBatched()` which decodes multiple images in a single API call with a single sync point.
+### Per-Image vs Batched Decode
 
-### Architecture Transformation
+**Per-image decode is recommended** (now the default):
+- 20% faster than batched (1249ms vs 1504ms for decode-only)
+- Simpler architecture, easier to optimize
+- Each worker can operate independently on its own stream
+- Amenable to async/event-based fixes
 
-**Current (per-image, serialized):**
+**Batched decode has architectural issues**:
+- Sequential phases: collect ALL files → decode ALL → distribute
+- Workers cannot start until all decoding completes
+- No overlap possible between decode and processing
+- Mutex contention when distributing decoded images
+
+### Bottleneck Locations
+
+| File | Line | Issue |
+|------|------|-------|
+| `nvjpeg_decode.c` | 1114 | `cudaStreamSynchronize()` in batch fallback path |
+| `nvjpeg_encode.c` | 566 | `cudaStreamSynchronize()` after each encode |
+| `batch_decode_queue.c` | 776-782 | Blocking wait for all files (batched mode) |
+| `decode_queue.c` | 360-374 | **Job-specific waiting** (see below) |
+
+### Key Discovery: Job-Specific Waiting Pattern
+
+The per-image decode queue (`decode_queue.c`) has event-based async tracking implemented,
+BUT workers wait for **specific images** by job_index, not any available image:
+
+```c
+// find_ready_slot() at line 360-374
+if (img->job_index == job_index && img->input_index == input_index) {
+  // Only return THIS specific image, wait otherwise
+}
 ```
-Producer 0: fread→nvjpegDecode→sync    ← SERIALIZED
-Producer 1: fread→nvjpegDecode→sync
-...
-Workers pull from decode queue
-```
 
-**Target (batch-collect-decode-distribute):**
-```
-Phase 1 - Collect: I/O threads read JPEG files in parallel
-Phase 2 - Decode:  nvjpegDecodeBatched() - ONE sync for ALL images
-Phase 3 - Distribute: Workers process decoded images in parallel
-```
+This means:
+- If Worker 0 wants job 0, but jobs 1-7 finish first, Worker 0 blocks
+- Workers cannot process jobs out of order
+- Decode parallelism is wasted due to in-order consumption
+
+**Impact**: Even with 8 parallel async decodes, workers serialize waiting for their specific jobs.
+
+### Planned Fixes for Stream Scaling (PR39)
+
+**Phase 1: Already Implemented**
+- Event-based async decode in `nvjpeg_decode_to_gpu()` (events recorded, sync deferred)
+- Event pool to avoid cudaEventCreate/Destroy overhead
+- Per-stream nvJPEG states with dedicated CUDA streams
+
+**Phase 2: Required Changes**
+
+1. **Work-stealing queue** - Workers take ANY available decoded image, not specific jobs:
+   ```c
+   // BEFORE (job-specific):
+   find_ready_slot(queue, job_index, input_index);  // Wait for THIS job
+
+   // AFTER (work-stealing):
+   find_any_ready_slot(queue);  // Take any available, sort output later
+   ```
+
+2. **Remove encode sync** - Use events in `nvjpeg_encode.c:566`
+
+3. **Pipeline overlap** - Allow decode, process, encode to run concurrently:
+   ```
+   Stream 0: [Decode A] → [Process A] → [Encode A]
+   Stream 1:    [Decode B] → [Process B] → [Encode B]
+   Stream 2:       [Decode C] → [Process C] → [Encode C]
+   ```
+
+Target: 8 streams should achieve 4x+ speedup over 1 stream.
+
+---
+
+## GPU Decode Infrastructure (PR36-PR38)
 
 ---
 
@@ -286,39 +366,36 @@ void batch_decode_queue_destroy(BatchDecodeQueue *queue);
 
 **Implementation:**
 
-1. **CLI Options** (`unpaper.c`, `lib/options.h/.c`):
-   - `--decode-mode=auto|batched|per-image`: Select decode mode
-   - `--decode-chunk-size=N`: Tune batch size (1-256, 0=default)
+1. **Pipeline Auto-Selection** (replaces manual CLI options):
+   - Per-image decode is always used (faster than batched)
+   - Batched decode code retained internally for future experimentation
 
-2. **Benchmark Tools Updated**:
-   - `tools/bench_batch.py`: `--decode-mode`, `--no-processing`, `--verify-batch-scaling`
-   - `tools/bench_a1.py`: `--decode-mode=compare` to test both modes
+2. **Benchmark Tools**:
+   - `tools/bench_batch.py`: Performance benchmarks
+   - `tools/bench_a1.py`: A1 benchmark suite
 
 **Files Modified:**
 - `lib/batch_decode_queue.h` - Added `gpu_pool_owned` field to `BatchDecodedImage`
-- `lib/batch_decode_queue.c` - Fixed pool buffer handling, queue depth logic
-- `unpaper.c` - Ensure queue_depth >= total images for batch decode
-- `tools/bench_a1.py` - Added `--decode-mode` option with compare support
-- `tools/bench_batch.py` - Decode mode comparison tests
+- `lib/batch_decode_queue.c` - Fixed pool buffer handling, queue depth logic (internal only)
+- `unpaper.c` - Simplified pipeline selection with auto-detection
 
 **Performance Results:**
 
 | Benchmark | Batched | Per-Image | Difference |
 |-----------|---------|-----------|------------|
-| A1 single image | 821ms | 863ms | **-4.8% (batched faster)** |
-| Batch 10 JPEG (8 streams) | 558ms/img | 548ms/img | ~2% (comparable) |
+| Decode-only (30 images) | 1504ms | 1249ms | **Per-image 20% faster** |
+| Full pipeline (30 images) | 2520ms | 2536ms | ~comparable |
 
 **Scaling Analysis** (with `--no-processing`):
-- nvjpegDecodeBatched takes ~95% of total time (single API call)
-- Per-image work (transfers + encode) is only ~5%
-- Adding more streams can only parallelize the 5%
-- **Conclusion**: Stream scaling limited by decode dominance, not a bug
+- Neither mode scales with additional streams (0.99x at 8 streams)
+- Root cause: `cudaStreamSynchronize()` after each decode serializes GPU work
+- Per-image is faster due to less coordination overhead
 
 **Acceptance:** ✓ All criteria met:
 - ✓ Pool buffer memory leak fixed
 - ✓ Multi-stream deadlock fixed
 - ✓ All 14 tests pass
-- ✓ No performance regression (batched is 4.8% faster on A1 benchmark)
+- ⚠ Stream scaling NOT achieved (documented as known issue)
 
 ---
 
@@ -410,7 +487,7 @@ bool encode_queue_submit_gpu(EncodeQueue *queue, void *gpu_ptr, ...);
 - Connect nvJPEG decode → processing → nvJPEG encode pipeline
 - Zero-copy path for JPEG-to-JPEG workflows
 - Fallback to CPU for non-JPEG formats
-- CLI flag: `--gpu-pipeline` for JPEG-only mode
+- **Auto-detected** based on input/output file formats
 
 **Pipeline:**
 ```
@@ -421,14 +498,13 @@ JPEG file → [nvjpegDecode] → GPU buffer → [processing] → GPU buffer → 
 
 **Implementation:**
 
-1. **CLI Options** (`lib/options.h/.c`, `unpaper.c`):
-   - `--gpu-pipeline`: Enable full GPU pipeline for JPEG-to-JPEG workflows
+1. **Auto-Detection** (`unpaper.c`):
+   - GPU backend auto-enables nvJPEG decode for JPEG inputs
+   - GPU backend auto-enables nvJPEG encode when any output is JPEG
    - `--jpeg-quality=N`: JPEG output quality (1-100, default 85)
-   - Auto-enables CUDA device and batch mode when specified
 
 2. **GPU Encode Path** (`sheet_process.c`):
    - Detects when GPU pipeline can be used:
-     - `options->gpu_pipeline` enabled
      - `encode_queue_gpu_enabled()` returns true
      - `image_is_gpu_resident()` returns true (GPU buffer has valid data)
    - Skips `image_ensure_cpu()` D2H transfer
@@ -441,25 +517,25 @@ JPEG file → [nvjpegDecode] → GPU buffer → [processing] → GPU buffer → 
    - Used by sheet_process.c for direct GPU encode submission
 
 4. **Integration** (`unpaper.c`):
-   - Initializes nvJPEG encode when GPU pipeline enabled
+   - Initializes nvJPEG encode when JPEG outputs detected
    - Configures encode queue with GPU encoding
    - Cleanup of nvJPEG encode resources on shutdown
 
 **Files Modified:**
-- `lib/options.h/.c` - Added `gpu_pipeline` and `jpeg_quality` fields
-- `unpaper.c` - CLI parsing, nvJPEG encode init/cleanup, validation
+- `lib/options.h/.c` - Added `jpeg_quality` field
+- `unpaper.c` - Auto-detection logic, nvJPEG encode init/cleanup
 - `sheet_process.c` - GPU encode path detection and submission
 - `imageprocess/image.h/.c` - GPU pointer access functions
-- `tools/bench_jpeg_pipeline.py` (new) - GPU pipeline benchmark
+- `tools/bench_jpeg_pipeline.py` - GPU pipeline benchmark
 
 **Usage:**
 ```bash
-# Full GPU pipeline with JPEG output
-./builddir-cuda/unpaper --batch --gpu-pipeline --jpeg-quality 85 \
+# Full GPU pipeline with JPEG output (auto-detected)
+./builddir-cuda/unpaper --batch --device=cuda --jpeg-quality 85 \
     input%02d.jpg output%02d.jpg
 
-# Benchmark standard vs GPU pipeline
-python tools/bench_jpeg_pipeline.py --images 50 --verify-speedup
+# Benchmark GPU pipeline
+python tools/bench_jpeg_pipeline.py --images 50
 ```
 
 **Acceptance Criteria:**
@@ -484,11 +560,12 @@ For JPEG output workflows, the GPU pipeline also provides ~10x smaller output fi
 
 ### Performance Targets Summary
 
-| PR | Component | Status | Result | Approach |
-|----|-----------|--------|--------|----------|
-| PR36B-C | Decode pipeline | **achieved** | ≥3x scaling | nvjpegDecodeBatched |
+| PR | Component | Status | Result | Notes |
+|----|-----------|--------|--------|-------|
+| PR36B-C | Decode pipeline | **partial** | ~1.2x scaling | Stream scaling blocked by cudaStreamSynchronize |
 | PR37 | Encode | **achieved** | GPU encode working | nvJPEG encoder pool |
-| PR38 | Full pipeline | **achieved** | ~6ms/img saved, 10x smaller JPEG | Zero-copy GPU path |
+| PR38 | Full pipeline | **achieved** | ~6ms/img saved | Zero-copy GPU path |
+| PR39 | Stream scaling | **TODO** | Target: 4x+ | Remove blocking syncs, use events |
 
 ---
 

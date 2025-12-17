@@ -34,7 +34,6 @@
 #include "imageprocess/opencv_bridge.h"
 #include "imageprocess/pixel.h"
 #include "lib/batch.h"
-#include "lib/batch_decode_queue.h"
 #include "lib/batch_worker.h"
 #include "lib/decode_queue.h"
 #include "lib/encode_queue.h"
@@ -63,9 +62,6 @@
           "         --batch, -B (enable batch processing mode)\n"              \
           "         --jobs=N, -j N (parallel workers, 0=auto, default: 0)\n"   \
           "         --cuda-streams=N (CUDA streams, 0=auto, default: 0)\n"     \
-          "         --decode-mode=auto|batched|per-image (default: auto)\n"    \
-          "         --decode-chunk-size=N (batch decode chunk, 0=default)\n"   \
-          "         --gpu-pipeline (JPEG-to-JPEG zero-copy GPU path)\n"        \
           "         --jpeg-quality=N (JPEG output quality, 1-100)\n"           \
           "         --progress (show batch progress)\n"                        \
           "\n"                                                                 \
@@ -77,6 +73,41 @@
           "\n"                                                                 \
           "See 'man unpaper' for options details\n"                            \
           "Report bugs at https://github.com/unpaper/unpaper/issues\n"
+
+/**
+ * Check if a filename has a JPEG extension (.jpg or .jpeg, case-insensitive).
+ */
+static bool is_jpeg_filename(const char *filename) {
+  if (!filename)
+    return false;
+  size_t len = strlen(filename);
+  if (len < 4)
+    return false;
+  const char *ext = filename + len - 4;
+  if (strcasecmp(ext, ".jpg") == 0)
+    return true;
+  if (len >= 5) {
+    ext = filename + len - 5;
+    if (strcasecmp(ext, ".jpeg") == 0)
+      return true;
+  }
+  return false;
+}
+
+/**
+ * Check if any job in the batch queue has JPEG output files.
+ * Used to auto-enable GPU encode for JPEG outputs.
+ */
+static bool batch_has_jpeg_output(BatchQueue *queue) {
+  for (size_t i = 0; i < queue->count; i++) {
+    BatchJob *job = batch_queue_get(queue, i);
+    for (int j = 0; j < job->output_count; j++) {
+      if (is_jpeg_filename(job->output_files[j]))
+        return true;
+    }
+  }
+  return false;
+}
 
 /* --- global variable ---------------------------------------------------- */
 
@@ -172,9 +203,6 @@ enum LONG_OPTION_VALUES {
   OPT_JOBS,
   OPT_PROGRESS,
   OPT_CUDA_STREAMS,
-  OPT_DECODE_MODE,
-  OPT_DECODE_CHUNK_SIZE,
-  OPT_GPU_PIPELINE,
   OPT_JPEG_QUALITY,
 };
 
@@ -435,9 +463,6 @@ int main(int argc, char *argv[]) {
           {"j", required_argument, NULL, OPT_JOBS},
           {"progress", no_argument, NULL, OPT_PROGRESS},
           {"cuda-streams", required_argument, NULL, OPT_CUDA_STREAMS},
-          {"decode-mode", required_argument, NULL, OPT_DECODE_MODE},
-          {"decode-chunk-size", required_argument, NULL, OPT_DECODE_CHUNK_SIZE},
-          {"gpu-pipeline", no_argument, NULL, OPT_GPU_PIPELINE},
           {"jpeg-quality", required_argument, NULL, OPT_JPEG_QUALITY},
           {NULL, no_argument, NULL, 0}};
 
@@ -1024,34 +1049,6 @@ int main(int argc, char *argv[]) {
         }
         break;
 
-      case OPT_DECODE_MODE:
-        if (strcasecmp(optarg, "auto") == 0) {
-          options.decode_mode = DECODE_MODE_AUTO;
-        } else if (strcasecmp(optarg, "batched") == 0) {
-          options.decode_mode = DECODE_MODE_BATCHED;
-        } else if (strcasecmp(optarg, "per-image") == 0) {
-          options.decode_mode = DECODE_MODE_PER_IMAGE;
-        } else {
-          errOutput(
-              "invalid value for --decode-mode: '%s' (use: auto, batched, "
-              "per-image)",
-              optarg);
-        }
-        break;
-
-      case OPT_DECODE_CHUNK_SIZE:
-        if (sscanf(optarg, "%d", &options.decode_chunk_size) != 1 ||
-            options.decode_chunk_size < 0 || options.decode_chunk_size > 64) {
-          errOutput("invalid value for --decode-chunk-size: '%s' (valid: 1-64, "
-                    "0=default)",
-                    optarg);
-        }
-        break;
-
-      case OPT_GPU_PIPELINE:
-        options.gpu_pipeline = true;
-        break;
-
       case OPT_JPEG_QUALITY:
         if (sscanf(optarg, "%d", &options.jpeg_quality) != 1 ||
             options.jpeg_quality < 1 || options.jpeg_quality > 100) {
@@ -1138,48 +1135,35 @@ int main(int argc, char *argv[]) {
 
   verboseLog(VERBOSE_NORMAL, WELCOME); // welcome message
 
-  // Validate decode-mode for CPU backend
-  if (options.device == UNPAPER_DEVICE_CPU &&
-      options.decode_mode != DECODE_MODE_AUTO) {
-    fprintf(stderr,
-            "WARNING: --decode-mode has no effect with CPU backend "
-            "(nvJPEG requires CUDA)\n");
-    options.decode_mode = DECODE_MODE_AUTO;
-  }
-  if (options.device == UNPAPER_DEVICE_CPU && options.decode_chunk_size > 0) {
-    fprintf(stderr,
-            "WARNING: --decode-chunk-size has no effect with CPU backend\n");
-    options.decode_chunk_size = 0;
-  }
-
-  // Validate GPU pipeline for CUDA backend
-  if (options.gpu_pipeline) {
-    if (options.device != UNPAPER_DEVICE_CUDA) {
-      fprintf(stderr,
-              "WARNING: --gpu-pipeline requires CUDA backend, enabling CUDA\n");
-      options.device = UNPAPER_DEVICE_CUDA;
-    }
-    // GPU pipeline implies batch mode for best performance
-    if (!options.batch_mode) {
-      verboseLog(VERBOSE_NORMAL,
-                 "GPU pipeline enabled, using batch mode for best "
-                 "performance\n");
-      options.batch_mode = true;
-    }
-  }
-
   image_backend_select(options.device);
+
+#ifdef UNPAPER_WITH_CUDA
+  // Auto-enable batch mode for CUDA backend with JPEG output
+  // This is required because GPU encode only works with the encode queue (batch mode)
+  if (options.device == UNPAPER_DEVICE_CUDA && !options.batch_mode) {
+    // Check if any output file is JPEG
+    // Output files start at optind + input_count
+    int first_output_idx = optind + options.input_count;
+    for (int i = first_output_idx; i < argc; i++) {
+      if (is_jpeg_filename(argv[i])) {
+        options.batch_mode = true;
+        verboseLog(VERBOSE_NORMAL,
+                   "Auto-enabled batch mode for GPU JPEG pipeline\n");
+        break;
+      }
+    }
+  }
+#endif
 
   // Initialize batch queue
   BatchQueue batch_queue;
   batch_queue_init(&batch_queue);
   batch_queue.progress = options.batch_progress;
-  // Auto-detect parallelism based on device and pipeline mode
+  // Auto-detect parallelism based on device
   if (options.batch_jobs > 0) {
     batch_queue.parallelism = options.batch_jobs;
-  } else if (options.device == UNPAPER_DEVICE_CUDA && !options.gpu_pipeline) {
-    // For CUDA with PNG/non-JPEG: use CPU cores / 3 to balance GPU compute
-    // with CPU decode/encode (benchmarked optimal for 8 CUDA streams)
+  } else if (options.device == UNPAPER_DEVICE_CUDA) {
+    // For CUDA: use optimized parallelism for GPU workloads
     batch_queue.parallelism = batch_detect_cuda_parallelism();
   } else {
     batch_queue.parallelism = batch_detect_parallelism();
@@ -1330,43 +1314,32 @@ int main(int argc, char *argv[]) {
                      (double)mem_info.free_bytes / (1024.0 * 1024.0),
                      (double)mem_info.total_bytes / (1024.0 * 1024.0));
 
-          if (options.gpu_pipeline) {
-            // GPU pipeline (JPEG-to-JPEG): scale with VRAM for maximum throughput
-            // Auto-tune pool sizes based on available GPU memory
-            // Scale: For every 3GB of VRAM, multiply parallelism tier
-            // This allows high-end GPUs (RTX 5090 24GB) to use more resources
-            size_t vram_gb = mem_info.total_bytes / (1024 * 1024 * 1024);
-            size_t tier = vram_gb / 3; // 1 tier per 3GB
-            if (tier < 1)
-              tier = 1;
-            if (tier > 8)
-              tier = 8; // Cap at 8x scaling
+          // Auto-tune pool sizes based on available GPU memory
+          // Scale: For every 3GB of VRAM, multiply parallelism tier
+          // This allows high-end GPUs (RTX 5090 24GB) to use more resources
+          size_t vram_gb = mem_info.total_bytes / (1024 * 1024 * 1024);
+          size_t tier = vram_gb / 3; // 1 tier per 3GB
+          if (tier < 1)
+            tier = 1;
+          if (tier > 8)
+            tier = 8; // Cap at 8x scaling
 
-            // Scale streams: 4 per tier (4, 8, 12, 16, 20, 24, 28, 32)
-            auto_stream_count = 4 * tier;
-            if (auto_stream_count > 32)
-              auto_stream_count = 32;
+          // Scale streams: 4 per tier (4, 8, 12, 16, 20, 24, 28, 32)
+          auto_stream_count = 4 * tier;
+          if (auto_stream_count > 32)
+            auto_stream_count = 32;
 
-            // Scale buffers: 3x streams for triple-buffering
-            // (decode+process+encode) 2x was insufficient - peak usage exceeded
-            // pool size causing cudaMalloc fallback
-            auto_buffer_count = auto_stream_count * 3;
-            if (auto_buffer_count > 96)
-              auto_buffer_count = 96;
+          // Scale buffers: 3x streams for triple-buffering
+          // (decode+process+encode) 2x was insufficient - peak usage exceeded
+          // pool size causing cudaMalloc fallback
+          auto_buffer_count = auto_stream_count * 3;
+          if (auto_buffer_count > 96)
+            auto_buffer_count = 96;
 
-            verboseLog(VERBOSE_NORMAL,
-                       "GPU pipeline auto-tune: %zu GB VRAM -> tier %zu -> "
-                       "%zu streams, %zu buffers\n",
-                       vram_gb, tier, auto_stream_count, auto_buffer_count);
-          } else {
-            // Non-GPU pipeline (PNG/FFmpeg decode): use fixed 8 streams
-            // Benchmarking shows 8 streams is optimal for CPU decode/encode
-            // with GPU processing, regardless of VRAM size
-            auto_stream_count = 8;
-            auto_buffer_count = 24; // 3x streams for triple-buffering
-            verboseLog(VERBOSE_NORMAL,
-                       "PNG batch mode: 8 streams (optimized for CPU I/O)\n");
-          }
+          verboseLog(VERBOSE_NORMAL,
+                     "GPU auto-tune: %zu GB VRAM -> tier %zu -> "
+                     "%zu streams, %zu buffers\n",
+                     vram_gb, tier, auto_stream_count, auto_buffer_count);
         }
 
         // Override auto-tuned stream count if --cuda-streams specified
@@ -1478,110 +1451,13 @@ int main(int argc, char *argv[]) {
       // Queue depth scales with parallelism and GPU buffer count
       size_t decode_queue_depth = (size_t)batch_queue.parallelism * 2;
       bool use_pinned_memory = false;
-      int num_io_threads = 4; // Default I/O threads for batch decode
-
-      // Declare both queue types - only one will be used
       DecodeQueue *decode_queue = NULL;
-      BatchDecodeQueue *batch_decode_queue = NULL;
-      bool use_batch_decode = false; // True if using new batched decode (PR36B)
 
 #ifdef UNPAPER_WITH_CUDA
       use_pinned_memory = (options.device == UNPAPER_DEVICE_CUDA);
 
-      // Determine whether to use batch decode based on decode_mode option
-      // - AUTO: Use batch decode for CUDA, per-image for CPU
-      // - BATCHED: Force batch decode (GPU only)
-      // - PER_IMAGE: Force per-image decode (legacy)
-      bool try_batch_decode = (options.device == UNPAPER_DEVICE_CUDA) &&
-                              (options.decode_mode == DECODE_MODE_AUTO ||
-                               options.decode_mode == DECODE_MODE_BATCHED);
-
-      if (try_batch_decode) {
-        // For batch decode with "decode all at once" approach, queue depth
-        // must be >= total number of images to avoid deadlock:
-        // - Orchestrator places images in I/O completion order (random)
-        // - Workers request specific job_index images
-        // - If queue is too small, orchestrator blocks before placing all
-        //   images, while workers wait for their specific images = DEADLOCK
-        size_t total_inputs = batch_queue.count; // Upper bound (1-2 per job)
-        if (total_inputs > decode_queue_depth) {
-          decode_queue_depth = total_inputs;
-        }
-
-        // For CUDA with auto-tuned buffers, ensure decode queue can keep GPU
-        // fed
-        if (auto_buffer_count > decode_queue_depth) {
-          decode_queue_depth = auto_buffer_count;
-        }
-
-        // Scale I/O threads with CUDA stream count to saturate I/O bandwidth
-        // Get CPU core count for scaling
-        long cpu_cores = sysconf(_SC_NPROCESSORS_ONLN);
-        if (cpu_cores < 1)
-          cpu_cores = 8;
-
-        // Use enough I/O threads to keep disk bandwidth saturated
-        // More threads = better overlap between I/O and GPU decode
-        int stream_based = (int)auto_stream_count;
-        int cpu_max = (int)(cpu_cores * 3 / 4);
-        num_io_threads = (stream_based < cpu_max) ? stream_based : cpu_max;
-        if (num_io_threads < 4)
-          num_io_threads = 4;
-        if (num_io_threads > 16)
-          num_io_threads = 16;
-
-        // Initialize nvJPEG context before creating batch decode queue
-        int nvjpeg_streams = num_io_threads > 1 ? num_io_threads : 4;
-        if (nvjpeg_context_init(nvjpeg_streams)) {
-          // Create batch decode queue with reasonable max dimensions
-          // 8000x12000 supports most document scanners at 600+ DPI
-          batch_decode_queue = batch_decode_queue_create(
-              decode_queue_depth, num_io_threads, 8000, 12000);
-          if (batch_decode_queue) {
-            batch_decode_queue_enable_gpu(batch_decode_queue, true);
-            if (options.decode_chunk_size > 0) {
-              batch_decode_queue_set_chunk_size(batch_decode_queue,
-                                                options.decode_chunk_size);
-              verboseLog(VERBOSE_NORMAL, "Decode chunk size: %d (custom)\n",
-                         options.decode_chunk_size);
-            }
-            if (batch_decode_queue_start(batch_decode_queue, &batch_queue,
-                                         &options)) {
-              use_batch_decode = true;
-              verboseLog(
-                  VERBOSE_NORMAL,
-                  "Batch decode queue (PR36B): %zu slots, %d I/O threads\n",
-                  decode_queue_depth, num_io_threads);
-              verboseLog(VERBOSE_NORMAL,
-                         "nvJPEG batched decode: enabled (%d streams)\n",
-                         nvjpeg_streams);
-            } else {
-              verboseLog(VERBOSE_NORMAL,
-                         "Failed to start batch decode queue, falling back\n");
-              batch_decode_queue_destroy(batch_decode_queue);
-              batch_decode_queue = NULL;
-            }
-          }
-        }
-
-        if (!use_batch_decode) {
-          if (options.decode_mode == DECODE_MODE_BATCHED) {
-            // User explicitly requested batched mode but it failed
-            verboseLog(VERBOSE_NORMAL,
-                       "WARNING: --decode-mode=batched requested but "
-                       "unavailable, using per-image\n");
-          } else {
-            verboseLog(VERBOSE_NORMAL,
-                       "Batch decode unavailable, using per-image decode\n");
-          }
-        }
-      } else if (options.decode_mode == DECODE_MODE_PER_IMAGE) {
-        verboseLog(VERBOSE_NORMAL,
-                   "Decode mode: per-image (forced via --decode-mode)\n");
-      }
-
-      // Fallback to legacy per-image decode queue if batch decode not available
-      if (!use_batch_decode) {
+      // Per-image decode is used for all GPU workloads (faster, better scaling)
+      {
         int num_decode_threads = 1;
         // Scale decode threads with CUDA stream count to keep GPU fed
         if (options.device == UNPAPER_DEVICE_CUDA && auto_stream_count >= 2) {
@@ -1687,8 +1563,9 @@ int main(int argc, char *argv[]) {
                    encode_queue_depth, num_encoder_threads);
 
 #ifdef UNPAPER_WITH_CUDA
-        // Initialize nvJPEG encode for GPU pipeline
-        if (options.gpu_pipeline && options.device == UNPAPER_DEVICE_CUDA) {
+        // Auto-enable GPU encode for JPEG outputs when using CUDA backend
+        if (options.device == UNPAPER_DEVICE_CUDA &&
+            batch_has_jpeg_output(&batch_queue)) {
           // Use same number of encoder states as CUDA streams for parallelism
           int num_encoders = num_encoder_threads > 4 ? num_encoder_threads : 4;
           int jpeg_quality = options.jpeg_quality > 0 ? options.jpeg_quality : 85;
@@ -1696,7 +1573,8 @@ int main(int argc, char *argv[]) {
                                  NVJPEG_ENC_SUBSAMPLING_420)) {
             encode_queue_enable_gpu(encode_queue, true, jpeg_quality);
             verboseLog(VERBOSE_NORMAL,
-                       "nvJPEG GPU encode: enabled (%d states, quality %d)\n",
+                       "nvJPEG GPU encode: auto-enabled for JPEG outputs "
+                       "(%d states, quality %d)\n",
                        num_encoders, jpeg_quality);
           } else {
             verboseLog(VERBOSE_NORMAL,
@@ -1721,10 +1599,6 @@ int main(int argc, char *argv[]) {
           encode_queue_wait(encode_queue);
           encode_queue_destroy(encode_queue);
         }
-        if (batch_decode_queue) {
-          batch_decode_queue_stop(batch_decode_queue);
-          batch_decode_queue_destroy(batch_decode_queue);
-        }
         if (decode_queue) {
           decode_queue_stop_producer(decode_queue);
           decode_queue_destroy(decode_queue);
@@ -1739,13 +1613,7 @@ int main(int argc, char *argv[]) {
       BatchWorkerContext worker_ctx;
       batch_worker_init(&worker_ctx, &options, &batch_queue);
       batch_worker_set_config(&worker_ctx, &config);
-      // Use batch decode queue (PR36B) if available, otherwise legacy decode
-      // queue
-      if (batch_decode_queue) {
-        batch_worker_set_batch_decode_queue(&worker_ctx, batch_decode_queue);
-      } else {
-        batch_worker_set_decode_queue(&worker_ctx, decode_queue);
-      }
+      batch_worker_set_decode_queue(&worker_ctx, decode_queue);
       batch_worker_set_encode_queue(&worker_ctx, encode_queue);
 #ifdef UNPAPER_WITH_CUDA
       // Enable stream pooling if the stream pool was initialized
@@ -1759,14 +1627,7 @@ int main(int argc, char *argv[]) {
       batch_worker_cleanup(&worker_ctx);
       threadpool_destroy(pool);
 
-      // Cleanup decode queue (batch or legacy)
-      if (batch_decode_queue) {
-        batch_decode_queue_stop(batch_decode_queue);
-        if (options.perf) {
-          batch_decode_queue_print_stats(batch_decode_queue);
-        }
-        batch_decode_queue_destroy(batch_decode_queue);
-      }
+      // Cleanup decode queue
       if (decode_queue) {
         decode_queue_stop_producer(decode_queue);
         if (options.perf) {
@@ -2035,7 +1896,13 @@ int main(int argc, char *argv[]) {
 
           if (options.output_pixel_format == AV_PIX_FMT_NONE &&
               page.frame != NULL) {
-            options.output_pixel_format = page.frame->format;
+            // Try to detect output format from file extension first
+            options.output_pixel_format =
+                detectPixelFormatFromExtension(outputFileNames[0]);
+            // Fall back to image format if extension not recognized
+            if (options.output_pixel_format == AV_PIX_FMT_NONE) {
+              options.output_pixel_format = page.frame->format;
+            }
           }
 
           if (options.device == UNPAPER_DEVICE_CUDA &&
@@ -2836,7 +2703,13 @@ int main(int argc, char *argv[]) {
         saveDebug("_before-save%d.pnm", nr, sheet);
 
         if (options.output_pixel_format == AV_PIX_FMT_NONE) {
-          options.output_pixel_format = sheet.frame->format;
+          // Try to detect output format from file extension first
+          options.output_pixel_format =
+              detectPixelFormatFromExtension(outputFileNames[0]);
+          // Fall back to image format if extension not recognized
+          if (options.output_pixel_format == AV_PIX_FMT_NONE) {
+            options.output_pixel_format = sheet.frame->format;
+          }
         }
 
         perf_stage_begin(&perf, PERF_STAGE_DOWNLOAD);

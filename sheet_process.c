@@ -572,13 +572,21 @@ bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
   // Write output
   if (options->write_output) {
     if (output_pixel_format == AV_PIX_FMT_NONE) {
-      output_pixel_format = state->sheet.frame->format;
+      // Try to detect output format from file extension first
+      if (state->output_count > 0 && state->output_files[0] != NULL) {
+        output_pixel_format =
+            detectPixelFormatFromExtension(state->output_files[0]);
+      }
+      // Fall back to image format if extension not recognized
+      if (output_pixel_format == AV_PIX_FMT_NONE) {
+        output_pixel_format = state->sheet.frame->format;
+      }
     }
 
-    // Check if GPU pipeline path can be used (PR38)
+    // Check if GPU encode path can be used (auto-detected)
     // GPU pipeline: skip D2H transfer, encode directly from GPU memory
     bool use_gpu_encode = false;
-    if (options->gpu_pipeline && state->encode_queue != NULL &&
+    if (state->encode_queue != NULL &&
         encode_queue_gpu_enabled(state->encode_queue) &&
         image_is_gpu_resident(&state->sheet)) {
       // GPU-resident image with GPU encoding enabled - use zero-copy path
@@ -597,7 +605,8 @@ bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
       if (gpu_ptr != NULL) {
         encode_queue_submit_gpu(state->encode_queue, gpu_ptr, pitch, width,
                                 height, channels, state->output_files,
-                                state->output_count, state->job_index);
+                                state->output_count, output_pixel_format,
+                                state->job_index);
       } else {
         // Fallback: GPU pointer not available, use CPU path
         use_gpu_encode = false;

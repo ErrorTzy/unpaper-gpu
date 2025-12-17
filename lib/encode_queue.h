@@ -110,14 +110,15 @@ bool encode_queue_gpu_enabled(const EncodeQueue *queue);
 //   channels: 1 for grayscale, 3 for RGB
 //   output_files: Array of output file paths
 //   output_count: Number of output files
+//   output_pixel_format: Desired output pixel format (e.g., AV_PIX_FMT_MONOWHITE)
 //   job_index: Job index for statistics
 //
 // Returns true on success.
 //
 // If output is not JPEG or GPU encoding unavailable, falls back to:
 // 1. D2H transfer
-// 2. CPU encoding via FFmpeg
+// 2. CPU encoding via FFmpeg (using output_pixel_format)
 bool encode_queue_submit_gpu(EncodeQueue *queue, void *gpu_ptr, size_t pitch,
                              int width, int height, int channels,
                              char **output_files, int output_count,
-                             int job_index);
+                             int output_pixel_format, int job_index);

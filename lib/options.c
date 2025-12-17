@@ -31,11 +31,6 @@ void options_init(Options *o) {
       .batch_jobs = 0, // 0 = auto-detect
       .batch_progress = false,
       .cuda_streams = 0, // 0 = auto-detect
-      .decode_mode = DECODE_MODE_AUTO,
-      .decode_chunk_size = 0, // 0 = use default (BATCH_DECODE_CHUNK_SIZE)
-
-      // GPU pipeline defaults (PR38)
-      .gpu_pipeline = false,
       .jpeg_quality = 0, // 0 = use default (85)
 
       .layout = LAYOUT_SINGLE,

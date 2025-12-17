@@ -233,7 +233,7 @@ void center_mask(Image image, const Point center, const Rectangle area) {
                area.vertex[0].x, area.vertex[0].y, area.vertex[1].x,
                area.vertex[1].y, center.x, center.y,
                target.x - area.vertex[0].x, target.y - area.vertex[0].y);
-    Image newimage = create_compatible_image(image, size, false);
+    Image newimage = create_compatible_image(image, size, true);
     copy_rectangle(image, newimage, area, POINT_ORIGIN);
     wipe_rectangle(image, area, image.background);
     copy_rectangle(newimage, image, full_image(newimage), target);

@@ -12,8 +12,7 @@ import time
 from pathlib import Path
 
 
-def run_once(binary: Path, device: str, input_path: Path, output_path: Path,
-             decode_mode: str | None = None) -> float:
+def run_once(binary: Path, device: str, input_path: Path, output_path: Path) -> float:
     # Remove output file if it exists (unpaper refuses to overwrite)
     if output_path.exists():
         output_path.unlink()
@@ -25,10 +24,6 @@ def run_once(binary: Path, device: str, input_path: Path, output_path: Path,
         str(input_path),
         str(output_path),
     ]
-
-    # Add decode mode for CUDA device
-    if decode_mode and device == "cuda":
-        cmd.insert(3, f"--decode-mode={decode_mode}")
 
     start = time.perf_counter()
     proc = subprocess.run(
@@ -47,18 +42,16 @@ def run_once(binary: Path, device: str, input_path: Path, output_path: Path,
 
 
 def bench_device(binary: Path, device: str, input_path: Path, tmp_dir: Path,
-                 warmup: int, iterations: int,
-                 decode_mode: str | None = None) -> tuple[float, float] | None:
+                 warmup: int, iterations: int) -> tuple[float, float] | None:
     if not binary.exists():
         print(f"[skip] {device}: binary {binary} is missing", file=sys.stderr)
         return None
 
-    mode_suffix = f"_{decode_mode}" if decode_mode else ""
-    output_path = tmp_dir / f"bench_a1_{device}{mode_suffix}.pgm"
+    output_path = tmp_dir / f"bench_a1_{device}.pgm"
 
     for _ in range(warmup):
         try:
-            run_once(binary, device, input_path, output_path, decode_mode)
+            run_once(binary, device, input_path, output_path)
         except RuntimeError as exc:
             print(f"[skip] {device} warmup failed: {exc}", file=sys.stderr)
             return None
@@ -66,7 +59,7 @@ def bench_device(binary: Path, device: str, input_path: Path, tmp_dir: Path,
     samples = []
     for _ in range(iterations):
         try:
-            samples.append(run_once(binary, device, input_path, output_path, decode_mode))
+            samples.append(run_once(binary, device, input_path, output_path))
         except RuntimeError as exc:
             print(f"[skip] {device} iteration failed: {exc}", file=sys.stderr)
             return None
@@ -75,8 +68,6 @@ def bench_device(binary: Path, device: str, input_path: Path, tmp_dir: Path,
     stdev = statistics.pstdev(samples) if len(samples) > 1 else 0.0
 
     label = device.upper()
-    if decode_mode:
-        label = f"{device.upper()} ({decode_mode})"
     print(f"{label:<20} mean={mean:.2f}ms stdev={stdev:.2f}ms "
           f"runs={iterations} warmup={warmup}")
     return (mean, stdev)
@@ -104,8 +95,6 @@ def main() -> int:
                         help="Measured runs per device")
     parser.add_argument("--devices", default="cpu,cuda",
                         help="Comma-separated list of devices to benchmark")
-    parser.add_argument("--decode-mode", default=None,
-                        help="Decode mode for CUDA: auto, batched, per-image, or 'compare' to test both")
 
     args = parser.parse_args()
 
@@ -123,28 +112,7 @@ def main() -> int:
             continue
         builddir = args.builddir if device == "cpu" else args.builddir_cuda
         binary = builddir / "unpaper"
-
-        # For CUDA with --decode-mode=compare, run both modes and compare
-        if device == "cuda" and args.decode_mode == "compare":
-            print(f"\n{'='*60}")
-            print(f"Decode Mode Comparison (CUDA)")
-            print(f"{'='*60}")
-            results = {}
-            for mode in ["batched", "per-image"]:
-                result = bench_device(binary, device, args.input, tmpdir,
-                                      args.warmup, args.iterations, mode)
-                if result:
-                    results[mode] = result
-
-            if len(results) == 2:
-                batched_mean = results["batched"][0]
-                perimage_mean = results["per-image"][0]
-                diff = batched_mean - perimage_mean
-                diff_pct = (diff / perimage_mean) * 100
-                print(f"\nComparison: batched is {diff:+.1f}ms ({diff_pct:+.1f}%) vs per-image")
-        else:
-            bench_device(binary, device, args.input, tmpdir, args.warmup,
-                         args.iterations, args.decode_mode if device == "cuda" else None)
+        bench_device(binary, device, args.input, tmpdir, args.warmup, args.iterations)
 
     return 0
 

@@ -2,6 +2,12 @@
 //
 // SPDX-License-Identifier: GPL-2.0-only
 
+// INTERNAL IMPLEMENTATION - NOT EXPOSED TO USERS
+// This batched decode implementation is kept for future experimentation but
+// is not used by default. Per-image decode (decode_queue.c) is preferred
+// because it is 20% faster and has better stream scaling potential.
+// See CLAUDE.md "GPU Stream Scaling Status" for details.
+
 #pragma once
 
 #include "lib/batch.h"

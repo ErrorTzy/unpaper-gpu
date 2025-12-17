@@ -1896,14 +1896,20 @@ static void blackfilter_cuda(Image image, BlackfilterParameters params) {
   ensure_kernels_loaded();
   image_ensure_cuda(&image);
 
+  // NOTE: Parallel version disabled - it uses block-based detection without
+  // flood-fill, which misses connected dark regions that span multiple stripes.
+  // The sequential version correctly uses flood-fill to cover all connected pixels.
+  // TODO: Fix parallel version to also flood-fill from detected regions.
+#if 0
   // Try parallel version first (for GRAY8 format)
   UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
   if (blackfilter_cuda_parallel(image, params, stream)) {
     verboseLog(VERBOSE_MORE, "blackfilter: using parallel GPU path\n");
     return;
   }
+#endif
 
-  // Fall back to sequential version
+  // Use sequential version with flood-fill
   verboseLog(VERBOSE_MORE, "blackfilter: using sequential GPU path\n");
   blackfilter_cuda_sequential(image, params);
 }
@@ -2613,7 +2619,7 @@ static void deskew_cuda(Image source, Rectangle mask, float radians,
 
   Rectangle nmask = normalize_rectangle(mask);
   RectangleSize out_size = size_of_rectangle(nmask);
-  Image rotated = create_compatible_image(source, out_size, false);
+  Image rotated = create_compatible_image(source, out_size, true);
 
   image_ensure_cuda(&source);
   image_ensure_cuda_alloc(&rotated);

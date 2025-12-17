@@ -880,7 +880,7 @@ static bool is_jpeg_output(const char *filename) {
 bool encode_queue_submit_gpu(EncodeQueue *queue, void *gpu_ptr, size_t pitch,
                              int width, int height, int channels,
                              char **output_files, int output_count,
-                             int job_index) {
+                             int output_pixel_format, int job_index) {
 #ifdef UNPAPER_WITH_CUDA
   if (!queue || !gpu_ptr || !output_files || output_count <= 0) {
     return false;
@@ -977,8 +977,8 @@ fallback_cpu:
       }
     }
 
-    // Submit to regular encode queue
-    int output_pixel_format = frame->format;
+    // Submit to regular encode queue using the requested output format
+    // (e.g., MONOWHITE for .pbm output)
     bool result = encode_queue_submit(queue, frame, output_files, output_count,
                                       output_pixel_format, job_index, false);
     if (!result) {
@@ -996,6 +996,7 @@ fallback_cpu:
   (void)channels;
   (void)output_files;
   (void)output_count;
+  (void)output_pixel_format;
   (void)job_index;
   return false;
 #endif

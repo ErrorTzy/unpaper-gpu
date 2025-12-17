@@ -21,7 +21,13 @@ _LOGGER = logging.getLogger(__name__)
 
 
 def compare_images(*, golden: pathlib.Path, result: pathlib.Path) -> float:
-    """Compare images loaded from the provided paths, returns ratio of different pixels."""
+    """Compare images loaded from the provided paths, returns ratio of different pixels.
+
+    Images are converted to grayscale and then binarized before comparison to handle
+    format differences (e.g., comparing PBM mono output against PPM grayscale golden
+    images). This is necessary because the output format auto-detection now forces
+    mono format for .pbm files.
+    """
 
     golden_image = PIL.Image.open(golden)
     result_image = PIL.Image.open(result)
@@ -32,9 +38,16 @@ def compare_images(*, golden: pathlib.Path, result: pathlib.Path) -> float:
         )
         return float("inf")
 
+    # Convert both images to grayscale
+    golden_gray = golden_image.convert('L')
+    result_gray = result_image.convert('L')
+
+    # Binarize both images at threshold 128 for fair comparison
+    # This handles cases where golden is grayscale but result is mono
+    threshold = 128
     total_pixels = golden_image.width * golden_image.height
     different_pixels = sum(
-        1 if golden_image.getpixel((x, y)) != result_image.getpixel((x, y)) else 0
+        1 if (golden_gray.getpixel((x, y)) >= threshold) != (result_gray.getpixel((x, y)) >= threshold) else 0
         for x in range(golden_image.width)
         for y in range(golden_image.height)
     )

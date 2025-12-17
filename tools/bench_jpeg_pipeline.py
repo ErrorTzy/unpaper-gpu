@@ -4,15 +4,17 @@
 # SPDX-License-Identifier: GPL-2.0-only
 
 """
-JPEG GPU Pipeline benchmark for unpaper (PR38).
+JPEG GPU Pipeline benchmark for unpaper.
 
 This script measures the performance improvement from the full GPU pipeline
 (JPEG decode -> GPU processing -> JPEG encode) vs the standard path
 (JPEG decode -> GPU processing -> D2H transfer -> CPU encode).
 
+The GPU pipeline is auto-enabled when output files are JPEG format.
+
 Key measurements:
 - Standard CUDA batch: D2H transfer + CPU encode (PBM output)
-- GPU pipeline: JPEG-to-JPEG zero-copy path (JPEG output)
+- GPU pipeline: JPEG-to-JPEG zero-copy path (JPEG output, auto-detected)
 - Performance gain from eliminating D2H transfer
 
 Usage:
@@ -22,8 +24,6 @@ Usage:
 """
 
 import argparse
-import os
-import shutil
 import statistics
 import subprocess
 import sys
@@ -62,21 +62,11 @@ def check_cuda_available(binary: Path) -> bool:
     return b"--device=cpu|cuda" in proc.stdout
 
 
-def check_gpu_pipeline_available(binary: Path) -> bool:
-    """Check if the binary supports --gpu-pipeline."""
-    proc = subprocess.run(
-        [str(binary), "--help"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        check=False,
-    )
-    return b"--gpu-pipeline" in proc.stdout
-
-
 def run_batch(binary: Path, input_pattern: str, output_pattern: str,
-              jobs: int, streams: int = 8, gpu_pipeline: bool = False,
-              jpeg_quality: int = 85) -> float:
+              jobs: int, streams: int = 8, jpeg_quality: int = 85) -> float:
     """Run unpaper in batch mode with CUDA.
+
+    GPU encode is auto-enabled when output files have .jpg extension.
 
     Args:
         binary: Path to unpaper binary
@@ -84,8 +74,7 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
         output_pattern: Output file pattern with %d placeholder
         jobs: Number of parallel workers
         streams: Number of CUDA streams
-        gpu_pipeline: If True, use --gpu-pipeline for JPEG output
-        jpeg_quality: JPEG quality for GPU pipeline output
+        jpeg_quality: JPEG quality for JPEG output
     """
     # Remove existing output files
     output_dir = Path(output_pattern).parent
@@ -105,9 +94,8 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
         output_pattern,
     ]
 
-    # Add GPU pipeline options
-    if gpu_pipeline:
-        cmd.insert(4, "--gpu-pipeline")
+    # Add JPEG quality for JPEG outputs
+    if output_pattern.endswith(".jpg"):
         cmd.insert(5, f"--jpeg-quality={jpeg_quality}")
 
     proc = subprocess.run(
@@ -121,8 +109,7 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
 
     if proc.returncode != 0:
         raise RuntimeError(
-            f"Batch unpaper (gpu_pipeline={gpu_pipeline}) failed: "
-            f"{proc.stderr.decode().strip()}"
+            f"Batch unpaper failed: {proc.stderr.decode().strip()}"
         )
 
     return elapsed
@@ -130,7 +117,6 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
 
 def bench_configuration(binary: Path, input_pattern: str, output_pattern: str,
                         count: int, warmup: int, iterations: int,
-                        gpu_pipeline: bool = False,
                         jpeg_quality: int = 85) -> tuple[float, float]:
     """Benchmark a specific configuration and return mean/stdev."""
     samples = []
@@ -140,7 +126,7 @@ def bench_configuration(binary: Path, input_pattern: str, output_pattern: str,
     for i in range(warmup + iterations):
         try:
             elapsed = run_batch(binary, input_pattern, output_pattern,
-                                jobs, streams, gpu_pipeline, jpeg_quality)
+                                jobs, streams, jpeg_quality)
 
             if i >= warmup:
                 samples.append(elapsed)
@@ -175,7 +161,7 @@ def main() -> int:
     default_input = repo_root / "tests" / "source_images" / "imgsrc001.png"
 
     parser = argparse.ArgumentParser(
-        description="Benchmark unpaper JPEG GPU pipeline performance (PR38)."
+        description="Benchmark unpaper JPEG GPU pipeline performance."
     )
     parser.add_argument(
         "--builddir",
@@ -235,20 +221,17 @@ def main() -> int:
         print("ERROR: CUDA support required for GPU pipeline benchmark", file=sys.stderr)
         return 1
 
-    if not check_gpu_pipeline_available(binary):
-        print("ERROR: --gpu-pipeline not available (rebuild with PR38)", file=sys.stderr)
-        return 1
-
     # Use tmpfs if available for better I/O performance
     tmpdir_base = Path("/dev/shm") if Path("/dev/shm").is_dir() else Path(tempfile.gettempdir())
 
     print(f"{'='*70}")
-    print(f"JPEG GPU Pipeline Benchmark (PR38)")
+    print(f"JPEG GPU Pipeline Benchmark")
     print(f"{'='*70}")
     print(f"  Binary: {binary}")
     print(f"  Images: {args.images}")
     print(f"  JPEG quality: {args.jpeg_quality}")
     print(f"  Warmup: {args.warmup}, Iterations: {args.iterations}")
+    print(f"  Note: GPU encode is auto-enabled for JPEG outputs")
     print()
 
     with tempfile.TemporaryDirectory(dir=tmpdir_base) as tmpdir:
@@ -267,8 +250,7 @@ def main() -> int:
         print("Standard CUDA batch (JPEG -> GPU -> D2H -> PBM)...", end=" ", flush=True)
         std_mean, std_stdev = bench_configuration(
             binary, input_pattern, output_pattern_pbm,
-            args.images, args.warmup, args.iterations,
-            gpu_pipeline=False
+            args.images, args.warmup, args.iterations
         )
         print(f"{std_mean:.0f}ms (stdev={std_stdev:.0f}ms)")
 
@@ -276,12 +258,13 @@ def main() -> int:
         std_total, std_avg = get_output_file_sizes(output_pattern_pbm, args.images)
 
         # Test 2: GPU pipeline (JPEG -> GPU -> nvJPEG encode -> JPEG)
+        # GPU encode is auto-enabled because output is .jpg
         output_pattern_jpg = str(tmpdir / "output%04d.jpg")
-        print("GPU pipeline (JPEG -> GPU -> JPEG, zero-copy)...", end=" ", flush=True)
+        print("GPU pipeline (JPEG -> GPU -> JPEG, auto-enabled)...", end=" ", flush=True)
         gpu_mean, gpu_stdev = bench_configuration(
             binary, input_pattern, output_pattern_jpg,
             args.images, args.warmup, args.iterations,
-            gpu_pipeline=True, jpeg_quality=args.jpeg_quality
+            jpeg_quality=args.jpeg_quality
         )
         print(f"{gpu_mean:.0f}ms (stdev={gpu_stdev:.0f}ms)")
 

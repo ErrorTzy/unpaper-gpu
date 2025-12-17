@@ -562,17 +562,8 @@ bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
     return false;
   }
 
-  // Synchronize to ensure encode is complete
-  cudaError_t sync_err = cudaStreamSynchronize(cuda_stream);
-  if (sync_err != cudaSuccess) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg_encode: stream sync failed\n");
-    free(jpeg_data);
-    if (rgb_buffer != NULL) {
-      cudaFreeAsync(rgb_buffer, cuda_stream);
-    }
-    atomic_fetch_add(&g_encode_ctx.failed_encodes, 1);
-    return false;
-  }
+  // Note: nvjpegEncodeRetrieveBitstream implicitly synchronizes the stream
+  // because it copies data to host memory. No explicit sync needed here.
 
   // Free temporary RGB buffer if allocated
   if (rgb_buffer != NULL) {

@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
@@ -370,4 +371,31 @@ void saveDebug(char *filenameTemplate, int index, Image image) {
     sprintf(debugFilename, filenameTemplate, index);
     saveImage(debugFilename, image, image.frame->format);
   }
+}
+
+/**
+ * Detect pixel format from file extension.
+ *
+ * @param filename file name to examine
+ * @return AVPixelFormat corresponding to the extension, or AV_PIX_FMT_NONE
+ */
+int detectPixelFormatFromExtension(const char *filename) {
+  if (filename == NULL) {
+    return AV_PIX_FMT_NONE;
+  }
+  size_t len = strlen(filename);
+  if (len < 4) {
+    return AV_PIX_FMT_NONE;
+  }
+  const char *ext = filename + len - 4;
+  if (strcasecmp(ext, ".pbm") == 0) {
+    return AV_PIX_FMT_MONOWHITE;
+  }
+  if (strcasecmp(ext, ".pgm") == 0) {
+    return AV_PIX_FMT_GRAY8;
+  }
+  if (strcasecmp(ext, ".ppm") == 0) {
+    return AV_PIX_FMT_RGB24;
+  }
+  return AV_PIX_FMT_NONE;
 }

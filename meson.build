@@ -240,7 +240,7 @@ if have_cuda
         install : false,
     )
 
-    test('cuda roundtrip', cuda_roundtrip_test)
+    test('cuda roundtrip', cuda_roundtrip_test, is_parallel: false)
 
     cuda_primitives_test = executable(
         'cuda_primitives_test',
@@ -273,7 +273,7 @@ if have_cuda
         install : false,
     )
 
-    test('cuda primitives', cuda_primitives_test)
+    test('cuda primitives', cuda_primitives_test, is_parallel: false)
 
     cuda_resize_test = executable(
         'cuda_resize_test',
@@ -306,7 +306,7 @@ if have_cuda
         install : false,
     )
 
-    test('cuda resize', cuda_resize_test)
+    test('cuda resize', cuda_resize_test, is_parallel: false)
 
     cuda_filters_test = executable(
         'cuda_filters_test',
@@ -339,7 +339,7 @@ if have_cuda
         install : false,
     )
 
-    test('cuda filters', cuda_filters_test)
+    test('cuda filters', cuda_filters_test, is_parallel: false)
 
     cuda_masks_border_test = executable(
         'cuda_masks_border_test',
@@ -372,7 +372,7 @@ if have_cuda
         install : false,
     )
 
-    test('cuda masks/borders', cuda_masks_border_test)
+    test('cuda masks/borders', cuda_masks_border_test, is_parallel: false)
 
     cuda_deskew_test = executable(
         'cuda_deskew_test',
@@ -405,7 +405,7 @@ if have_cuda
         install : false,
     )
 
-    test('cuda deskew', cuda_deskew_test)
+    test('cuda deskew', cuda_deskew_test, is_parallel: false)
 
     cuda_stream_test = executable(
         'cuda_stream_test',
@@ -419,7 +419,7 @@ if have_cuda
         install : false,
     )
 
-    test('cuda stream', cuda_stream_test)
+    test('cuda stream', cuda_stream_test, is_parallel: false)
 
     opencv_bridge_test = executable(
         'opencv_bridge_test',
@@ -456,7 +456,7 @@ if have_cuda
         install : false,
     )
 
-    test('npp integral', npp_integral_test)
+    test('npp integral', npp_integral_test, is_parallel: false)
 
     cuda_blurfilter_scan_test = executable(
         'cuda_blurfilter_scan_test',
@@ -474,7 +474,7 @@ if have_cuda
         install : false,
     )
 
-    test('cuda blurfilter scan', cuda_blurfilter_scan_test)
+    test('cuda blurfilter scan', cuda_blurfilter_scan_test, is_parallel: false)
 
     cuda_grayfilter_scan_test = executable(
         'cuda_grayfilter_scan_test',
@@ -492,7 +492,7 @@ if have_cuda
         install : false,
     )
 
-    test('cuda grayfilter scan', cuda_grayfilter_scan_test)
+    test('cuda grayfilter scan', cuda_grayfilter_scan_test, is_parallel: false)
 
     nvjpeg_decode_test = executable(
         'nvjpeg_decode_test',
@@ -508,7 +508,9 @@ if have_cuda
     )
 
     test('nvjpeg decode', nvjpeg_decode_test,
-         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/',
+               'CUDA_LAUNCH_BLOCKING=1'],
+         is_parallel: false)
 
     nvjpeg_batched_test = executable(
         'nvjpeg_batched_test',
@@ -524,7 +526,8 @@ if have_cuda
     )
 
     test('nvjpeg batched decode', nvjpeg_batched_test,
-         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'],
+         is_parallel: false)
 
     nvjpeg_encode_test = executable(
         'nvjpeg_encode_test',
@@ -541,7 +544,8 @@ if have_cuda
     )
 
     test('nvjpeg encode', nvjpeg_encode_test,
-         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'],
+         is_parallel: false)
 
     test(
         'gpu jpeg pipeline',
@@ -557,5 +561,6 @@ if have_cuda
             'TEST_UNPAPER_BINARY=' + unpaper.full_path(),
         ],
         timeout : -1,
+        is_parallel: false,
     )
 endif

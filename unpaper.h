@@ -30,6 +30,10 @@ void loadImage(const char *filename, Image *image, Pixel sheet_background,
 
 void saveImage(char *filename, Image image, int outputPixFmt);
 
+// Detect pixel format from file extension. Returns AV_PIX_FMT_NONE if unknown.
+// This helps auto-select the correct output format for .pbm/.pgm/.ppm files.
+int detectPixelFormatFromExtension(const char *filename);
+
 void saveDebug(char *filenameTemplate, int index, Image image)
     __attribute__((format(printf, 1, 0)));
 
