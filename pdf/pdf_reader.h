@@ -37,6 +37,10 @@ typedef struct {
   int bits_per_component; // Bits per component (1, 2, 4, 8, 16)
   PdfImageFormat format;  // Detected format of the raw bytes
   bool is_mask;           // True if this is a mask/stencil image
+
+  // JBIG2-specific: global dictionary data (NULL if not present)
+  uint8_t *jbig2_globals;    // JBIG2 global dictionary bytes (may be NULL)
+  size_t jbig2_globals_size; // Size of globals in bytes (0 if no globals)
 } PdfImage;
 
 // PDF metadata

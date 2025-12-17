@@ -355,6 +355,27 @@ static bool extract_image_from_resources(PdfDocument *doc, pdf_page *page,
     image->bits_per_component = best_image->bpc;
     image->format = convert_image_type(cbuf->params.type);
     image->is_mask = best_image->imagemask;
+    image->jbig2_globals = NULL;
+    image->jbig2_globals_size = 0;
+
+    // Extract JBIG2 globals if present
+    if (cbuf->params.type == FZ_IMAGE_JBIG2 &&
+        cbuf->params.u.jbig2.globals != NULL) {
+      fz_buffer *globals_buf =
+          fz_jbig2_globals_data(ctx, cbuf->params.u.jbig2.globals);
+      if (globals_buf != NULL) {
+        unsigned char *globals_data = NULL;
+        size_t globals_size =
+            fz_buffer_storage(ctx, globals_buf, &globals_data);
+        if (globals_size > 0 && globals_data != NULL) {
+          image->jbig2_globals = malloc(globals_size);
+          if (image->jbig2_globals != NULL) {
+            memcpy(image->jbig2_globals, globals_data, globals_size);
+            image->jbig2_globals_size = globals_size;
+          }
+        }
+      }
+    }
   }
   fz_always(ctx) { fz_drop_image(ctx, best_image); }
   fz_catch(ctx) {
@@ -408,6 +429,7 @@ void pdf_free_image(PdfImage *image) {
   if (image == NULL)
     return;
   free(image->data);
+  free(image->jbig2_globals);
   memset(image, 0, sizeof(*image));
 }
 

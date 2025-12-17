@@ -15,6 +15,10 @@
 #include "pdf_reader.h"
 #include "pdf_writer.h"
 
+#ifdef UNPAPER_WITH_JBIG2
+#include "lib/jbig2_decode.h"
+#endif
+
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
@@ -36,6 +40,51 @@ bool pdf_pipeline_is_pdf(const char *filename) {
   return pdf_is_pdf_file(filename);
 }
 
+// Decode JBIG2 image using jbig2dec library
+// Returns an allocated Image on success, EMPTY_IMAGE on failure
+#ifdef UNPAPER_WITH_JBIG2
+static Image decode_jbig2_image(const PdfImage *pdf_img, Pixel background,
+                                uint8_t abs_black_threshold) {
+  if (pdf_img == NULL || pdf_img->data == NULL || pdf_img->size == 0) {
+    return EMPTY_IMAGE;
+  }
+
+  Jbig2DecodedImage jbig2_img = {0};
+  if (!jbig2_decode(pdf_img->data, pdf_img->size, pdf_img->jbig2_globals,
+                    pdf_img->jbig2_globals_size, &jbig2_img)) {
+    verboseLog(VERBOSE_MORE, "JBIG2 decode failed: %s\n",
+               jbig2_get_last_error());
+    return EMPTY_IMAGE;
+  }
+
+  // Create grayscale image and expand 1-bit to 8-bit
+  RectangleSize size = {.width = (int)jbig2_img.width,
+                        .height = (int)jbig2_img.height};
+  Image img = create_image(size, AV_PIX_FMT_GRAY8, false, background,
+                           abs_black_threshold);
+
+  if (img.frame == NULL) {
+    jbig2_free_image(&jbig2_img);
+    return EMPTY_IMAGE;
+  }
+
+  // Expand 1-bit to 8-bit grayscale
+  // JBIG2 typically uses 1=black, 0=white (inverted from typical grayscale)
+  // So we invert during expansion to get 0=black, 255=white
+  if (!jbig2_expand_to_gray8(&jbig2_img, img.frame->data[0],
+                             (size_t)img.frame->linesize[0], true)) {
+    verboseLog(VERBOSE_MORE, "JBIG2 expand failed: %s\n",
+               jbig2_get_last_error());
+    free_image(&img);
+    jbig2_free_image(&jbig2_img);
+    return EMPTY_IMAGE;
+  }
+
+  jbig2_free_image(&jbig2_img);
+  return img;
+}
+#endif // UNPAPER_WITH_JBIG2
+
 // Decode raw image bytes (JPEG/PNG/etc) using FFmpeg
 // Returns an allocated AVFrame on success, NULL on failure
 static AVFrame *decode_image_bytes(const uint8_t *data, size_t size,
@@ -45,7 +94,8 @@ static AVFrame *decode_image_bytes(const uint8_t *data, size_t size,
   }
 
   // Only decode JPEG and PNG with FFmpeg
-  // Other formats (JBIG2, CCITT, JP2) would need specialized decoders
+  // JBIG2 is handled separately by decode_jbig2_image()
+  // Other formats (CCITT, JP2) would need specialized decoders
   if (format != PDF_IMAGE_JPEG && format != PDF_IMAGE_PNG &&
       format != PDF_IMAGE_FLATE) {
     return NULL;
@@ -522,17 +572,33 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
                  pdf_image_format_name(pdf_img.format), pdf_img.width,
                  pdf_img.height);
 
-      // Try to decode with FFmpeg
-      AVFrame *frame =
-          decode_image_bytes(pdf_img.data, pdf_img.size, pdf_img.format);
-      if (frame) {
-        page_image = image_from_frame(frame, options->sheet_background,
-                                      options->abs_black_threshold);
-        av_frame_free(&frame);
+#ifdef UNPAPER_WITH_JBIG2
+      // Handle JBIG2 images with dedicated decoder
+      if (pdf_img.format == PDF_IMAGE_JBIG2) {
+        page_image = decode_jbig2_image(&pdf_img, options->sheet_background,
+                                        options->abs_black_threshold);
         if (page_image.frame != NULL) {
           width = page_image.frame->width;
           height = page_image.frame->height;
           extracted = true;
+          verboseLog(VERBOSE_MORE,
+                     "PDF pipeline: decoded JBIG2 B&W image to grayscale\n");
+        }
+      } else
+#endif // UNPAPER_WITH_JBIG2
+      {
+        // Try to decode with FFmpeg (JPEG, PNG, etc.)
+        AVFrame *frame =
+            decode_image_bytes(pdf_img.data, pdf_img.size, pdf_img.format);
+        if (frame) {
+          page_image = image_from_frame(frame, options->sheet_background,
+                                        options->abs_black_threshold);
+          av_frame_free(&frame);
+          if (page_image.frame != NULL) {
+            width = page_image.frame->width;
+            height = page_image.frame->height;
+            extracted = true;
+          }
         }
       }
       pdf_free_image(&pdf_img);

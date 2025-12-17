@@ -22,3 +22,10 @@ option(
   value: 'auto',
   description: 'Enable nvImageCodec for JPEG2000 GPU support (requires nvImageCodec library)',
 )
+
+option(
+  'jbig2',
+  type: 'feature',
+  value: 'auto',
+  description: 'Enable JBIG2 support for B&W PDF images (requires jbig2dec library)',
+)

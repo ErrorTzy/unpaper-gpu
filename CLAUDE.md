@@ -368,24 +368,50 @@ bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch, int width, int hei
 
 ---
 
-### PR 5: JBIG2 Native Support
+### PR 5: JBIG2 Native Support [COMPLETE]
+
+**Status**: Implemented and tested.
 
 **Why**: B&W scanned documents use JBIG2. Native decode avoids lossy JPEG conversion.
 
 **Implementation**:
-- Add jbig2dec dependency (`-Djbig2=enabled`)
-- New `lib/jbig2_decode.c/.h`: decode JBIG2 to 1-bit bitmap
-- For GPU processing: convert 1-bit → 8-bit grayscale, H2D transfer
-- For output: keep as 1-bit if `--pdf-quality=high`, else convert to grayscale JPEG
+- Add jbig2dec dependency (`-Djbig2=enabled`, auto-detected if available)
+- New `lib/jbig2_decode.c/.h`: decode JBIG2 to 1-bit bitmap with globals support
+- Extended `PdfImage` struct to include JBIG2 globals data
+- Modified `pdf_reader.c` to extract JBIG2 globals when present
+- Modified `pdf_pipeline_cpu.c` to use jbig2_decode for JBIG2 images
+- Automatic expansion from 1-bit packed to 8-bit grayscale for processing pipeline
+
+**Key API** (implemented in `lib/jbig2_decode.h`):
+```c
+// Decode JBIG2 data to 1-bit bitmap
+bool jbig2_decode(const uint8_t *data, size_t size, const uint8_t *globals,
+                  size_t globals_size, Jbig2DecodedImage *out);
+
+// Expand 1-bit to 8-bit grayscale
+bool jbig2_expand_to_gray8(const Jbig2DecodedImage *jbig2, uint8_t *gray_out,
+                           size_t gray_stride, bool invert);
+
+// Check runtime availability
+bool jbig2_is_available(void);
+void jbig2_free_image(Jbig2DecodedImage *image);
+```
 
 **Processing path**:
 ```
-JBIG2 → jbig2dec (CPU) → 1-bit bitmap → expand to 8-bit → H2D → GPU process → encode
+PDF JBIG2 → MuPDF extract (data + globals) → jbig2dec → 1-bit bitmap → expand to 8-bit gray → process → encode
 ```
 
-**Tests**: PDF with JBIG2 B&W pages processes correctly, output quality preserved.
+**Tests**: `tests/jbig2_decode_test.c` - Unit tests for JBIG2 decode.
+- Test PDF with JBIG2 content in `tests/pdf_samples/test_jbig2.pdf`
+- JBIG2 availability check
+- Null safety tests
+- Decode from PDF with globals
+- Expand to grayscale verification
 
-**Success**: JBIG2 PDFs process without quality loss. B&W pages stay sharp.
+**Build**: `meson setup builddir-pdf -Dpdf=enabled -Djbig2=enabled && meson compile -C builddir-pdf`
+
+**Success**: JBIG2 PDFs process without quality loss. B&W pages decoded and expanded to grayscale correctly. Globals extraction from PDF works. All tests pass.
 
 ---
 

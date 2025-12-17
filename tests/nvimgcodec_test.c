@@ -9,10 +9,10 @@
 #include <string.h>
 
 #ifdef UNPAPER_WITH_CUDA
-#include <cuda_runtime.h>
 #include "imageprocess/cuda_runtime.h"
 #include "imageprocess/nvimgcodec.h"
 #include "imageprocess/nvjpeg_decode.h"
+#include <cuda_runtime.h>
 #endif
 
 static char test_jpeg_path[4096];
@@ -38,7 +38,8 @@ static void test_format_detection_jpeg(void) {
 #ifdef UNPAPER_WITH_CUDA
   // JPEG magic bytes: FFD8FF
   uint8_t jpeg_header[] = {0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46};
-  NvImgCodecFormat fmt = nvimgcodec_detect_format(jpeg_header, sizeof(jpeg_header));
+  NvImgCodecFormat fmt =
+      nvimgcodec_detect_format(jpeg_header, sizeof(jpeg_header));
 
   if (fmt != NVIMGCODEC_FORMAT_JPEG) {
     printf("FAILED (expected JPEG, got %d)\n", fmt);
@@ -57,7 +58,8 @@ static void test_format_detection_jp2(void) {
 #ifdef UNPAPER_WITH_CUDA
   // JP2 codestream magic bytes: FF4FFF51
   uint8_t jp2_header[] = {0xFF, 0x4F, 0xFF, 0x51, 0x00, 0x00, 0x00, 0x00};
-  NvImgCodecFormat fmt = nvimgcodec_detect_format(jp2_header, sizeof(jp2_header));
+  NvImgCodecFormat fmt =
+      nvimgcodec_detect_format(jp2_header, sizeof(jp2_header));
 
   if (fmt != NVIMGCODEC_FORMAT_JPEG2000) {
     printf("FAILED (expected JP2, got %d)\n", fmt);
@@ -319,8 +321,8 @@ static void test_decode_file(void) {
   }
 
   NvImgCodecDecodedImage out = {0};
-  bool result = nvimgcodec_decode_file(test_jpeg_path, NULL,
-                                       NVIMGCODEC_OUT_RGB, &out);
+  bool result =
+      nvimgcodec_decode_file(test_jpeg_path, NULL, NVIMGCODEC_OUT_RGB, &out);
 
   if (!result) {
     printf("SKIPPED (decode failed, file may not exist)\n");
@@ -400,9 +402,9 @@ static void test_encode_jpeg(void) {
 
   // Encode to JPEG
   NvImgCodecEncodedImage out = {0};
-  bool result = nvimgcodec_encode_jpeg(gpu_ptr, pitch, width, height,
-                                       NVIMGCODEC_ENC_FMT_GRAY8, 85,
-                                       state, NULL, &out);
+  bool result =
+      nvimgcodec_encode_jpeg(gpu_ptr, pitch, width, height,
+                             NVIMGCODEC_ENC_FMT_GRAY8, 85, state, NULL, &out);
 
   cudaFree(gpu_ptr);
   nvimgcodec_release_encode_state(state);
@@ -482,8 +484,8 @@ static void test_statistics(void) {
     exit(1);
   }
 
-  printf("PASSED (decodes: %zu, encodes: %zu)\n",
-         stats.total_decodes, stats.total_encodes);
+  printf("PASSED (decodes: %zu, encodes: %zu)\n", stats.total_decodes,
+         stats.total_encodes);
 #else
   printf("SKIPPED (CUDA not available)\n");
 #endif

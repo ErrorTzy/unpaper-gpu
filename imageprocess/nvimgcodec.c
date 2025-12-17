@@ -89,30 +89,32 @@ NvImgCodecFormat nvimgcodec_detect_format(const uint8_t *data, size_t size) {
   }
 
   // JPEG2000 codestream: FF4FFF51
-  if (size >= 4 && data[0] == 0xFF && data[1] == 0x4F &&
-      data[2] == 0xFF && data[3] == 0x51) {
+  if (size >= 4 && data[0] == 0xFF && data[1] == 0x4F && data[2] == 0xFF &&
+      data[3] == 0x51) {
     return NVIMGCODEC_FORMAT_JPEG2000;
   }
 
   // JPEG2000 JP2 file format: 0000000C6A5020200D0A870A
   if (size >= 12) {
     static const uint8_t jp2_sig[] = {0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50,
-                                       0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A};
+                                      0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A};
     if (memcmp(data, jp2_sig, 12) == 0) {
       return NVIMGCODEC_FORMAT_JPEG2000;
     }
   }
 
   // PNG: 89504E47
-  if (size >= 4 && data[0] == 0x89 && data[1] == 0x50 &&
-      data[2] == 0x4E && data[3] == 0x47) {
+  if (size >= 4 && data[0] == 0x89 && data[1] == 0x50 && data[2] == 0x4E &&
+      data[3] == 0x47) {
     return NVIMGCODEC_FORMAT_PNG;
   }
 
   // TIFF: 49492A00 or 4D4D002A
   if (size >= 4) {
-    if ((data[0] == 0x49 && data[1] == 0x49 && data[2] == 0x2A && data[3] == 0x00) ||
-        (data[0] == 0x4D && data[1] == 0x4D && data[2] == 0x00 && data[3] == 0x2A)) {
+    if ((data[0] == 0x49 && data[1] == 0x49 && data[2] == 0x2A &&
+         data[3] == 0x00) ||
+        (data[0] == 0x4D && data[1] == 0x4D && data[2] == 0x00 &&
+         data[3] == 0x2A)) {
       return NVIMGCODEC_FORMAT_TIFF;
     }
   }
@@ -267,11 +269,13 @@ bool nvimgcodec_init(int num_streams) {
 
   // Create nvImageCodec instance
   nvimgcodecInstanceCreateInfo_t create_info = {
-      NVIMGCODEC_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, sizeof(create_info), NULL};
+      NVIMGCODEC_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, sizeof(create_info),
+      NULL};
   create_info.load_builtin_modules = 1;
   create_info.load_extension_modules = 1;
 
-  nvimgcodecStatus_t status = nvimgcodecInstanceCreate(&create_info, &g_ctx.instance);
+  nvimgcodecStatus_t status =
+      nvimgcodecInstanceCreate(&create_info, &g_ctx.instance);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
     verboseLog(VERBOSE_DEBUG, "nvimgcodec: failed to create instance\n");
     pthread_mutex_unlock(&g_init_mutex);
@@ -279,8 +283,10 @@ bool nvimgcodec_init(int num_streams) {
   }
 
   // Allocate decode states
-  int num_decode = (num_streams > MAX_DECODE_STATES) ? MAX_DECODE_STATES : num_streams;
-  g_ctx.decode_states = calloc((size_t)num_decode, sizeof(NvImgCodecDecodeState));
+  int num_decode =
+      (num_streams > MAX_DECODE_STATES) ? MAX_DECODE_STATES : num_streams;
+  g_ctx.decode_states =
+      calloc((size_t)num_decode, sizeof(NvImgCodecDecodeState));
   if (g_ctx.decode_states == NULL) {
     nvimgcodecInstanceDestroy(g_ctx.instance);
     pthread_mutex_unlock(&g_init_mutex);
@@ -301,8 +307,10 @@ bool nvimgcodec_init(int num_streams) {
   g_ctx.num_decode_states = num_decode;
 
   // Allocate encode states
-  int num_encode = (num_streams > MAX_ENCODE_STATES) ? MAX_ENCODE_STATES : num_streams;
-  g_ctx.encode_states = calloc((size_t)num_encode, sizeof(NvImgCodecEncodeState));
+  int num_encode =
+      (num_streams > MAX_ENCODE_STATES) ? MAX_ENCODE_STATES : num_streams;
+  g_ctx.encode_states =
+      calloc((size_t)num_encode, sizeof(NvImgCodecEncodeState));
   if (g_ctx.encode_states == NULL) {
     for (int i = 0; i < num_decode; i++) {
       cleanup_decode_state(&g_ctx.decode_states[i]);
@@ -344,9 +352,10 @@ bool nvimgcodec_init(int num_streams) {
 
   g_ctx.initialized = true;
 
-  verboseLog(VERBOSE_DEBUG,
-             "nvimgcodec: initialized with %d decode states, %d encode states\n",
-             num_decode, num_encode);
+  verboseLog(
+      VERBOSE_DEBUG,
+      "nvimgcodec: initialized with %d decode states, %d encode states\n",
+      num_decode, num_encode);
 
   pthread_mutex_unlock(&g_init_mutex);
   return true;
@@ -389,13 +398,9 @@ void nvimgcodec_cleanup(void) {
   pthread_mutex_unlock(&g_init_mutex);
 }
 
-bool nvimgcodec_is_available(void) {
-  return g_ctx.initialized;
-}
+bool nvimgcodec_is_available(void) { return g_ctx.initialized; }
 
-bool nvimgcodec_any_available(void) {
-  return g_ctx.initialized;
-}
+bool nvimgcodec_any_available(void) { return g_ctx.initialized; }
 
 bool nvimgcodec_jp2_supported(void) {
   return g_ctx.initialized; // JP2 supported when nvImageCodec is available
@@ -482,9 +487,8 @@ void nvimgcodec_print_stats(void) {
           "  Total encodes: %zu (JPEG: %zu, JP2: %zu)\n"
           "  Successful: %zu\n",
           stats.total_decodes, stats.jpeg_decodes, stats.jp2_decodes,
-          stats.successful_decodes, stats.fallback_decodes,
-          stats.total_encodes, stats.jpeg_encodes, stats.jp2_encodes,
-          stats.successful_encodes);
+          stats.successful_decodes, stats.fallback_decodes, stats.total_encodes,
+          stats.jpeg_encodes, stats.jp2_encodes, stats.successful_encodes);
 }
 
 // ============================================================================
@@ -492,8 +496,8 @@ void nvimgcodec_print_stats(void) {
 // ============================================================================
 
 bool nvimgcodec_get_image_info(const uint8_t *data, size_t size,
-                               NvImgCodecFormat *format,
-                               int *width, int *height, int *channels) {
+                               NvImgCodecFormat *format, int *width,
+                               int *height, int *channels) {
   if (!g_ctx.initialized || data == NULL || size == 0) {
     return false;
   }
@@ -512,8 +516,8 @@ bool nvimgcodec_get_image_info(const uint8_t *data, size_t size,
   }
 
   // Get image info
-  nvimgcodecImageInfo_t info = {
-      NVIMGCODEC_STRUCTURE_TYPE_IMAGE_INFO, sizeof(info), NULL};
+  nvimgcodecImageInfo_t info = {NVIMGCODEC_STRUCTURE_TYPE_IMAGE_INFO,
+                                sizeof(info), NULL};
   status = nvimgcodecCodeStreamGetImageInfo(code_stream, &info);
 
   nvimgcodecCodeStreamDestroy(code_stream);
@@ -564,12 +568,11 @@ void nvimgcodec_release_completion_event(void *event, bool from_pool) {
 }
 
 bool nvimgcodec_decode(const uint8_t *data, size_t size,
-                       NvImgCodecDecodeState *state,
-                       UnpaperCudaStream *stream,
+                       NvImgCodecDecodeState *state, UnpaperCudaStream *stream,
                        NvImgCodecOutputFormat output_fmt,
                        NvImgCodecDecodedImage *out) {
-  if (!g_ctx.initialized || data == NULL || size == 0 ||
-      state == NULL || out == NULL) {
+  if (!g_ctx.initialized || data == NULL || size == 0 || state == NULL ||
+      out == NULL) {
     return false;
   }
 
@@ -594,8 +597,8 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   }
 
   // Get image info
-  nvimgcodecImageInfo_t info = {
-      NVIMGCODEC_STRUCTURE_TYPE_IMAGE_INFO, sizeof(info), NULL};
+  nvimgcodecImageInfo_t info = {NVIMGCODEC_STRUCTURE_TYPE_IMAGE_INFO,
+                                sizeof(info), NULL};
   status = nvimgcodecCodeStreamGetImageInfo(code_stream, &info);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
     nvimgcodecCodeStreamDestroy(code_stream);
@@ -631,7 +634,8 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
 
   // Allocate output buffer
   void *gpu_buffer = NULL;
-  cudaError_t cuda_err = cudaMallocAsync(&gpu_buffer, buffer_size, state->stream);
+  cudaError_t cuda_err =
+      cudaMallocAsync(&gpu_buffer, buffer_size, state->stream);
   if (cuda_err != cudaSuccess) {
     cuda_err = cudaMalloc(&gpu_buffer, buffer_size);
     if (cuda_err != cudaSuccess) {
@@ -642,8 +646,8 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   }
 
   // Set up output image info
-  nvimgcodecImageInfo_t out_info = {
-      NVIMGCODEC_STRUCTURE_TYPE_IMAGE_INFO, sizeof(out_info), NULL};
+  nvimgcodecImageInfo_t out_info = {NVIMGCODEC_STRUCTURE_TYPE_IMAGE_INFO,
+                                    sizeof(out_info), NULL};
   out_info.sample_format = sample_fmt;
   out_info.num_planes = 1;
   out_info.plane_info[0].width = (uint32_t)width;
@@ -710,8 +714,7 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   return true;
 }
 
-bool nvimgcodec_decode_file(const char *filename,
-                            UnpaperCudaStream *stream,
+bool nvimgcodec_decode_file(const char *filename, UnpaperCudaStream *stream,
                             NvImgCodecOutputFormat output_fmt,
                             NvImgCodecDecodedImage *out) {
   if (filename == NULL || out == NULL) {
@@ -767,11 +770,9 @@ bool nvimgcodec_decode_file(const char *filename,
 // Encode Operations
 // ============================================================================
 
-bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch,
-                       int width, int height,
+bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch, int width, int height,
                        NvImgCodecEncodeInputFormat input_fmt,
-                       NvImgCodecEncodeState *state,
-                       UnpaperCudaStream *stream,
+                       NvImgCodecEncodeState *state, UnpaperCudaStream *stream,
                        const NvImgCodecEncodeParams *params,
                        NvImgCodecEncodedImage *out) {
   if (!g_ctx.initialized || gpu_ptr == NULL || state == NULL ||
@@ -786,8 +787,8 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch,
   int channels = (input_fmt == NVIMGCODEC_ENC_FMT_GRAY8) ? 1 : 3;
 
   // Set up input image info
-  nvimgcodecImageInfo_t in_info = {
-      NVIMGCODEC_STRUCTURE_TYPE_IMAGE_INFO, sizeof(in_info), NULL};
+  nvimgcodecImageInfo_t in_info = {NVIMGCODEC_STRUCTURE_TYPE_IMAGE_INFO,
+                                   sizeof(in_info), NULL};
 
   switch (input_fmt) {
   case NVIMGCODEC_ENC_FMT_GRAY8:
@@ -814,7 +815,8 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch,
 
   // Create input image
   nvimgcodecImage_t image = NULL;
-  nvimgcodecStatus_t status = nvimgcodecImageCreate(g_ctx.instance, &in_info, &image);
+  nvimgcodecStatus_t status =
+      nvimgcodecImageCreate(g_ctx.instance, &in_info, &image);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
     return false;
   }
@@ -836,9 +838,9 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch,
   }
 
   nvimgcodecCodeStream_t code_stream = NULL;
-  status = nvimgcodecCodeStreamCreateToHostMem(g_ctx.instance, &code_stream,
-                                               (void *)output_buffer, est_size,
-                                               params->output_format == NVIMGCODEC_FORMAT_JPEG2000 ? "jp2" : "jpeg");
+  status = nvimgcodecCodeStreamCreateToHostMem(
+      g_ctx.instance, &code_stream, (void *)output_buffer, est_size,
+      params->output_format == NVIMGCODEC_FORMAT_JPEG2000 ? "jp2" : "jpeg");
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
     free(output_buffer);
     nvimgcodecImageDestroy(image);
@@ -891,24 +893,20 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch,
   return true;
 }
 
-bool nvimgcodec_encode_jpeg(const void *gpu_ptr, size_t pitch,
-                            int width, int height,
-                            NvImgCodecEncodeInputFormat input_fmt,
-                            int quality,
-                            NvImgCodecEncodeState *state,
+bool nvimgcodec_encode_jpeg(const void *gpu_ptr, size_t pitch, int width,
+                            int height, NvImgCodecEncodeInputFormat input_fmt,
+                            int quality, NvImgCodecEncodeState *state,
                             UnpaperCudaStream *stream,
                             NvImgCodecEncodedImage *out) {
   NvImgCodecEncodeParams params = nvimgcodec_default_jpeg_params();
   params.quality = (quality > 0) ? quality : g_ctx.jpeg_quality;
-  return nvimgcodec_encode(gpu_ptr, pitch, width, height, input_fmt,
-                           state, stream, &params, out);
+  return nvimgcodec_encode(gpu_ptr, pitch, width, height, input_fmt, state,
+                           stream, &params, out);
 }
 
-bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch,
-                           int width, int height,
-                           NvImgCodecEncodeInputFormat input_fmt,
-                           bool lossless,
-                           NvImgCodecEncodeState *state,
+bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch, int width,
+                           int height, NvImgCodecEncodeInputFormat input_fmt,
+                           bool lossless, NvImgCodecEncodeState *state,
                            UnpaperCudaStream *stream,
                            NvImgCodecEncodedImage *out) {
   NvImgCodecEncodeParams params = {
@@ -916,12 +914,12 @@ bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch,
       .quality = lossless ? 100 : 85,
       .lossless = lossless,
   };
-  return nvimgcodec_encode(gpu_ptr, pitch, width, height, input_fmt,
-                           state, stream, &params, out);
+  return nvimgcodec_encode(gpu_ptr, pitch, width, height, input_fmt, state,
+                           stream, &params, out);
 }
 
-bool nvimgcodec_encode_to_file(const void *gpu_ptr, size_t pitch,
-                               int width, int height,
+bool nvimgcodec_encode_to_file(const void *gpu_ptr, size_t pitch, int width,
+                               int height,
                                NvImgCodecEncodeInputFormat input_fmt,
                                UnpaperCudaStream *stream,
                                const NvImgCodecEncodeParams *params,
@@ -967,9 +965,7 @@ void nvimgcodec_set_jpeg_quality(int quality) {
   g_ctx.jpeg_quality = (quality < 1) ? 1 : (quality > 100) ? 100 : quality;
 }
 
-int nvimgcodec_get_jpeg_quality(void) {
-  return g_ctx.jpeg_quality;
-}
+int nvimgcodec_get_jpeg_quality(void) { return g_ctx.jpeg_quality; }
 
 #else // !UNPAPER_WITH_NVIMGCODEC
 
@@ -998,15 +994,15 @@ NvImgCodecFormat nvimgcodec_detect_format(const uint8_t *data, size_t size) {
   }
 
   // JPEG2000 codestream: FF4FFF51
-  if (size >= 4 && data[0] == 0xFF && data[1] == 0x4F &&
-      data[2] == 0xFF && data[3] == 0x51) {
+  if (size >= 4 && data[0] == 0xFF && data[1] == 0x4F && data[2] == 0xFF &&
+      data[3] == 0x51) {
     return NVIMGCODEC_FORMAT_JPEG2000;
   }
 
   // JPEG2000 JP2 file format
   if (size >= 12) {
     static const uint8_t jp2_sig[] = {0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50,
-                                       0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A};
+                                      0x20, 0x20, 0x0D, 0x0A, 0x87, 0x0A};
     if (memcmp(data, jp2_sig, 12) == 0) {
       return NVIMGCODEC_FORMAT_JPEG2000;
     }
@@ -1047,7 +1043,8 @@ bool nvimgcodec_init(int num_streams) {
   }
 
   // Initialize nvJPEG encode
-  if (!nvjpeg_encode_init(num_streams, g_jpeg_quality, NVJPEG_ENC_SUBSAMPLING_420)) {
+  if (!nvjpeg_encode_init(num_streams, g_jpeg_quality,
+                          NVJPEG_ENC_SUBSAMPLING_420)) {
     nvjpeg_context_cleanup();
     return false;
   }
@@ -1171,8 +1168,8 @@ void nvimgcodec_release_encode_state(NvImgCodecEncodeState *state) {
 }
 
 bool nvimgcodec_get_image_info(const uint8_t *data, size_t size,
-                               NvImgCodecFormat *format,
-                               int *width, int *height, int *channels) {
+                               NvImgCodecFormat *format, int *width,
+                               int *height, int *channels) {
   NvImgCodecFormat fmt = nvimgcodec_detect_format(data, size);
   if (format != NULL) {
     *format = fmt;
@@ -1197,12 +1194,11 @@ void nvimgcodec_release_completion_event(void *event, bool from_pool) {
 }
 
 bool nvimgcodec_decode(const uint8_t *data, size_t size,
-                       NvImgCodecDecodeState *state,
-                       UnpaperCudaStream *stream,
+                       NvImgCodecDecodeState *state, UnpaperCudaStream *stream,
                        NvImgCodecOutputFormat output_fmt,
                        NvImgCodecDecodedImage *out) {
-  if (!g_fallback_initialized || data == NULL || size == 0 ||
-      state == NULL || out == NULL) {
+  if (!g_fallback_initialized || data == NULL || size == 0 || state == NULL ||
+      out == NULL) {
     return false;
   }
 
@@ -1230,8 +1226,8 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   }
 
   NvJpegDecodedImage nvjpeg_out = {0};
-  bool result = nvjpeg_decode_to_gpu(data, size, state->nvjpeg_state,
-                                     stream, nvjpeg_fmt, &nvjpeg_out);
+  bool result = nvjpeg_decode_to_gpu(data, size, state->nvjpeg_state, stream,
+                                     nvjpeg_fmt, &nvjpeg_out);
   if (!result) {
     return false;
   }
@@ -1250,8 +1246,7 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   return true;
 }
 
-bool nvimgcodec_decode_file(const char *filename,
-                            UnpaperCudaStream *stream,
+bool nvimgcodec_decode_file(const char *filename, UnpaperCudaStream *stream,
                             NvImgCodecOutputFormat output_fmt,
                             NvImgCodecDecodedImage *out) {
   if (filename == NULL || out == NULL) {
@@ -1302,11 +1297,9 @@ bool nvimgcodec_decode_file(const char *filename,
   return result;
 }
 
-bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch,
-                       int width, int height,
+bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch, int width, int height,
                        NvImgCodecEncodeInputFormat input_fmt,
-                       NvImgCodecEncodeState *state,
-                       UnpaperCudaStream *stream,
+                       NvImgCodecEncodeState *state, UnpaperCudaStream *stream,
                        const NvImgCodecEncodeParams *params,
                        NvImgCodecEncodedImage *out) {
   if (!g_fallback_initialized || gpu_ptr == NULL || state == NULL ||
@@ -1342,9 +1335,9 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch,
   }
 
   NvJpegEncodedImage nvjpeg_out = {0};
-  bool result = nvjpeg_encode_from_gpu(gpu_ptr, pitch, width, height,
-                                       nvjpeg_fmt, state->nvjpeg_state,
-                                       stream, &nvjpeg_out);
+  bool result =
+      nvjpeg_encode_from_gpu(gpu_ptr, pitch, width, height, nvjpeg_fmt,
+                             state->nvjpeg_state, stream, &nvjpeg_out);
   if (!result) {
     return false;
   }
@@ -1358,24 +1351,20 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch,
   return true;
 }
 
-bool nvimgcodec_encode_jpeg(const void *gpu_ptr, size_t pitch,
-                            int width, int height,
-                            NvImgCodecEncodeInputFormat input_fmt,
-                            int quality,
-                            NvImgCodecEncodeState *state,
+bool nvimgcodec_encode_jpeg(const void *gpu_ptr, size_t pitch, int width,
+                            int height, NvImgCodecEncodeInputFormat input_fmt,
+                            int quality, NvImgCodecEncodeState *state,
                             UnpaperCudaStream *stream,
                             NvImgCodecEncodedImage *out) {
   NvImgCodecEncodeParams params = nvimgcodec_default_jpeg_params();
   params.quality = (quality > 0) ? quality : g_jpeg_quality;
-  return nvimgcodec_encode(gpu_ptr, pitch, width, height, input_fmt,
-                           state, stream, &params, out);
+  return nvimgcodec_encode(gpu_ptr, pitch, width, height, input_fmt, state,
+                           stream, &params, out);
 }
 
-bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch,
-                           int width, int height,
-                           NvImgCodecEncodeInputFormat input_fmt,
-                           bool lossless,
-                           NvImgCodecEncodeState *state,
+bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch, int width,
+                           int height, NvImgCodecEncodeInputFormat input_fmt,
+                           bool lossless, NvImgCodecEncodeState *state,
                            UnpaperCudaStream *stream,
                            NvImgCodecEncodedImage *out) {
   (void)gpu_ptr;
@@ -1390,8 +1379,8 @@ bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch,
   return false; // JP2 not supported with nvJPEG fallback
 }
 
-bool nvimgcodec_encode_to_file(const void *gpu_ptr, size_t pitch,
-                               int width, int height,
+bool nvimgcodec_encode_to_file(const void *gpu_ptr, size_t pitch, int width,
+                               int height,
                                NvImgCodecEncodeInputFormat input_fmt,
                                UnpaperCudaStream *stream,
                                const NvImgCodecEncodeParams *params,
@@ -1440,9 +1429,7 @@ void nvimgcodec_set_jpeg_quality(int quality) {
   }
 }
 
-int nvimgcodec_get_jpeg_quality(void) {
-  return g_jpeg_quality;
-}
+int nvimgcodec_get_jpeg_quality(void) { return g_jpeg_quality; }
 
 #else // !UNPAPER_WITH_CUDA
 
@@ -1497,8 +1484,8 @@ void nvimgcodec_release_encode_state(NvImgCodecEncodeState *state) {
 }
 
 bool nvimgcodec_get_image_info(const uint8_t *data, size_t size,
-                               NvImgCodecFormat *format,
-                               int *width, int *height, int *channels) {
+                               NvImgCodecFormat *format, int *width,
+                               int *height, int *channels) {
   (void)data;
   (void)size;
   (void)format;
@@ -1518,8 +1505,7 @@ void nvimgcodec_release_completion_event(void *event, bool from_pool) {
 }
 
 bool nvimgcodec_decode(const uint8_t *data, size_t size,
-                       NvImgCodecDecodeState *state,
-                       UnpaperCudaStream *stream,
+                       NvImgCodecDecodeState *state, UnpaperCudaStream *stream,
                        NvImgCodecOutputFormat output_fmt,
                        NvImgCodecDecodedImage *out) {
   (void)data;
@@ -1531,8 +1517,7 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   return false;
 }
 
-bool nvimgcodec_decode_file(const char *filename,
-                            UnpaperCudaStream *stream,
+bool nvimgcodec_decode_file(const char *filename, UnpaperCudaStream *stream,
                             NvImgCodecOutputFormat output_fmt,
                             NvImgCodecDecodedImage *out) {
   (void)filename;
@@ -1542,11 +1527,9 @@ bool nvimgcodec_decode_file(const char *filename,
   return false;
 }
 
-bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch,
-                       int width, int height,
+bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch, int width, int height,
                        NvImgCodecEncodeInputFormat input_fmt,
-                       NvImgCodecEncodeState *state,
-                       UnpaperCudaStream *stream,
+                       NvImgCodecEncodeState *state, UnpaperCudaStream *stream,
                        const NvImgCodecEncodeParams *params,
                        NvImgCodecEncodedImage *out) {
   (void)gpu_ptr;
@@ -1561,11 +1544,9 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch,
   return false;
 }
 
-bool nvimgcodec_encode_jpeg(const void *gpu_ptr, size_t pitch,
-                            int width, int height,
-                            NvImgCodecEncodeInputFormat input_fmt,
-                            int quality,
-                            NvImgCodecEncodeState *state,
+bool nvimgcodec_encode_jpeg(const void *gpu_ptr, size_t pitch, int width,
+                            int height, NvImgCodecEncodeInputFormat input_fmt,
+                            int quality, NvImgCodecEncodeState *state,
                             UnpaperCudaStream *stream,
                             NvImgCodecEncodedImage *out) {
   (void)gpu_ptr;
@@ -1580,11 +1561,9 @@ bool nvimgcodec_encode_jpeg(const void *gpu_ptr, size_t pitch,
   return false;
 }
 
-bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch,
-                           int width, int height,
-                           NvImgCodecEncodeInputFormat input_fmt,
-                           bool lossless,
-                           NvImgCodecEncodeState *state,
+bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch, int width,
+                           int height, NvImgCodecEncodeInputFormat input_fmt,
+                           bool lossless, NvImgCodecEncodeState *state,
                            UnpaperCudaStream *stream,
                            NvImgCodecEncodedImage *out) {
   (void)gpu_ptr;
@@ -1599,8 +1578,8 @@ bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch,
   return false;
 }
 
-bool nvimgcodec_encode_to_file(const void *gpu_ptr, size_t pitch,
-                               int width, int height,
+bool nvimgcodec_encode_to_file(const void *gpu_ptr, size_t pitch, int width,
+                               int height,
                                NvImgCodecEncodeInputFormat input_fmt,
                                UnpaperCudaStream *stream,
                                const NvImgCodecEncodeParams *params,

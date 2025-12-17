@@ -85,6 +85,25 @@ if have_pdf
     ]
 endif
 
+# JBIG2 support via jbig2dec (for B&W PDF images)
+jbig2_opt = get_option('jbig2')
+have_jbig2 = false
+
+if jbig2_opt.enabled() or jbig2_opt.auto()
+    jbig2dec_dep = cc.find_library('jbig2dec', required : jbig2_opt.enabled())
+    if jbig2dec_dep.found()
+        # Check for header
+        if cc.has_header('jbig2.h')
+            have_jbig2 = true
+            unpaper_c_args += ['-DUNPAPER_WITH_JBIG2=1']
+            unpaper_deps += [jbig2dec_dep]
+            unpaper_sources += ['lib/jbig2_decode.c']
+        elif jbig2_opt.enabled()
+            error('jbig2dec library found but jbig2.h header not found')
+        endif
+    endif
+endif
+
 # OpenCV and CUDA setup - OpenCV is mandatory when CUDA is enabled
 have_opencv = false
 opencv_dep = disabler()
@@ -715,6 +734,9 @@ if have_pdf
         'pdf/pdf_pipeline_cpu.c',
         'tests/pdf_pipeline_cpu_test.c',
     ]
+    if have_jbig2
+        pdf_pipeline_cpu_test_sources += ['lib/jbig2_decode.c']
+    endif
     pdf_pipeline_cpu_test = executable(
         'pdf_pipeline_cpu_test',
         pdf_pipeline_cpu_test_sources,
@@ -726,4 +748,22 @@ if have_pdf
 
     test('pdf pipeline cpu', pdf_pipeline_cpu_test,
          env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+
+    # JBIG2 decode test - requires PDF for full integration tests
+    if have_jbig2
+        jbig2_decode_test = executable(
+            'jbig2_decode_test',
+            [
+                'tests/jbig2_decode_test.c',
+                'lib/jbig2_decode.c',
+                'pdf/pdf_reader.c',
+            ],
+            c_args : unpaper_c_args,
+            dependencies : unpaper_deps,
+            install : false,
+        )
+
+        test('jbig2 decode', jbig2_decode_test,
+             env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+    endif
 endif

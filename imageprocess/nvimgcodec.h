@@ -38,7 +38,7 @@ typedef struct UnpaperCudaStream UnpaperCudaStream;
 // Supported image formats
 typedef enum {
   NVIMGCODEC_FORMAT_UNKNOWN = 0,
-  NVIMGCODEC_FORMAT_JPEG = 1,    // JPEG (JFIF/EXIF)
+  NVIMGCODEC_FORMAT_JPEG = 1,     // JPEG (JFIF/EXIF)
   NVIMGCODEC_FORMAT_JPEG2000 = 2, // JPEG2000 (JP2/J2K)
   NVIMGCODEC_FORMAT_PNG = 3,      // PNG (for future extension)
   NVIMGCODEC_FORMAT_TIFF = 4,     // TIFF (for future extension)
@@ -69,15 +69,15 @@ typedef enum {
 // ============================================================================
 
 typedef struct {
-  void *gpu_ptr;             // GPU device pointer to decoded image
-  size_t pitch;              // Row pitch in bytes (may include padding)
-  int width;                 // Image width in pixels
-  int height;                // Image height in pixels
-  int channels;              // Number of channels (1 for gray, 3 for RGB)
-  NvImgCodecOutputFormat fmt; // Output format
+  void *gpu_ptr;               // GPU device pointer to decoded image
+  size_t pitch;                // Row pitch in bytes (may include padding)
+  int width;                   // Image width in pixels
+  int height;                  // Image height in pixels
+  int channels;                // Number of channels (1 for gray, 3 for RGB)
+  NvImgCodecOutputFormat fmt;  // Output format
   NvImgCodecFormat source_fmt; // Original image format (JPEG/JP2)
-  void *completion_event;    // CUDA event signaled when decode completes
-  bool event_from_pool;      // True if event came from global event pool
+  void *completion_event;      // CUDA event signaled when decode completes
+  bool event_from_pool;        // True if event came from global event pool
 } NvImgCodecDecodedImage;
 
 // Wait for decode to complete (sync on completion event).
@@ -92,10 +92,10 @@ void nvimgcodec_release_completion_event(void *event, bool from_pool);
 // ============================================================================
 
 typedef struct {
-  uint8_t *data;     // Encoded bitstream data (host memory, caller must free)
-  size_t size;       // Size of encoded data in bytes
-  int width;         // Original image width
-  int height;        // Original image height
+  uint8_t *data; // Encoded bitstream data (host memory, caller must free)
+  size_t size;   // Size of encoded data in bytes
+  int width;     // Original image width
+  int height;    // Original image height
   NvImgCodecFormat fmt; // Output format (JPEG or JP2)
 } NvImgCodecEncodedImage;
 
@@ -128,7 +128,8 @@ bool nvimgcodec_init(int num_streams);
 void nvimgcodec_cleanup(void);
 
 // Check if nvImageCodec (unified) is available and initialized.
-// Returns true if nvImageCodec library is loaded, false if using nvJPEG fallback.
+// Returns true if nvImageCodec library is loaded, false if using nvJPEG
+// fallback.
 bool nvimgcodec_is_available(void);
 
 // Check if any GPU codec (nvImageCodec or nvJPEG fallback) is available.
@@ -151,7 +152,7 @@ typedef struct {
   size_t successful_encodes; // Successful encodes
   size_t jpeg_encodes;       // JPEG encodes
   size_t jp2_encodes;        // JP2 encodes
-  bool using_nvimgcodec;     // True if using nvImageCodec, false if nvJPEG fallback
+  bool using_nvimgcodec; // True if using nvImageCodec, false if nvJPEG fallback
 } NvImgCodecStats;
 
 // Get current statistics.
@@ -190,8 +191,8 @@ void nvimgcodec_release_encode_state(NvImgCodecEncodeState *state);
 // Detects format automatically from header bytes.
 // Returns true on success.
 bool nvimgcodec_get_image_info(const uint8_t *data, size_t size,
-                               NvImgCodecFormat *format,
-                               int *width, int *height, int *channels);
+                               NvImgCodecFormat *format, int *width,
+                               int *height, int *channels);
 
 // Decode an image directly to GPU memory.
 // Automatically detects format and uses appropriate codec.
@@ -200,8 +201,8 @@ bool nvimgcodec_get_image_info(const uint8_t *data, size_t size,
 // size: Size of image data in bytes
 // state: Per-stream decode state (acquired via nvimgcodec_acquire_decode_state)
 // stream: CUDA stream for async operations (can be NULL for default stream)
-// output_fmt: Desired output format (NVIMGCODEC_OUT_GRAY8 or NVIMGCODEC_OUT_RGB)
-// out: Output structure filled with decoded image info
+// output_fmt: Desired output format (NVIMGCODEC_OUT_GRAY8 or
+// NVIMGCODEC_OUT_RGB) out: Output structure filled with decoded image info
 //
 // Returns true on success, false on failure.
 //
@@ -209,15 +210,13 @@ bool nvimgcodec_get_image_info(const uint8_t *data, size_t size,
 // - GPU memory (out->gpu_ptr) is allocated by this function
 // - Caller must free with cudaFree when done
 bool nvimgcodec_decode(const uint8_t *data, size_t size,
-                       NvImgCodecDecodeState *state,
-                       UnpaperCudaStream *stream,
+                       NvImgCodecDecodeState *state, UnpaperCudaStream *stream,
                        NvImgCodecOutputFormat output_fmt,
                        NvImgCodecDecodedImage *out);
 
 // Decode from file directly to GPU memory.
 // Convenience wrapper that reads file and decodes.
-bool nvimgcodec_decode_file(const char *filename,
-                            UnpaperCudaStream *stream,
+bool nvimgcodec_decode_file(const char *filename, UnpaperCudaStream *stream,
                             NvImgCodecOutputFormat output_fmt,
                             NvImgCodecDecodedImage *out);
 
@@ -250,7 +249,8 @@ static inline NvImgCodecEncodeParams nvimgcodec_default_jpeg_params(void) {
 }
 
 // Default encode parameters for JP2 lossless output
-static inline NvImgCodecEncodeParams nvimgcodec_default_jp2_lossless_params(void) {
+static inline NvImgCodecEncodeParams
+nvimgcodec_default_jp2_lossless_params(void) {
   NvImgCodecEncodeParams params = {
       .output_format = NVIMGCODEC_FORMAT_JPEG2000,
       .quality = 100,
@@ -276,35 +276,29 @@ static inline NvImgCodecEncodeParams nvimgcodec_default_jp2_lossless_params(void
 // Memory ownership:
 // - out->data is allocated by this function (malloc)
 // - Caller must free(out->data) when done
-bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch,
-                       int width, int height,
+bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch, int width, int height,
                        NvImgCodecEncodeInputFormat input_fmt,
-                       NvImgCodecEncodeState *state,
-                       UnpaperCudaStream *stream,
+                       NvImgCodecEncodeState *state, UnpaperCudaStream *stream,
                        const NvImgCodecEncodeParams *params,
                        NvImgCodecEncodedImage *out);
 
 // Convenience: Encode GPU image to JPEG.
-bool nvimgcodec_encode_jpeg(const void *gpu_ptr, size_t pitch,
-                            int width, int height,
-                            NvImgCodecEncodeInputFormat input_fmt,
-                            int quality,
-                            NvImgCodecEncodeState *state,
+bool nvimgcodec_encode_jpeg(const void *gpu_ptr, size_t pitch, int width,
+                            int height, NvImgCodecEncodeInputFormat input_fmt,
+                            int quality, NvImgCodecEncodeState *state,
                             UnpaperCudaStream *stream,
                             NvImgCodecEncodedImage *out);
 
 // Convenience: Encode GPU image to JP2 (lossless by default).
-bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch,
-                           int width, int height,
-                           NvImgCodecEncodeInputFormat input_fmt,
-                           bool lossless,
-                           NvImgCodecEncodeState *state,
+bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch, int width,
+                           int height, NvImgCodecEncodeInputFormat input_fmt,
+                           bool lossless, NvImgCodecEncodeState *state,
                            UnpaperCudaStream *stream,
                            NvImgCodecEncodedImage *out);
 
 // Convenience: Encode GPU image and write to file.
-bool nvimgcodec_encode_to_file(const void *gpu_ptr, size_t pitch,
-                               int width, int height,
+bool nvimgcodec_encode_to_file(const void *gpu_ptr, size_t pitch, int width,
+                               int height,
                                NvImgCodecEncodeInputFormat input_fmt,
                                UnpaperCudaStream *stream,
                                const NvImgCodecEncodeParams *params,
