@@ -56,7 +56,8 @@ unpaper/
 │   ├── pdf_reader.c/.h    # PDF reading (MuPDF)
 │   └── pdf_writer.c/.h    # PDF writing (MuPDF)
 └── doc/                   # Documentation
-    └── CUDA_BACKEND_HISTORY.md  # Completed PR history
+    ├── CUDA_BACKEND_HISTORY.md  # Completed PR history
+    └── nvimgcodec_migration_baseline.md  # nvImageCodec migration baseline
 ```
 
 ## Architecture Overview
@@ -433,9 +434,9 @@ PDF JBIG2 → MuPDF extract (data + globals) → jbig2dec → 1-bit bitmap → e
 
 ---
 
-### PR 5.1: Establish nvImageCodec Migration Baseline
+### PR 5.1: Establish nvImageCodec Migration Baseline [COMPLETE]
 
-**Status**: Not started.
+**Status**: Complete.
 
 **Why**: Before migrating from nvJPEG to nvImageCodec, we need quantitative baseline performance numbers to ensure no regression.
 
@@ -446,13 +447,21 @@ PDF JBIG2 → MuPDF extract (data + globals) → jbig2dec → 1-bit bitmap → e
 
 The fallback architecture is unnecessary since nvImageCodec handles JPEG through its nvjpeg_ext plugin.
 
-**Tasks**:
-1. Run `tools/bench_batch.py --images 50 --jpeg --devices cuda --sequential`
-2. Run `tools/bench_jpeg_pipeline.py --images 50`
-3. Document baseline throughput (target: ~10 img/s for 50 JPEGs)
-4. Save results to `doc/nvimgcodec_migration_baseline.md`
+**Baseline Results** (50 JPEG images, 8 streams/jobs):
 
-**Success criteria**: Documented baseline numbers before any code changes.
+| Benchmark | Per Image | Throughput |
+|-----------|-----------|------------|
+| Full processing (nvJPEG decode → GPU → nvJPEG encode) | 252.8ms | 3.96 img/s |
+| Decode-only (no processing filters) | 40.4ms | 24.8 img/s |
+
+**Key findings**:
+- Processing filters dominate runtime (~84% of total time)
+- nvJPEG encode provides modest 5% speedup over D2H + CPU encode
+- Raw decode/encode throughput is ~25 img/s
+
+**Results documented in**: `doc/nvimgcodec_migration_baseline.md`
+
+**Success criteria**: Documented baseline numbers before any code changes. ✓
 
 ---
 
