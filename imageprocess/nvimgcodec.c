@@ -786,6 +786,82 @@ bool nvimgcodec_decode_file(const char *filename, UnpaperCudaStream *stream,
 }
 
 // ============================================================================
+// Batch Decode Operations
+// ============================================================================
+
+int nvimgcodec_decode_batch(const uint8_t *const *data_ptrs,
+                            const size_t *sizes, int batch_size,
+                            NvImgCodecOutputFormat output_fmt,
+                            NvImgCodecDecodedImage *outputs) {
+  if (!g_ctx.initialized || data_ptrs == NULL || sizes == NULL ||
+      outputs == NULL || batch_size <= 0) {
+    return 0;
+  }
+
+  // Initialize all outputs to zero/NULL
+  memset(outputs, 0, (size_t)batch_size * sizeof(NvImgCodecDecodedImage));
+
+  // Acquire as many decode states as we can (up to batch_size)
+  NvImgCodecDecodeState *states[MAX_DECODE_STATES];
+  int num_states = 0;
+
+  for (int i = 0; i < batch_size && i < g_ctx.num_decode_states; i++) {
+    NvImgCodecDecodeState *state = nvimgcodec_acquire_decode_state();
+    if (state != NULL) {
+      states[num_states++] = state;
+    }
+  }
+
+  if (num_states == 0) {
+    verboseLog(VERBOSE_DEBUG,
+               "nvimgcodec_decode_batch: no decode states available\n");
+    return 0;
+  }
+
+  int successful_decodes = 0;
+
+  // Process images in batches based on available states
+  // Each iteration processes up to num_states images in parallel
+  for (int offset = 0; offset < batch_size; offset += num_states) {
+    int chunk_size = batch_size - offset;
+    if (chunk_size > num_states) {
+      chunk_size = num_states;
+    }
+
+    // Launch parallel decodes (each on its own stream via state)
+    for (int i = 0; i < chunk_size; i++) {
+      int img_idx = offset + i;
+      if (data_ptrs[img_idx] == NULL || sizes[img_idx] == 0) {
+        continue;
+      }
+
+      // Decode using the assigned state (which has its own stream)
+      bool result =
+          nvimgcodec_decode(data_ptrs[img_idx], sizes[img_idx], states[i], NULL,
+                            output_fmt, &outputs[img_idx]);
+      if (result) {
+        successful_decodes++;
+      }
+    }
+
+    // Wait for all decodes in this chunk to complete before reusing states
+    for (int i = 0; i < chunk_size; i++) {
+      int img_idx = offset + i;
+      if (outputs[img_idx].completion_event != NULL) {
+        nvimgcodec_wait_decode_complete(&outputs[img_idx]);
+      }
+    }
+  }
+
+  // Release all states back to the pool
+  for (int i = 0; i < num_states; i++) {
+    nvimgcodec_release_decode_state(states[i]);
+  }
+
+  return successful_decodes;
+}
+
+// ============================================================================
 // Encode Operations
 // ============================================================================
 
@@ -1118,6 +1194,18 @@ bool nvimgcodec_decode_file(const char *filename, UnpaperCudaStream *stream,
   (void)output_fmt;
   (void)out;
   return false;
+}
+
+int nvimgcodec_decode_batch(const uint8_t *const *data_ptrs,
+                            const size_t *sizes, int batch_size,
+                            NvImgCodecOutputFormat output_fmt,
+                            NvImgCodecDecodedImage *outputs) {
+  (void)data_ptrs;
+  (void)sizes;
+  (void)batch_size;
+  (void)output_fmt;
+  (void)outputs;
+  return 0;
 }
 
 bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch, int width, int height,

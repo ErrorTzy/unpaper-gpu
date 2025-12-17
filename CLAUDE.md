@@ -489,19 +489,20 @@ The fallback architecture is unnecessary since nvImageCodec handles JPEG through
 
 ---
 
-### PR 5.3: Add Batch Decode API to nvimgcodec.c
+### PR 5.3: Add Batch Decode API to nvimgcodec.c [COMPLETE]
 
-**Status**: Not started.
+**Status**: Implemented and tested.
 
 **Why**: `batch_decode_queue.c` needs a batch decode function. Uses per-image decode internally (batched decode mode was proven slower and is being dropped).
 
-**Current API** (single image only):
-```c
-bool nvimgcodec_decode(const uint8_t *data, size_t size,
-                       NvImgCodecDecodeState *state, ...);
-```
+**Implementation**:
+- Added `nvimgcodec_decode_batch()` function that acquires N decode states from pool
+- Launches parallel decodes on separate CUDA streams (one per state)
+- Processes images in chunks when batch size exceeds available states
+- Returns count of successful decodes
+- Added stub implementation for non-CUDA builds
 
-**New batch API** (per-image internally, parallel streams):
+**Key API** (implemented in `imageprocess/nvimgcodec.h`):
 ```c
 // Batch decode - processes images in parallel using per-image decode
 int nvimgcodec_decode_batch(
@@ -513,17 +514,17 @@ int nvimgcodec_decode_batch(
 );
 ```
 
-**Implementation approach**:
-- Acquire N decode states from pool (up to available states)
-- Launch N parallel decodes on separate CUDA streams
-- Each decode is independent (per-image mode)
-- Return count of successful decodes
-
 **Files changed**:
-- `imageprocess/nvimgcodec.h` - Add batch API declaration
-- `imageprocess/nvimgcodec.c` - Add batch implementation (~100 lines)
+- `imageprocess/nvimgcodec.h` - Added batch API declaration (~20 lines)
+- `imageprocess/nvimgcodec.c` - Added batch implementation (~70 lines) + stub (~10 lines)
+- `tests/nvimgcodec_test.c` - Added 3 unit tests (~170 lines)
 
-**Success criteria**: New batch API works. Unit test passes.
+**Tests**: `tests/nvimgcodec_test.c` - Unit tests for batch decode.
+- `test_decode_batch` - Batch decode 3 images
+- `test_decode_batch_null_safety` - NULL input handling
+- `test_decode_batch_partial` - Mixed valid/NULL entries
+
+**Success**: Batch API works. All 17 CUDA tests pass including 3 new batch decode tests.
 
 ---
 

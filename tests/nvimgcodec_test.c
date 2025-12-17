@@ -349,6 +349,227 @@ static void test_decode_file(void) {
 }
 
 // ============================================================================
+// Batch Decode Tests
+// ============================================================================
+
+static void test_decode_batch(void) {
+  printf("Test: nvimgcodec_decode_batch... ");
+
+#ifdef UNPAPER_WITH_CUDA
+  if (!nvimgcodec_any_available()) {
+    printf("SKIPPED (not initialized)\n");
+    return;
+  }
+
+  // Read test JPEG file
+  FILE *f = fopen(test_jpeg_path, "rb");
+  if (f == NULL) {
+    printf("SKIPPED (test JPEG not found)\n");
+    return;
+  }
+
+  fseek(f, 0, SEEK_END);
+  long file_size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+
+  uint8_t *jpeg_data = malloc((size_t)file_size);
+  if (jpeg_data == NULL) {
+    fclose(f);
+    printf("FAILED (malloc failed)\n");
+    exit(1);
+  }
+
+  size_t bytes_read = fread(jpeg_data, 1, (size_t)file_size, f);
+  fclose(f);
+
+  if (bytes_read != (size_t)file_size) {
+    free(jpeg_data);
+    printf("FAILED (read incomplete)\n");
+    exit(1);
+  }
+
+  // Create a batch of 3 copies of the same JPEG
+  const int batch_size = 3;
+  const uint8_t *data_ptrs[3] = {jpeg_data, jpeg_data, jpeg_data};
+  size_t sizes[3] = {(size_t)file_size, (size_t)file_size, (size_t)file_size};
+  NvImgCodecDecodedImage outputs[3] = {0};
+
+  // Batch decode
+  int decoded = nvimgcodec_decode_batch(data_ptrs, sizes, batch_size,
+                                        NVIMGCODEC_OUT_GRAY8, outputs);
+
+  free(jpeg_data);
+
+  if (decoded != batch_size) {
+    printf("FAILED (decoded %d of %d)\n", decoded, batch_size);
+    // Clean up any successful decodes
+    for (int i = 0; i < batch_size; i++) {
+      if (outputs[i].gpu_ptr != NULL) {
+        cudaFree(outputs[i].gpu_ptr);
+      }
+    }
+    exit(1);
+  }
+
+  // Verify all outputs
+  for (int i = 0; i < batch_size; i++) {
+    if (outputs[i].gpu_ptr == NULL) {
+      printf("FAILED (output[%d].gpu_ptr is NULL)\n", i);
+      for (int j = 0; j < batch_size; j++) {
+        if (outputs[j].gpu_ptr != NULL) {
+          cudaFree(outputs[j].gpu_ptr);
+        }
+      }
+      exit(1);
+    }
+
+    if (outputs[i].width <= 0 || outputs[i].height <= 0) {
+      printf("FAILED (output[%d] has invalid dimensions)\n", i);
+      for (int j = 0; j < batch_size; j++) {
+        if (outputs[j].gpu_ptr != NULL) {
+          cudaFree(outputs[j].gpu_ptr);
+        }
+      }
+      exit(1);
+    }
+  }
+
+  // Clean up GPU memory
+  for (int i = 0; i < batch_size; i++) {
+    cudaFree(outputs[i].gpu_ptr);
+  }
+
+  printf("PASSED (%d images decoded)\n", decoded);
+#else
+  printf("SKIPPED (CUDA not available)\n");
+#endif
+}
+
+static void test_decode_batch_null_safety(void) {
+  printf("Test: nvimgcodec_decode_batch (null safety)... ");
+
+#ifdef UNPAPER_WITH_CUDA
+  if (!nvimgcodec_any_available()) {
+    printf("SKIPPED (not initialized)\n");
+    return;
+  }
+
+  // Test with NULL pointers - should return 0 without crashing
+  int result =
+      nvimgcodec_decode_batch(NULL, NULL, 0, NVIMGCODEC_OUT_GRAY8, NULL);
+
+  if (result != 0) {
+    printf("FAILED (expected 0 for NULL input, got %d)\n", result);
+    exit(1);
+  }
+
+  printf("PASSED\n");
+#else
+  printf("SKIPPED (CUDA not available)\n");
+#endif
+}
+
+static void test_decode_batch_partial(void) {
+  printf("Test: nvimgcodec_decode_batch (partial batch)... ");
+
+#ifdef UNPAPER_WITH_CUDA
+  if (!nvimgcodec_any_available()) {
+    printf("SKIPPED (not initialized)\n");
+    return;
+  }
+
+  // Read test JPEG file
+  FILE *f = fopen(test_jpeg_path, "rb");
+  if (f == NULL) {
+    printf("SKIPPED (test JPEG not found)\n");
+    return;
+  }
+
+  fseek(f, 0, SEEK_END);
+  long file_size = ftell(f);
+  fseek(f, 0, SEEK_SET);
+
+  uint8_t *jpeg_data = malloc((size_t)file_size);
+  if (jpeg_data == NULL) {
+    fclose(f);
+    printf("FAILED (malloc failed)\n");
+    exit(1);
+  }
+
+  size_t bytes_read = fread(jpeg_data, 1, (size_t)file_size, f);
+  fclose(f);
+
+  if (bytes_read != (size_t)file_size) {
+    free(jpeg_data);
+    printf("FAILED (read incomplete)\n");
+    exit(1);
+  }
+
+  // Create a batch with one valid and one NULL entry
+  const int batch_size = 3;
+  const uint8_t *data_ptrs[3] = {jpeg_data, NULL, jpeg_data};
+  size_t sizes[3] = {(size_t)file_size, 0, (size_t)file_size};
+  NvImgCodecDecodedImage outputs[3] = {0};
+
+  // Batch decode - should skip the NULL entry
+  int decoded = nvimgcodec_decode_batch(data_ptrs, sizes, batch_size,
+                                        NVIMGCODEC_OUT_RGB, outputs);
+
+  free(jpeg_data);
+
+  // Should have decoded 2 (first and third)
+  if (decoded != 2) {
+    printf("FAILED (expected 2 decoded, got %d)\n", decoded);
+    for (int i = 0; i < batch_size; i++) {
+      if (outputs[i].gpu_ptr != NULL) {
+        cudaFree(outputs[i].gpu_ptr);
+      }
+    }
+    exit(1);
+  }
+
+  // Verify correct entries were decoded
+  if (outputs[0].gpu_ptr == NULL) {
+    printf("FAILED (output[0] should be valid)\n");
+    for (int i = 0; i < batch_size; i++) {
+      if (outputs[i].gpu_ptr != NULL) {
+        cudaFree(outputs[i].gpu_ptr);
+      }
+    }
+    exit(1);
+  }
+
+  if (outputs[1].gpu_ptr != NULL) {
+    printf("FAILED (output[1] should be NULL)\n");
+    for (int i = 0; i < batch_size; i++) {
+      if (outputs[i].gpu_ptr != NULL) {
+        cudaFree(outputs[i].gpu_ptr);
+      }
+    }
+    exit(1);
+  }
+
+  if (outputs[2].gpu_ptr == NULL) {
+    printf("FAILED (output[2] should be valid)\n");
+    for (int i = 0; i < batch_size; i++) {
+      if (outputs[i].gpu_ptr != NULL) {
+        cudaFree(outputs[i].gpu_ptr);
+      }
+    }
+    exit(1);
+  }
+
+  // Clean up GPU memory
+  cudaFree(outputs[0].gpu_ptr);
+  cudaFree(outputs[2].gpu_ptr);
+
+  printf("PASSED\n");
+#else
+  printf("SKIPPED (CUDA not available)\n");
+#endif
+}
+
+// ============================================================================
 // Encode Tests
 // ============================================================================
 
@@ -544,6 +765,11 @@ int main(void) {
   // Decode tests
   test_decode_jpeg();
   test_decode_file();
+
+  // Batch decode tests
+  test_decode_batch();
+  test_decode_batch_null_safety();
+  test_decode_batch_partial();
 
   // Encode tests
   test_encode_jpeg();

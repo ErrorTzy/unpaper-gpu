@@ -221,6 +221,32 @@ bool nvimgcodec_decode_file(const char *filename, UnpaperCudaStream *stream,
                             NvImgCodecDecodedImage *out);
 
 // ============================================================================
+// Batch Decode Operations
+// ============================================================================
+
+// Batch decode - processes images in parallel using per-image decode.
+// Acquires up to batch_size decode states from pool and launches parallel
+// decodes on separate CUDA streams.
+//
+// data_ptrs: Array of image data pointers (host memory)
+// sizes: Array of data sizes in bytes
+// batch_size: Number of images to decode
+// output_fmt: Desired output format (NVIMGCODEC_OUT_GRAY8 or
+// NVIMGCODEC_OUT_RGB) outputs: Output array (must be pre-allocated to
+// batch_size elements)
+//
+// Returns count of successful decodes.
+//
+// Memory ownership:
+// - GPU memory (outputs[i].gpu_ptr) is allocated by this function
+// - Caller must free each output with cudaFree when done
+// - Failed decodes will have gpu_ptr set to NULL
+int nvimgcodec_decode_batch(const uint8_t *const *data_ptrs,
+                            const size_t *sizes, int batch_size,
+                            NvImgCodecOutputFormat output_fmt,
+                            NvImgCodecDecodedImage *outputs);
+
+// ============================================================================
 // Image Encode Operations
 // ============================================================================
 
