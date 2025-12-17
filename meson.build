@@ -26,6 +26,18 @@ unpaper_deps = [
     dependency('threads')
 ]
 
+# PDF support via MuPDF
+pdf_opt = get_option('pdf')
+have_pdf = false
+
+if pdf_opt.enabled() or pdf_opt.auto()
+    mupdf_dep = dependency('mupdf', required : pdf_opt.enabled())
+    if mupdf_dep.found()
+        have_pdf = true
+        unpaper_deps += [mupdf_dep]
+    endif
+endif
+
 conf_data = configuration_data()
 conf_data.set('version', meson.project_version())
 configure_file(input: 'version.h.in', output: 'version.h', configuration: conf_data)
@@ -62,6 +74,21 @@ unpaper_sources = [
     'lib/physical.c',
     'lib/threadpool.c',
 ]
+
+# PDF support sources
+if have_pdf
+    unpaper_c_args += ['-DUNPAPER_WITH_PDF=1']
+    unpaper_sources += [
+        'pdf/pdf_reader.c',
+    ]
+endif
+
+# CUDA stub for non-CUDA builds
+if not have_cuda
+    unpaper_sources += [
+        'imageprocess/backend_cuda_stub.c',
+    ]
+endif
 
 # OpenCV and CUDA setup - OpenCV is mandatory when CUDA is enabled
 have_opencv = false
@@ -569,4 +596,21 @@ if have_cuda
         ],
         timeout : -1,
     )
+endif
+
+# PDF support tests
+if have_pdf
+    pdf_reader_test = executable(
+        'pdf_reader_test',
+        [
+            'tests/pdf_reader_test.c',
+            'pdf/pdf_reader.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('pdf reader', pdf_reader_test,
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
 endif

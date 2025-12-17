@@ -1040,7 +1040,8 @@ BatchDecodedImage *batch_decode_queue_get(BatchDecodeQueue *queue,
 
     double wait_time_ms = get_time_ms() - wait_start;
     atomic_fetch_add(&queue->worker_wait_count, 1);
-    atomic_fetch_add(&queue->worker_wait_time_us, (uint64_t)(wait_time_ms * 1000.0));
+    atomic_fetch_add(&queue->worker_wait_time_us,
+                     (uint64_t)(wait_time_ms * 1000.0));
   }
 }
 
@@ -1148,9 +1149,9 @@ void batch_decode_queue_print_stats(const BatchDecodeQueue *queue) {
 
   // Print worker wait statistics if any waits occurred
   if (stats.worker_wait_count > 0) {
-    double avg_wait = stats.worker_wait_time_ms / (double)stats.worker_wait_count;
-    fprintf(stderr,
-            "  Worker waits: %zu (total %.1f ms, avg %.2f ms)\n",
+    double avg_wait =
+        stats.worker_wait_time_ms / (double)stats.worker_wait_count;
+    fprintf(stderr, "  Worker waits: %zu (total %.1f ms, avg %.2f ms)\n",
             stats.worker_wait_count, stats.worker_wait_time_ms, avg_wait);
   }
 }

@@ -60,12 +60,12 @@ typedef struct {
 
 // Encode statistics
 typedef struct {
-  size_t total_encodes;      // Number of encode calls
-  size_t successful_encodes; // Successful encodes
-  size_t failed_encodes;     // Failed encodes
-  size_t total_bytes_out;    // Total JPEG bytes produced
-  size_t concurrent_peak;    // Peak concurrent encodes
-  size_t current_in_use;     // Currently active encoder states
+  size_t total_encodes;       // Number of encode calls
+  size_t successful_encodes;  // Successful encodes
+  size_t failed_encodes;      // Failed encodes
+  size_t total_bytes_out;     // Total JPEG bytes produced
+  size_t concurrent_peak;     // Peak concurrent encodes
+  size_t current_in_use;      // Currently active encoder states
   size_t encoder_state_count; // Total encoder states in pool
 } NvJpegEncodeStats;
 
@@ -137,8 +137,8 @@ void nvjpeg_encode_release_state(NvJpegEncoderState *state);
 // - Each encode must use a different encoder state for concurrent execution
 bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
                             int height, NvJpegEncodeFormat format,
-                            NvJpegEncoderState *state, UnpaperCudaStream *stream,
-                            NvJpegEncodedImage *out);
+                            NvJpegEncoderState *state,
+                            UnpaperCudaStream *stream, NvJpegEncodedImage *out);
 
 // Convenience wrapper: encode from GPU and write directly to file.
 // Returns true on success.
@@ -157,11 +157,12 @@ bool nvjpeg_encode_gpu_to_file(const void *gpu_ptr, size_t pitch, int width,
 // Initialize batched encoder with pre-allocated resources.
 // Must call nvjpeg_encode_init() first.
 //
-// max_batch_size: Maximum images per batch (capped at NVJPEG_MAX_ENCODE_BATCH_SIZE)
-// max_width, max_height: Maximum image dimensions
+// max_batch_size: Maximum images per batch (capped at
+// NVJPEG_MAX_ENCODE_BATCH_SIZE) max_width, max_height: Maximum image dimensions
 //
 // Returns true on success.
-bool nvjpeg_encode_batch_init(int max_batch_size, int max_width, int max_height);
+bool nvjpeg_encode_batch_init(int max_batch_size, int max_width,
+                              int max_height);
 
 // Encode a batch of images from GPU memory.
 //

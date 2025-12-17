@@ -1139,7 +1139,8 @@ int main(int argc, char *argv[]) {
 
 #ifdef UNPAPER_WITH_CUDA
   // Auto-enable batch mode for CUDA backend with JPEG output
-  // This is required because GPU encode only works with the encode queue (batch mode)
+  // This is required because GPU encode only works with the encode queue (batch
+  // mode)
   if (options.device == UNPAPER_DEVICE_CUDA && !options.batch_mode) {
     // Check if any output file is JPEG
     // Output files start at optind + input_count
@@ -1568,7 +1569,8 @@ int main(int argc, char *argv[]) {
             batch_has_jpeg_output(&batch_queue)) {
           // Use same number of encoder states as CUDA streams for parallelism
           int num_encoders = num_encoder_threads > 4 ? num_encoder_threads : 4;
-          int jpeg_quality = options.jpeg_quality > 0 ? options.jpeg_quality : 85;
+          int jpeg_quality =
+              options.jpeg_quality > 0 ? options.jpeg_quality : 85;
           if (nvjpeg_encode_init(num_encoders, jpeg_quality,
                                  NVJPEG_ENC_SUBSAMPLING_420)) {
             encode_queue_enable_gpu(encode_queue, true, jpeg_quality);
@@ -1653,8 +1655,9 @@ int main(int argc, char *argv[]) {
                   batch_stats.max_batch_size_used);
         }
       }
-      // NOTE: nvjpeg_context_cleanup moved below - must happen AFTER encode cleanup
-      // because nvjpeg_encode uses the shared handle from nvjpeg_context
+      // NOTE: nvjpeg_context_cleanup moved below - must happen AFTER encode
+      // cleanup because nvjpeg_encode uses the shared handle from
+      // nvjpeg_context
 #endif
 
       // Cleanup encode queue - wait for all pending encodes to complete

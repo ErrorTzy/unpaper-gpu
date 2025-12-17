@@ -39,10 +39,10 @@ typedef struct {
   double total_encode_time_ms; // Total time spent encoding
   double avg_encode_time_ms;   // Average encode time per image
   // GPU encode stats (PR38 diagnostics)
-  size_t gpu_encodes;             // Images encoded via GPU
-  double gpu_encode_time_ms;      // Total GPU encode time
-  double gpu_encode_min_ms;       // Minimum GPU encode time
-  double gpu_encode_max_ms;       // Maximum GPU encode time
+  size_t gpu_encodes;        // Images encoded via GPU
+  double gpu_encode_time_ms; // Total GPU encode time
+  double gpu_encode_min_ms;  // Minimum GPU encode time
+  double gpu_encode_max_ms;  // Maximum GPU encode time
 } EncodeQueueStats;
 
 // Create an encode queue
@@ -110,8 +110,8 @@ bool encode_queue_gpu_enabled(const EncodeQueue *queue);
 //   channels: 1 for grayscale, 3 for RGB
 //   output_files: Array of output file paths
 //   output_count: Number of output files
-//   output_pixel_format: Desired output pixel format (e.g., AV_PIX_FMT_MONOWHITE)
-//   job_index: Job index for statistics
+//   output_pixel_format: Desired output pixel format (e.g.,
+//   AV_PIX_FMT_MONOWHITE) job_index: Job index for statistics
 //
 // Returns true on success.
 //

@@ -227,9 +227,9 @@ static void test_encode_to_file(void) {
 
   // Encode directly to file
   const char *out_path = "/tmp/nvjpeg_encode_test_output.jpg";
-  bool result =
-      nvjpeg_encode_gpu_to_file(decoded.gpu_ptr, decoded.pitch, decoded.width,
-                                decoded.height, NVJPEG_ENC_FMT_RGB, NULL, out_path);
+  bool result = nvjpeg_encode_gpu_to_file(decoded.gpu_ptr, decoded.pitch,
+                                          decoded.width, decoded.height,
+                                          NVJPEG_ENC_FMT_RGB, NULL, out_path);
 
   cudaFree(decoded.gpu_ptr);
 
@@ -343,9 +343,9 @@ static void *concurrent_encode_thread(void *arg) {
     }
 
     NvJpegEncodedImage out = {0};
-    bool result =
-        nvjpeg_encode_from_gpu(targ->gpu_ptr, targ->pitch, targ->width,
-                               targ->height, NVJPEG_ENC_FMT_RGB, state, NULL, &out);
+    bool result = nvjpeg_encode_from_gpu(targ->gpu_ptr, targ->pitch,
+                                         targ->width, targ->height,
+                                         NVJPEG_ENC_FMT_RGB, state, NULL, &out);
 
     nvjpeg_encode_release_state(state);
 

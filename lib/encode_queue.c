@@ -775,7 +775,8 @@ EncodeQueueStats encode_queue_get_stats(const EncodeQueue *queue) {
 
   uint64_t min_us = atomic_load(&queue->gpu_encode_min_us);
   uint64_t max_us = atomic_load(&queue->gpu_encode_max_us);
-  stats.gpu_encode_min_ms = (min_us == UINT64_MAX) ? 0.0 : (double)min_us / 1000.0;
+  stats.gpu_encode_min_ms =
+      (min_us == UINT64_MAX) ? 0.0 : (double)min_us / 1000.0;
   stats.gpu_encode_max_ms = (double)max_us / 1000.0;
 
   return stats;
@@ -817,7 +818,8 @@ void encode_queue_print_stats(const EncodeQueue *queue) {
 
   // Print GPU encode stats if any GPU encodes occurred
   if (stats.gpu_encodes > 0) {
-    double avg_gpu_encode = stats.gpu_encode_time_ms / (double)stats.gpu_encodes;
+    double avg_gpu_encode =
+        stats.gpu_encode_time_ms / (double)stats.gpu_encodes;
     fprintf(stderr,
             "  GPU encodes: %zu\n"
             "  GPU encode time: %.2f ms total, %.2f ms/image avg\n"
@@ -928,15 +930,15 @@ bool encode_queue_submit_gpu(EncodeQueue *queue, void *gpu_ptr, size_t pitch,
     // Update min/max (atomic compare-exchange for thread safety)
     uint64_t current_min = atomic_load(&queue->gpu_encode_min_us);
     while (encode_time < current_min &&
-           !atomic_compare_exchange_weak(&queue->gpu_encode_min_us, &current_min,
-                                         encode_time)) {
+           !atomic_compare_exchange_weak(&queue->gpu_encode_min_us,
+                                         &current_min, encode_time)) {
       // Retry with updated current_min
     }
 
     uint64_t current_max = atomic_load(&queue->gpu_encode_max_us);
     while (encode_time > current_max &&
-           !atomic_compare_exchange_weak(&queue->gpu_encode_max_us, &current_max,
-                                         encode_time)) {
+           !atomic_compare_exchange_weak(&queue->gpu_encode_max_us,
+                                         &current_max, encode_time)) {
       // Retry with updated current_max
     }
 
@@ -967,10 +969,9 @@ fallback_cpu:
     // D2H transfer
     size_t row_bytes = (size_t)width * (size_t)channels;
     for (int y = 0; y < height; y++) {
-      cudaError_t err =
-          cudaMemcpy(frame->data[0] + y * frame->linesize[0],
-                     (uint8_t *)gpu_ptr + y * pitch, row_bytes,
-                     cudaMemcpyDeviceToHost);
+      cudaError_t err = cudaMemcpy(frame->data[0] + y * frame->linesize[0],
+                                   (uint8_t *)gpu_ptr + y * pitch, row_bytes,
+                                   cudaMemcpyDeviceToHost);
       if (err != cudaSuccess) {
         av_frame_free(&frame);
         return false;

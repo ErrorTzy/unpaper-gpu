@@ -198,3 +198,96 @@ const ImageBackend backend_cuda = {
     .detect_rotation = detect_rotation_cuda,
     .deskew = deskew_cuda,
 };
+
+// Stub implementations for cuda_runtime functions when CUDA is disabled
+#include "imageprocess/cuda_runtime.h"
+
+UnpaperCudaInitStatus unpaper_cuda_try_init(void) {
+  return UNPAPER_CUDA_INIT_NO_RUNTIME;
+}
+
+const char *unpaper_cuda_init_status_string(UnpaperCudaInitStatus st) {
+  switch (st) {
+  case UNPAPER_CUDA_INIT_OK:
+    return "OK";
+  case UNPAPER_CUDA_INIT_NO_RUNTIME:
+    return "CUDA runtime not available (stub build)";
+  case UNPAPER_CUDA_INIT_NO_DEVICE:
+    return "No CUDA device";
+  case UNPAPER_CUDA_INIT_ERROR:
+    return "CUDA error";
+  default:
+    return "Unknown";
+  }
+}
+
+uint64_t unpaper_cuda_malloc(size_t bytes) {
+  (void)bytes;
+  return 0;
+}
+
+void unpaper_cuda_free(uint64_t dptr) { (void)dptr; }
+
+uint64_t unpaper_cuda_malloc_async(UnpaperCudaStream *stream, size_t bytes) {
+  (void)stream;
+  (void)bytes;
+  return 0;
+}
+
+void unpaper_cuda_free_async(UnpaperCudaStream *stream, uint64_t dptr) {
+  (void)stream;
+  (void)dptr;
+}
+
+void unpaper_cuda_malloc_async_stats(int *async_count, int *sync_count) {
+  if (async_count)
+    *async_count = 0;
+  if (sync_count)
+    *sync_count = 0;
+}
+
+void unpaper_cuda_print_async_stats(void) {
+  // No-op for stub build
+}
+
+void unpaper_cuda_memcpy_h2d(uint64_t dst, const void *src, size_t bytes) {
+  (void)dst;
+  (void)src;
+  (void)bytes;
+}
+
+void unpaper_cuda_memcpy_d2h(void *dst, uint64_t src, size_t bytes) {
+  (void)dst;
+  (void)src;
+  (void)bytes;
+}
+
+void unpaper_cuda_memcpy_d2d(uint64_t dst, uint64_t src, size_t bytes) {
+  (void)dst;
+  (void)src;
+  (void)bytes;
+}
+
+void unpaper_cuda_memcpy_h2d_async(UnpaperCudaStream *stream, uint64_t dst,
+                                   const void *src, size_t bytes) {
+  (void)stream;
+  (void)dst;
+  (void)src;
+  (void)bytes;
+}
+
+void unpaper_cuda_memcpy_d2h_async(UnpaperCudaStream *stream, void *dst,
+                                   uint64_t src, size_t bytes) {
+  (void)stream;
+  (void)dst;
+  (void)src;
+  (void)bytes;
+}
+
+void unpaper_cuda_memcpy_d2d_async(UnpaperCudaStream *stream, uint64_t dst,
+                                   uint64_t src, size_t bytes) {
+  (void)stream;
+  (void)dst;
+  (void)src;
+  (void)bytes;
+}

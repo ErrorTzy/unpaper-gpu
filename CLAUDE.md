@@ -108,9 +108,17 @@ meson compile -C builddir-cuda/
 meson test -C builddir-cuda/ -v
 ```
 
+### PDF Build
+```bash
+meson setup builddir-pdf/ -Dpdf=enabled --buildtype=debugoptimized
+meson compile -C builddir-pdf/
+meson test -C builddir-pdf/ -v
+```
+
 ### Dependencies
 - **Required**: FFmpeg libs, Meson, Ninja
 - **CUDA**: CUDA toolkit (nvJPEG, NPP), OpenCV 4.x with CUDA
+- **PDF**: MuPDF library (`libmupdf-dev` on Debian/Ubuntu)
 - **Tests**: Python 3, pytest, Pillow
 
 ## Coding Style
@@ -152,6 +160,266 @@ The CUDA backend implementation is complete. Key capabilities:
 - `cudaStreamSynchronize()` calls after decode/encode serialize GPU work
 - Workers wait for specific jobs by index, preventing out-of-order processing
 - `cudaMalloc`/`cudaFree` are inherently synchronous and serialize all streams
+
+---
+
+## PDF Support Roadmap
+
+**Goal**: PDF in → processing → PDF out, with maximum GPU performance and CPU fallback.
+
+### Design Decisions
+
+| Choice | Decision | Rationale |
+|--------|----------|-----------|
+| PDF library | MuPDF | 3x faster than Poppler, handles read+write |
+| GPU codec | nvImageCodec | Adds JPEG2000 GPU decode/encode to existing JPEG |
+| JBIG2 | jbig2dec | Native B&W support, no lossy conversion |
+| Output modes | `--pdf-quality=high\|fast` | JP2 lossless vs JPEG lossy |
+
+### Pipeline Architecture
+
+**GPU Pipeline** (optimized):
+```
+PDF → MuPDF extract raw bytes → nvImageCodec GPU decode → GPU process → GPU encode → MuPDF embed → PDF
+```
+
+**CPU Pipeline** (fallback):
+```
+PDF → MuPDF extract/render → FFmpeg decode → CPU process → FFmpeg encode → MuPDF embed → PDF
+```
+
+---
+
+### PR 1: MuPDF Integration + PDF Reader [COMPLETE]
+
+**Status**: Implemented and tested.
+
+**Why**: Foundation for PDF I/O. MuPDF extracts embedded images in native format (no re-decode).
+
+**Implementation**:
+- Add MuPDF dependency in `meson.build` (`-Dpdf=enabled`)
+- New `pdf/pdf_reader.c/.h`: open PDF, iterate pages, extract raw image bytes
+- Detect image format (JPEG, JP2, JBIG2, CCITT, raw) from PDF stream
+- Add `pdf_render_page()` fallback: render page to RGB pixels at specified DPI
+- Extract page dimensions, DPI, metadata
+
+**Key API** (implemented in `pdf/pdf_reader.h`):
+```c
+PdfDocument *pdf_open(const char *path);
+PdfDocument *pdf_open_memory(const uint8_t *data, size_t size);
+void pdf_close(PdfDocument *doc);
+int pdf_page_count(PdfDocument *doc);
+bool pdf_get_page_info(PdfDocument *doc, int page, PdfPageInfo *info);
+bool pdf_extract_page_image(PdfDocument *doc, int page, PdfImage *image);
+uint8_t *pdf_render_page(PdfDocument *doc, int page, int dpi, int *w, int *h, int *stride);
+uint8_t *pdf_render_page_gray(PdfDocument *doc, int page, int dpi, int *w, int *h, int *stride);
+PdfMetadata pdf_get_metadata(PdfDocument *doc);
+```
+
+**Tests**: `tests/pdf_reader_test.c` - Unit tests for all API functions.
+- Test PDFs in `tests/pdf_samples/`
+- Verifies page count, page info, image extraction, rendering, and metadata
+
+**Build**: `meson setup builddir -Dpdf=enabled && meson compile -C builddir`
+
+**Success**: Can extract raw JPEG bytes from PDF without re-encoding. Rendering fallback works for complex pages.
+
+---
+
+### PR 2: PDF Writer + Metadata Preservation
+
+**Why**: Create output PDFs with direct image embedding (no transcoding overhead).
+
+**Implementation**:
+- New `pdf/pdf_writer.c/.h`: create PDF, add pages, embed images
+- Support JPEG and JP2 MIME embedding (MuPDF `pdf_add_image`)
+- Add `pdf_writer_add_page_pixels()` for raw RGB/grayscale data (CPU path)
+- Copy metadata from input PDF (title, author, subject, keywords, dates)
+- Page size from original or computed from image dimensions + DPI
+
+**Key API**:
+```c
+PdfWriter *pdf_writer_create(const char *path, PdfMetadata *meta);
+void pdf_writer_add_page_jpeg(PdfWriter *w, uint8_t *data, size_t len, int width, int height);
+void pdf_writer_add_page_jp2(PdfWriter *w, uint8_t *data, size_t len, int width, int height);
+void pdf_writer_add_page_pixels(PdfWriter *w, uint8_t *pixels, int w, int h, int stride, int fmt);
+void pdf_writer_close(PdfWriter *w);
+```
+
+**Tests**: Create PDF with embedded JPEG, verify it opens in viewers, verify metadata preserved.
+
+**Success**: Output PDF contains directly embedded images, metadata matches input.
+
+---
+
+### PR 3: CPU PDF Pipeline
+
+**Why**: Functional PDF support without GPU. Uses existing CPU backend with FFmpeg decode/encode.
+
+**Implementation**:
+- Update `parse.c`: detect `.pdf` extension
+- New `pdf/pdf_pipeline_cpu.c`: orchestrate CPU PDF processing
+- For each page: extract raw bytes or render → FFmpeg decode to AVFrame → CPU process → FFmpeg encode → embed
+- Wire to existing `file.c` decode/encode functions
+- Sequential processing (no batch optimization needed for CPU)
+
+**Processing path**:
+```
+PDF page → MuPDF extract → FFmpeg decode (JPEG/JP2/PNG) → Image struct → CPU process → FFmpeg encode → PDF
+                 ↓ (fallback if extraction fails)
+         MuPDF render to pixels → Image struct → CPU process → FFmpeg encode → PDF
+```
+
+**Tests**: `unpaper --device=cpu input.pdf output.pdf` works. Compare output to golden images.
+
+**Success**: PDF processing works on CPU-only systems. All page formats handled.
+
+---
+
+### PR 4: nvImageCodec Integration
+
+**Why**: Adds JPEG2000 GPU decode/encode. Unified API replaces nvJPEG.
+
+**Implementation**:
+- Add nvImageCodec dependency (`-Dnvimgcodec=enabled`, falls back to nvJPEG if unavailable)
+- New `imageprocess/nvimgcodec.c/.h`: wrapper with format detection
+- Decode JPEG/JP2 to GPU-resident buffer
+- Encode GPU buffer to JPEG (quality 1-100) or JP2 (lossless/near-lossless)
+- Update `decode_queue.c` and `encode_queue.c` to use new API
+
+**Key API**:
+```c
+int nvimgcodec_decode(const uint8_t *data, size_t len, CUstream stream,
+                      void **gpu_ptr, int *w, int *h, CUevent *done);
+int nvimgcodec_encode_jpeg(void *gpu_ptr, int w, int h, int quality,
+                           uint8_t **out, size_t *out_len, CUstream stream);
+int nvimgcodec_encode_jp2(void *gpu_ptr, int w, int h, bool lossless,
+                          uint8_t **out, size_t *out_len, CUstream stream);
+```
+
+**Tests**: Decode JPEG/JP2, compare to CPU baseline. Encode round-trip quality check.
+
+**Success**: JPEG2000 decodes on GPU. Existing JPEG tests pass. No performance regression.
+
+---
+
+### PR 5: JBIG2 Native Support
+
+**Why**: B&W scanned documents use JBIG2. Native decode avoids lossy JPEG conversion.
+
+**Implementation**:
+- Add jbig2dec dependency (`-Djbig2=enabled`)
+- New `lib/jbig2_decode.c/.h`: decode JBIG2 to 1-bit bitmap
+- For GPU processing: convert 1-bit → 8-bit grayscale, H2D transfer
+- For output: keep as 1-bit if `--pdf-quality=high`, else convert to grayscale JPEG
+
+**Processing path**:
+```
+JBIG2 → jbig2dec (CPU) → 1-bit bitmap → expand to 8-bit → H2D → GPU process → encode
+```
+
+**Tests**: PDF with JBIG2 B&W pages processes correctly, output quality preserved.
+
+**Success**: JBIG2 PDFs process without quality loss. B&W pages stay sharp.
+
+---
+
+### PR 6: GPU PDF Pipeline Integration
+
+**Why**: Wire GPU decode/encode to PDF pipeline for maximum performance.
+
+**Implementation**:
+- New `pdf/pdf_pipeline_gpu.c`: orchestrate GPU PDF processing
+- Update `parse.c`: add options:
+  - `--pdf-quality=high|fast` (high=JP2 lossless, fast=JPEG 85)
+  - `--pdf-dpi=N` (for rendered fallback, default 300)
+- Wire: PDF extract → nvImageCodec decode → GPU process → nvImageCodec encode → PDF embed
+- Auto-select GPU vs CPU pipeline based on `--device` flag
+
+**Pipeline selection**:
+| Input Format | `--pdf-quality` | Output Format |
+|--------------|-----------------|---------------|
+| JPEG | fast | JPEG |
+| JPEG | high | JP2 lossless |
+| JP2 | fast | JPEG |
+| JP2 | high | JP2 (preserve) |
+| JBIG2 | fast | Grayscale JPEG |
+| JBIG2 | high | 1-bit PNG in PDF |
+
+**Tests**: `unpaper --device=cuda input.pdf output.pdf` works. GPU path used for JPEG/JP2.
+
+**Success**: Full GPU PDF→PDF pipeline works. `--pdf-quality` produces expected output sizes.
+
+---
+
+### PR 7: Batch PDF Processing
+
+**Why**: Multi-page PDFs need parallel processing for throughput.
+
+**Implementation**:
+- Extend `BatchQueue` to handle PDF pages as jobs
+- Pre-fetch N pages into decode queue (hide I/O latency)
+- Parallel GPU processing across pages
+- Sequential PDF write (accumulate encoded pages, write in order)
+- Progress reporting: `Processing page 5/100...`
+
+**Architecture**:
+```
+PDF pages 0..N → Decode Queue (4-8 slots) → Worker Pool → Encode Queue → PDF Writer (sequential)
+```
+
+**Tests**: 100-page PDF benchmark. Memory stays bounded. Progress accurate.
+
+**Success**: Multi-page PDFs 3-5x faster than sequential. Memory doesn't grow with page count.
+
+---
+
+### PR 8: Performance Optimization + Polish
+
+**Why**: Maximize throughput, minimize latency.
+
+**Optimizations**:
+- Async metadata read (don't block decode)
+- Page-level stream assignment (one stream per in-flight page)
+- Zero-copy paths: JPEG/JP2 bytes stay in pinned memory through pipeline
+- Memory pool for encoded output buffers
+
+**Benchmarks to hit**:
+| Metric | Target |
+|--------|--------|
+| Single page (A4 300dpi color) | <50ms GPU, <200ms CPU |
+| 100-page PDF throughput | >50 pages/sec GPU |
+| Peak GPU memory | <1GB for 8 workers |
+
+**Tests**: `tools/bench_pdf.py` automated benchmarks. CI performance regression check.
+
+**Success**: Benchmarks met. No sync points in hot path. Stable memory usage.
+
+---
+
+### Testing Strategy
+
+**Test PDFs** (create in `tests/pdf_samples/`):
+- `jpeg_color_10page.pdf` - Standard color scans
+- `jp2_archival.pdf` - JPEG2000 archival format
+- `jbig2_bw_contract.pdf` - B&W document with JBIG2
+- `mixed_formats.pdf` - Different formats per page
+- `large_100page.pdf` - Throughput stress test
+
+**Golden tests**: Process each test PDF, compare output page-by-page to golden images (existing pytest infrastructure).
+
+**Benchmarks**: `tools/bench_pdf.py` with standardized test corpus, track in CI.
+
+---
+
+### Dependencies (add to meson.build)
+
+```meson
+mupdf_dep = dependency('mupdf', required: get_option('pdf'))
+jbig2dec_dep = dependency('jbig2dec', required: false)
+# nvImageCodec: manual detection (not in pkg-config)
+nvimgcodec_dep = cc.find_library('nvimgcodec', required: false)
+```
 
 ---
 

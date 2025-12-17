@@ -45,7 +45,8 @@ UnpaperCudaStream *cuda_stream_pool_acquire(CudaStreamPool *pool);
 
 // Release a stream back to the pool.
 // NOTE: Does NOT synchronize the stream (for parallelism).
-// Caller must ensure any needed CPU-visible results are obtained before release.
+// Caller must ensure any needed CPU-visible results are obtained before
+// release.
 void cuda_stream_pool_release(CudaStreamPool *pool, UnpaperCudaStream *stream);
 
 // Get current pool statistics.

@@ -8,3 +8,10 @@ option(
   value: 'disabled',
   description: 'Enable CUDA backend support (requires OpenCV with CUDA modules)',
 )
+
+option(
+  'pdf',
+  type: 'feature',
+  value: 'disabled',
+  description: 'Enable PDF support (requires MuPDF library)',
+)

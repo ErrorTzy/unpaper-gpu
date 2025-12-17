@@ -33,8 +33,8 @@ struct NvJpegStreamState {
   nvjpegJpegStream_t jpeg_stream; // Bitstream parser (per-stream)
   cudaStream_t decode_stream; // Dedicated CUDA stream for this state (CRITICAL
                               // for parallelism)
-  cudaEvent_t completion_event;   // Pre-allocated event for async completion
-  atomic_int in_use;          // SLOT_FREE or SLOT_IN_USE
+  cudaEvent_t completion_event; // Pre-allocated event for async completion
+  atomic_int in_use;            // SLOT_FREE or SLOT_IN_USE
 };
 
 // Event pool for async decode completion tracking.
@@ -43,7 +43,7 @@ struct NvJpegStreamState {
 
 typedef struct {
   cudaEvent_t events[EVENT_POOL_SIZE];
-  atomic_int in_use[EVENT_POOL_SIZE];  // SLOT_FREE or SLOT_IN_USE
+  atomic_int in_use[EVENT_POOL_SIZE]; // SLOT_FREE or SLOT_IN_USE
   int count;
   bool initialized;
 } EventPool;
@@ -210,8 +210,8 @@ static bool event_pool_init(EventPool *pool, int count) {
   pool->initialized = false;
 
   for (int i = 0; i < count; i++) {
-    cudaError_t err = cudaEventCreateWithFlags(&pool->events[i],
-                                                cudaEventDisableTiming);
+    cudaError_t err =
+        cudaEventCreateWithFlags(&pool->events[i], cudaEventDisableTiming);
     if (err != cudaSuccess) {
       // Clean up already created events
       for (int j = 0; j < i; j++) {
@@ -248,11 +248,11 @@ static cudaEvent_t event_pool_acquire(EventPool *pool) {
   for (int i = 0; i < pool->count; i++) {
     int expected = SLOT_FREE;
     if (atomic_compare_exchange_strong(&pool->in_use[i], &expected,
-                                        SLOT_IN_USE)) {
+                                       SLOT_IN_USE)) {
       return pool->events[i];
     }
   }
-  return NULL;  // Pool exhausted
+  return NULL; // Pool exhausted
 }
 
 // Release an event back to the pool.
@@ -463,7 +463,7 @@ bool nvjpeg_context_init(int num_streams) {
   }
   if (!event_pool_init(&g_nvjpeg_ctx.event_pool, event_pool_size)) {
     verboseLog(VERBOSE_DEBUG, "nvjpeg: warning - failed to create event pool, "
-               "will create events per-decode\n");
+                              "will create events per-decode\n");
     // Non-fatal - we'll fall back to per-decode event creation
   } else {
     verboseLog(VERBOSE_DEBUG, "nvjpeg: initialized event pool with %d events\n",
@@ -720,11 +720,12 @@ bool nvjpeg_decode_to_gpu(const uint8_t *jpeg_data, size_t jpeg_size,
 
   if (completion_event == NULL) {
     // Pool exhausted - fall back to creating a new event
-    cudaError_t event_err = cudaEventCreateWithFlags(&completion_event,
-                                                      cudaEventDisableTiming);
+    cudaError_t event_err =
+        cudaEventCreateWithFlags(&completion_event, cudaEventDisableTiming);
     if (event_err != cudaSuccess) {
       // Fallback to synchronous if event creation fails
-      verboseLog(VERBOSE_DEBUG, "nvjpeg: event creation failed, falling back to sync\n");
+      verboseLog(VERBOSE_DEBUG,
+                 "nvjpeg: event creation failed, falling back to sync\n");
       cudaStreamSynchronize(cuda_stream);
       out->completion_event = NULL;
       out->event_from_pool = false;
@@ -734,7 +735,8 @@ bool nvjpeg_decode_to_gpu(const uint8_t *jpeg_data, size_t jpeg_size,
   if (completion_event != NULL) {
     cudaError_t event_err = cudaEventRecord(completion_event, cuda_stream);
     if (event_err != cudaSuccess) {
-      verboseLog(VERBOSE_DEBUG, "nvjpeg: event record failed, falling back to sync\n");
+      verboseLog(VERBOSE_DEBUG,
+                 "nvjpeg: event record failed, falling back to sync\n");
       if (event_from_pool) {
         event_pool_release(&g_nvjpeg_ctx.event_pool, completion_event);
       } else {
@@ -853,7 +855,8 @@ void nvjpeg_wait_decode_complete(NvJpegDecodedImage *image) {
   }
 
   // Release event back to pool or destroy
-  nvjpeg_release_completion_event(image->completion_event, image->event_from_pool);
+  nvjpeg_release_completion_event(image->completion_event,
+                                  image->event_from_pool);
   image->completion_event = NULL;
   image->event_from_pool = false;
 }

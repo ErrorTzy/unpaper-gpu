@@ -390,7 +390,7 @@ Image create_image_from_gpu(void *gpu_ptr, size_t pitch, int width, int height,
   st->cpu_dirty = false;
   st->cuda_dirty =
       true; // GPU has valid data that needs to be downloaded when CPU is needed
-  st->from_external = true;   // Mark as external memory (not from pool)
+  st->from_external = true;      // Mark as external memory (not from pool)
   st->owns_memory = owns_memory; // Whether to free GPU memory on release
 
   result.frame = frame;

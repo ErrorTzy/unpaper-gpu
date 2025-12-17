@@ -227,7 +227,8 @@ cuda_rect_count_brightness_range(Image image, Rectangle input_area,
 
   // Use stream-ordered allocation to avoid blocking other streams
   UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
-  uint64_t out_dptr = unpaper_cuda_malloc_async(stream, sizeof(unsigned long long));
+  uint64_t out_dptr =
+      unpaper_cuda_malloc_async(stream, sizeof(unsigned long long));
   unpaper_cuda_memset_async(stream, out_dptr, 0, sizeof(unsigned long long));
 
   const int src_fmt = (int)fmt;
@@ -268,10 +269,12 @@ cuda_rect_count_brightness_range(Image image, Rectangle input_area,
 
   // Use per-stream pinned memory for stream-specific D2H sync
   size_t pinned_capacity = 0;
-  unsigned long long *out_pinned = (unsigned long long *)unpaper_cuda_stream_pinned_reserve(
-      stream, sizeof(unsigned long long), &pinned_capacity);
+  unsigned long long *out_pinned =
+      (unsigned long long *)unpaper_cuda_stream_pinned_reserve(
+          stream, sizeof(unsigned long long), &pinned_capacity);
   unsigned long long out_fallback = 0;
-  unsigned long long *out_ptr = (out_pinned != NULL) ? out_pinned : &out_fallback;
+  unsigned long long *out_ptr =
+      (out_pinned != NULL) ? out_pinned : &out_fallback;
 
   if (out_pinned != NULL) {
     unpaper_cuda_memcpy_d2h_async(stream, out_ptr, out_dptr, sizeof(*out_ptr));
@@ -310,7 +313,8 @@ static unsigned long long cuda_rect_sum_lightness(Image image,
 
   // Use stream-ordered allocation to avoid blocking other streams
   UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
-  uint64_t out_dptr = unpaper_cuda_malloc_async(stream, sizeof(unsigned long long));
+  uint64_t out_dptr =
+      unpaper_cuda_malloc_async(stream, sizeof(unsigned long long));
   unpaper_cuda_memset_async(stream, out_dptr, 0, sizeof(unsigned long long));
 
   const int src_fmt = (int)fmt;
@@ -341,10 +345,12 @@ static unsigned long long cuda_rect_sum_lightness(Image image,
 
   // Use per-stream pinned memory for stream-specific D2H sync
   size_t pinned_capacity = 0;
-  unsigned long long *out_pinned = (unsigned long long *)unpaper_cuda_stream_pinned_reserve(
-      stream, sizeof(unsigned long long), &pinned_capacity);
+  unsigned long long *out_pinned =
+      (unsigned long long *)unpaper_cuda_stream_pinned_reserve(
+          stream, sizeof(unsigned long long), &pinned_capacity);
   unsigned long long out_fallback = 0;
-  unsigned long long *out_ptr = (out_pinned != NULL) ? out_pinned : &out_fallback;
+  unsigned long long *out_ptr =
+      (out_pinned != NULL) ? out_pinned : &out_fallback;
 
   if (out_pinned != NULL) {
     unpaper_cuda_memcpy_d2h_async(stream, out_ptr, out_dptr, sizeof(*out_ptr));
@@ -385,7 +391,8 @@ static uint32_t detect_edge_cuda(Image image, Point origin, Delta step,
     rect_h = scan_depth;
     // Max positions until we go outside image
     if (step.horizontal > 0) {
-      max_positions = (image_size.width - scan_area.vertex[0].x) / step.horizontal + 1;
+      max_positions =
+          (image_size.width - scan_area.vertex[0].x) / step.horizontal + 1;
     } else {
       max_positions = (scan_area.vertex[1].x + 1) / (-step.horizontal) + 1;
     }
@@ -401,7 +408,8 @@ static uint32_t detect_edge_cuda(Image image, Point origin, Delta step,
     rect_h = scan_size;
     // Max positions until we go outside image
     if (step.vertical > 0) {
-      max_positions = (image_size.height - scan_area.vertex[0].y) / step.vertical + 1;
+      max_positions =
+          (image_size.height - scan_area.vertex[0].y) / step.vertical + 1;
     } else {
       max_positions = (scan_area.vertex[1].y + 1) / (-step.vertical) + 1;
     }
@@ -445,9 +453,9 @@ static uint32_t detect_edge_cuda(Image image, Point origin, Delta step,
   const int step_y = step.vertical;
 
   void *params[] = {
-      &st->dptr,      &st->linesize,  &src_fmt,       &src_w,    &src_h,
-      &base_x0,       &base_y0,       &rect_w,        &rect_h,   &step_x,
-      &step_y,        &max_positions, &sums_dptr,     &counts_dptr,
+      &st->dptr, &st->linesize,  &src_fmt,   &src_w,       &src_h,
+      &base_x0,  &base_y0,       &rect_w,    &rect_h,      &step_x,
+      &step_y,   &max_positions, &sums_dptr, &counts_dptr,
   };
 
   // One block per position, 256 threads per block for parallel reduction
@@ -565,8 +573,8 @@ static bool detect_mask_cuda(Image image, MaskDetectionParameters params,
   return success;
 }
 
-// Batched version of detect_border_edge_cuda that eliminates per-iteration syncs.
-// Instead of syncing after each pixel count, we:
+// Batched version of detect_border_edge_cuda that eliminates per-iteration
+// syncs. Instead of syncing after each pixel count, we:
 // 1. Pre-compute ALL positions' dark pixel counts in a single kernel launch
 // 2. Single D2H transfer for all counts
 // 3. CPU iterates through counts to find the border
@@ -646,10 +654,9 @@ static uint32_t detect_border_edge_cuda(Image image,
   const uint8_t max_brightness = image.abs_black_threshold;
 
   void *params[] = {
-      &st->dptr,        &st->linesize, &src_fmt,        &src_w,
-      &src_h,           &base_x0,      &base_y0,        &rect_w,
-      &rect_h,          &step_x,       &step_y,         &max_positions,
-      &min_brightness,  &max_brightness, &counts_dptr,
+      &st->dptr, &st->linesize,  &src_fmt,        &src_w,          &src_h,
+      &base_x0,  &base_y0,       &rect_w,         &rect_h,         &step_x,
+      &step_y,   &max_positions, &min_brightness, &max_brightness, &counts_dptr,
   };
 
   // One block per position, 256 threads per block for parallel reduction
@@ -705,7 +712,8 @@ static unsigned long long cuda_rect_sum_darkness_inverse(Image image,
 
   // Use stream-ordered allocation to avoid blocking other streams
   UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
-  uint64_t out_dptr = unpaper_cuda_malloc_async(stream, sizeof(unsigned long long));
+  uint64_t out_dptr =
+      unpaper_cuda_malloc_async(stream, sizeof(unsigned long long));
   unpaper_cuda_memset_async(stream, out_dptr, 0, sizeof(unsigned long long));
 
   const int src_fmt = (int)fmt;
@@ -736,10 +744,12 @@ static unsigned long long cuda_rect_sum_darkness_inverse(Image image,
 
   // Use per-stream pinned memory for stream-specific D2H sync
   size_t pinned_capacity = 0;
-  unsigned long long *out_pinned = (unsigned long long *)unpaper_cuda_stream_pinned_reserve(
-      stream, sizeof(unsigned long long), &pinned_capacity);
+  unsigned long long *out_pinned =
+      (unsigned long long *)unpaper_cuda_stream_pinned_reserve(
+          stream, sizeof(unsigned long long), &pinned_capacity);
   unsigned long long out_fallback = 0;
-  unsigned long long *out_ptr = (out_pinned != NULL) ? out_pinned : &out_fallback;
+  unsigned long long *out_ptr =
+      (out_pinned != NULL) ? out_pinned : &out_fallback;
 
   if (out_pinned != NULL) {
     unpaper_cuda_memcpy_d2h_async(stream, out_ptr, out_dptr, sizeof(*out_ptr));
@@ -1574,7 +1584,8 @@ static Border detect_border_cuda(Image image, BorderScanParameters params,
 }
 
 // Parallel blackfilter using integral image + GPU parallel scan/wipe
-// This replaces the sequential flood-fill approach with fully parallel processing:
+// This replaces the sequential flood-fill approach with fully parallel
+// processing:
 // 1. Build grayscale integral image on GPU (NPP)
 // 2. Parallel scan all stripe positions to find dark blocks
 // 3. Parallel wipe all dark pixels in detected regions
@@ -1669,11 +1680,10 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
 
   // Allocate output buffers for scan results
   // Maximum possible rectangles: one per scan position
-  const int max_h_positions =
-      params.scan_direction.horizontal
-          ? ((w / params.scan_step.horizontal + 1) *
-             (h / (int)params.scan_depth.vertical + 1))
-          : 0;
+  const int max_h_positions = params.scan_direction.horizontal
+                                  ? ((w / params.scan_step.horizontal + 1) *
+                                     (h / (int)params.scan_depth.vertical + 1))
+                                  : 0;
   const int max_v_positions =
       params.scan_direction.vertical
           ? ((h / params.scan_step.vertical + 1) *
@@ -1683,12 +1693,15 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
 
   // Allocate GPU buffers for rectangle output
   // Use stream-ordered allocation to avoid blocking other streams
-  uint64_t rects_device = unpaper_cuda_malloc_async(stream, (size_t)max_rects * 4 * sizeof(int32_t));
+  uint64_t rects_device = unpaper_cuda_malloc_async(
+      stream, (size_t)max_rects * 4 * sizeof(int32_t));
   uint64_t count_device = unpaper_cuda_malloc_async(stream, sizeof(int));
   if (rects_device == 0 || count_device == 0) {
     unpaper_npp_integral_free(integral.device_ptr);
-    if (rects_device != 0) unpaper_cuda_free_async(stream, rects_device);
-    if (count_device != 0) unpaper_cuda_free_async(stream, count_device);
+    if (rects_device != 0)
+      unpaper_cuda_free_async(stream, rects_device);
+    if (count_device != 0)
+      unpaper_cuda_free_async(stream, count_device);
     return false;
   }
 
@@ -1707,24 +1720,40 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
     const int step_y = 0;
 
     for (int stripe_y = 0; stripe_y < h; stripe_y += stripe_h) {
-      const int stripe_size = (stripe_y + stripe_h > h) ? (h - stripe_y) : stripe_h;
-      if (stripe_size < scan_h) continue;
+      const int stripe_size =
+          (stripe_y + stripe_h > h) ? (h - stripe_y) : stripe_h;
+      if (stripe_size < scan_h)
+        continue;
 
       // Calculate number of scan positions in this stripe
       const int num_positions = (w - scan_w) / step_x + 1;
-      if (num_positions <= 0) continue;
+      if (num_positions <= 0)
+        continue;
 
       const uint32_t threads = 256;
-      const uint32_t blocks = (uint32_t)((num_positions + threads - 1) / threads);
+      const uint32_t blocks =
+          (uint32_t)((num_positions + threads - 1) / threads);
 
       void *scan_args[] = {
-          &integral.device_ptr, &integral_step,  &w,           &h,
-          &scan_w,              &scan_h,         &step_x,      &step_y,
-          &stripe_y,            &stripe_size,    &params.abs_threshold,
-          &intensity,           &rects_device,   &count_device, &max_rects,
+          &integral.device_ptr,
+          &integral_step,
+          &w,
+          &h,
+          &scan_w,
+          &scan_h,
+          &step_x,
+          &step_y,
+          &stripe_y,
+          &stripe_size,
+          &params.abs_threshold,
+          &intensity,
+          &rects_device,
+          &count_device,
+          &max_rects,
       };
       unpaper_cuda_launch_kernel_on_stream(stream, k_blackfilter_scan_parallel,
-                                           blocks, 1, 1, threads, 1, 1, scan_args);
+                                           blocks, 1, 1, threads, 1, 1,
+                                           scan_args);
     }
   }
 
@@ -1737,23 +1766,39 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
     const int step_y = params.scan_step.vertical;
 
     for (int stripe_x = 0; stripe_x < w; stripe_x += stripe_w) {
-      const int stripe_size = (stripe_x + stripe_w > w) ? (w - stripe_x) : stripe_w;
-      if (stripe_size < scan_w) continue;
+      const int stripe_size =
+          (stripe_x + stripe_w > w) ? (w - stripe_x) : stripe_w;
+      if (stripe_size < scan_w)
+        continue;
 
       const int num_positions = (h - scan_h) / step_y + 1;
-      if (num_positions <= 0) continue;
+      if (num_positions <= 0)
+        continue;
 
       const uint32_t threads = 256;
-      const uint32_t blocks = (uint32_t)((num_positions + threads - 1) / threads);
+      const uint32_t blocks =
+          (uint32_t)((num_positions + threads - 1) / threads);
 
       void *scan_args[] = {
-          &integral.device_ptr, &integral_step,  &w,           &h,
-          &scan_w,              &scan_h,         &step_x,      &step_y,
-          &stripe_x,            &stripe_size,    &params.abs_threshold,
-          &intensity,           &rects_device,   &count_device, &max_rects,
+          &integral.device_ptr,
+          &integral_step,
+          &w,
+          &h,
+          &scan_w,
+          &scan_h,
+          &step_x,
+          &step_y,
+          &stripe_x,
+          &stripe_size,
+          &params.abs_threshold,
+          &intensity,
+          &rects_device,
+          &count_device,
+          &max_rects,
       };
       unpaper_cuda_launch_kernel_on_stream(stream, k_blackfilter_scan_parallel,
-                                           blocks, 1, 1, threads, 1, 1, scan_args);
+                                           blocks, 1, 1, threads, 1, 1,
+                                           scan_args);
     }
   }
 
@@ -1776,7 +1821,8 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
     // Download rectangles to CPU for exclusion filtering
     int32_t *rects_host = NULL;
     if (params.exclusions_count > 0) {
-      rects_host = (int32_t *)av_malloc((size_t)rect_count * 4 * sizeof(int32_t));
+      rects_host =
+          (int32_t *)av_malloc((size_t)rect_count * 4 * sizeof(int32_t));
       if (rects_host != NULL) {
         unpaper_cuda_memcpy_d2h(rects_host, rects_device,
                                 (size_t)rect_count * 4 * sizeof(int32_t));
@@ -1790,7 +1836,8 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
           int y1 = rects_host[i * 4 + 3];
 
           Rectangle r = {{{x0, y0}, {x1, y1}}};
-          if (!rectangle_overlap_any(r, params.exclusions_count, params.exclusions)) {
+          if (!rectangle_overlap_any(r, params.exclusions_count,
+                                     params.exclusions)) {
             rects_host[new_count * 4 + 0] = x0;
             rects_host[new_count * 4 + 1] = y0;
             rects_host[new_count * 4 + 2] = x1;
@@ -1819,8 +1866,8 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
       const uint32_t grid_y = (uint32_t)((h + block2d - 1) / block2d);
 
       void *wipe_args[] = {
-          &st->dptr,      &st->linesize, &img_fmt,    &w,
-          &h,             &rects_device, &rect_count, &black_threshold,
+          &st->dptr, &st->linesize, &img_fmt,    &w,
+          &h,        &rects_device, &rect_count, &black_threshold,
       };
       unpaper_cuda_launch_kernel_on_stream(stream, k_blackfilter_wipe_regions,
                                            grid_x, grid_y, 1, block2d, block2d,
@@ -1844,8 +1891,10 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
   return true;
 }
 
-// Sequential blackfilter (fallback for formats not supported by parallel version)
-static void blackfilter_cuda_sequential(Image image, BlackfilterParameters params) {
+// Sequential blackfilter (fallback for formats not supported by parallel
+// version)
+static void blackfilter_cuda_sequential(Image image,
+                                        BlackfilterParameters params) {
   ImageCudaState *st = image_cuda_state(image);
   if (st == NULL || st->dptr == 0) {
     errOutput("CUDA image state missing for blackfilter.");
@@ -1898,7 +1947,8 @@ static void blackfilter_cuda(Image image, BlackfilterParameters params) {
 
   // NOTE: Parallel version disabled - it uses block-based detection without
   // flood-fill, which misses connected dark regions that span multiple stripes.
-  // The sequential version correctly uses flood-fill to cover all connected pixels.
+  // The sequential version correctly uses flood-fill to cover all connected
+  // pixels.
   // TODO: Fix parallel version to also flood-fill from detected regions.
 #if 0
   // Try parallel version first (for GRAY8 format)
@@ -2459,7 +2509,8 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
   const size_t coord_bytes = coord_count * sizeof(int);
   uint64_t base_x_d = unpaper_cuda_malloc_async(stream, coord_bytes);
   uint64_t base_y_d = unpaper_cuda_malloc_async(stream, coord_bytes);
-  uint64_t peaks_d = unpaper_cuda_malloc_async(stream, (size_t)rotations_count * sizeof(int));
+  uint64_t peaks_d =
+      unpaper_cuda_malloc_async(stream, (size_t)rotations_count * sizeof(int));
 
   unpaper_cuda_memcpy_h2d_async(stream, base_x_d, base_x_h, coord_bytes);
   unpaper_cuda_memcpy_h2d_async(stream, base_y_d, base_y_h, coord_bytes);
@@ -2475,12 +2526,13 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
   };
 
   unpaper_cuda_launch_kernel_on_stream(stream, k_detect_edge_rotation_peaks,
-                                       (uint32_t)rotations_count, 1, 1, 256, 1, 1,
-                                       params_k);
+                                       (uint32_t)rotations_count, 1, 1, 256, 1,
+                                       1, params_k);
 
   // Use async D2H + stream sync for stream-specific synchronization
-  // Note: peaks_h is av_malloc'd, not pinned, so async D2H will be synchronous anyway
-  // but using stream_synchronize_on ensures we only wait on this stream, not all streams
+  // Note: peaks_h is av_malloc'd, not pinned, so async D2H will be synchronous
+  // anyway but using stream_synchronize_on ensures we only wait on this stream,
+  // not all streams
   unpaper_cuda_memcpy_d2h_async(stream, peaks_h, peaks_d,
                                 (size_t)rotations_count * sizeof(int));
   unpaper_cuda_stream_synchronize_on(stream);

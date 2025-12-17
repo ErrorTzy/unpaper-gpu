@@ -23,16 +23,16 @@ typedef struct {
   bool valid;              // True if decoding succeeded
   bool uses_pinned_memory; // True if frame data is in pinned memory
   // GPU decode fields (PR36+)
-  bool on_gpu;      // True if decoded directly to GPU via nvJPEG
-  void *gpu_ptr;    // GPU memory pointer (if on_gpu)
-  size_t gpu_pitch; // Row pitch in bytes
-  int gpu_width;    // Image width in pixels
-  int gpu_height;   // Image height in pixels
-  int gpu_channels; // Number of channels (1 for gray, 3 for RGB)
-  int gpu_format;   // AVPixelFormat equivalent (AV_PIX_FMT_GRAY8 or
-                    // AV_PIX_FMT_RGB24)
-  void *gpu_completion_event;    // CUDA event for async decode completion
-  bool gpu_event_from_pool;      // True if event came from global event pool
+  bool on_gpu;                // True if decoded directly to GPU via nvJPEG
+  void *gpu_ptr;              // GPU memory pointer (if on_gpu)
+  size_t gpu_pitch;           // Row pitch in bytes
+  int gpu_width;              // Image width in pixels
+  int gpu_height;             // Image height in pixels
+  int gpu_channels;           // Number of channels (1 for gray, 3 for RGB)
+  int gpu_format;             // AVPixelFormat equivalent (AV_PIX_FMT_GRAY8 or
+                              // AV_PIX_FMT_RGB24)
+  void *gpu_completion_event; // CUDA event for async decode completion
+  bool gpu_event_from_pool;   // True if event came from global event pool
 } DecodedImage;
 
 // Wait for GPU decode to complete (if image was decoded to GPU).

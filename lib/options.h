@@ -30,11 +30,11 @@ typedef struct {
   enum AVPixelFormat output_pixel_format;
 
   // Batch processing options
-  bool batch_mode;        // Enable batch processing mode
-  int batch_jobs;         // Number of parallel workers (0 = auto-detect)
-  bool batch_progress;    // Show progress output
-  int cuda_streams;       // Number of CUDA streams (0 = auto-detect)
-  int jpeg_quality;       // JPEG output quality (1-100, 0 = default 85)
+  bool batch_mode;     // Enable batch processing mode
+  int batch_jobs;      // Number of parallel workers (0 = auto-detect)
+  bool batch_progress; // Show progress output
+  int cuda_streams;    // Number of CUDA streams (0 = auto-detect)
+  int jpeg_quality;    // JPEG output quality (1-100, 0 = default 85)
 
   Layout layout;
   int start_sheet;

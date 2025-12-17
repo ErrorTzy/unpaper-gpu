@@ -40,7 +40,7 @@ typedef struct {
   int channels;           // Number of channels (1 for gray, 3 for RGB)
   NvJpegOutputFormat fmt; // Output format
   void *completion_event; // CUDA event signaled when decode completes (opaque)
-  bool event_from_pool;   // True if completion_event came from global event pool
+  bool event_from_pool; // True if completion_event came from global event pool
 } NvJpegDecodedImage;
 
 // Wait for decode to complete (sync on completion event).

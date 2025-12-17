@@ -226,8 +226,10 @@ uint64_t unpaper_cuda_malloc_async(UnpaperCudaStream *stream, size_t bytes) {
 }
 
 void unpaper_cuda_malloc_async_stats(int *async_count, int *sync_count) {
-  if (async_count) *async_count = atomic_load(&async_alloc_count);
-  if (sync_count) *sync_count = atomic_load(&sync_fallback_count);
+  if (async_count)
+    *async_count = atomic_load(&async_alloc_count);
+  if (sync_count)
+    *sync_count = atomic_load(&sync_fallback_count);
 }
 
 void unpaper_cuda_print_async_stats(void) {
@@ -369,7 +371,8 @@ void unpaper_cuda_memset_async(UnpaperCudaStream *stream, uint64_t dst,
   }
 
   cudaStream_t s = stream_handle(stream);
-  cudaError_t err = cudaMemsetAsync((void *)(uintptr_t)dst, (int)value, bytes, s);
+  cudaError_t err =
+      cudaMemsetAsync((void *)(uintptr_t)dst, (int)value, bytes, s);
   if (err != cudaSuccess) {
     errOutput("CUDA async memset failed: %s", cudaGetErrorString(err));
   }

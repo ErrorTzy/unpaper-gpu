@@ -35,7 +35,7 @@ struct NvJpegEncoderState {
 
 // Global encoder context
 typedef struct {
-  nvjpegHandle_t handle;               // Shared with decode (from nvjpeg_decode.c)
+  nvjpegHandle_t handle; // Shared with decode (from nvjpeg_decode.c)
   NvJpegEncoderState *encoder_states;  // Array of encoder states
   int num_encoders;                    // Number of encoder states
   int quality;                         // JPEG quality (1-100)
@@ -139,7 +139,8 @@ static bool init_encoder_state(NvJpegEncoderState *enc_state) {
   // Create dedicated CUDA stream for this encoder
   cudaError_t cuda_err = cudaStreamCreate(&enc_state->encode_stream);
   if (cuda_err != cudaSuccess) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg_encode: failed to create CUDA stream: %s\n",
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg_encode: failed to create CUDA stream: %s\n",
                cudaGetErrorString(cuda_err));
     return false;
   }
@@ -148,7 +149,8 @@ static bool init_encoder_state(NvJpegEncoderState *enc_state) {
   status = nvjpegEncoderStateCreate(g_encode_ctx.handle, &enc_state->state,
                                     enc_state->encode_stream);
   if (status != NVJPEG_STATUS_SUCCESS) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg_encode: failed to create encoder state: %s\n",
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg_encode: failed to create encoder state: %s\n",
                nvjpeg_status_string(status));
     cudaStreamDestroy(enc_state->encode_stream);
     enc_state->encode_stream = NULL;
@@ -169,10 +171,11 @@ static bool init_encoder_state(NvJpegEncoderState *enc_state) {
   }
 
   // Set quality
-  status = nvjpegEncoderParamsSetQuality(enc_state->params, g_encode_ctx.quality,
-                                         enc_state->encode_stream);
+  status = nvjpegEncoderParamsSetQuality(
+      enc_state->params, g_encode_ctx.quality, enc_state->encode_stream);
   if (status != NVJPEG_STATUS_SUCCESS) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg_encode: warning - failed to set quality\n");
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg_encode: warning - failed to set quality\n");
   }
 
   // Set chroma subsampling
@@ -235,9 +238,8 @@ bool nvjpeg_encode_init(int num_encoders, int quality,
   // Get shared handle from decode context
   g_encode_ctx.handle = get_shared_handle();
   if (g_encode_ctx.handle == NULL) {
-    verboseLog(VERBOSE_DEBUG,
-               "nvjpeg_encode: nvjpeg context not initialized "
-               "(call nvjpeg_context_init first)\n");
+    verboseLog(VERBOSE_DEBUG, "nvjpeg_encode: nvjpeg context not initialized "
+                              "(call nvjpeg_context_init first)\n");
     pthread_mutex_unlock(&g_encode_init_mutex);
     return false;
   }
@@ -347,8 +349,8 @@ void nvjpeg_encode_print_stats(void) {
 
   double avg_size = 0.0;
   if (stats.successful_encodes > 0) {
-    avg_size =
-        (double)stats.total_bytes_out / (double)stats.successful_encodes / 1024.0;
+    avg_size = (double)stats.total_bytes_out /
+               (double)stats.successful_encodes / 1024.0;
   }
 
   fprintf(stderr,
@@ -405,7 +407,8 @@ void nvjpeg_encode_release_state(NvJpegEncoderState *state) {
 
 bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
                             int height, NvJpegEncodeFormat format,
-                            NvJpegEncoderState *state, UnpaperCudaStream *stream,
+                            NvJpegEncoderState *state,
+                            UnpaperCudaStream *stream,
                             NvJpegEncodedImage *out) {
   if (!g_encode_ctx.initialized || gpu_ptr == NULL || state == NULL ||
       out == NULL) {
@@ -443,8 +446,9 @@ bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
     if (cuda_err != cudaSuccess) {
       cuda_err = cudaMalloc(&rgb_buffer, rgb_size);
       if (cuda_err != cudaSuccess) {
-        verboseLog(VERBOSE_DEBUG,
-                   "nvjpeg_encode: failed to allocate RGB buffer for grayscale\n");
+        verboseLog(
+            VERBOSE_DEBUG,
+            "nvjpeg_encode: failed to allocate RGB buffer for grayscale\n");
         atomic_fetch_add(&g_encode_ctx.failed_encodes, 1);
         return false;
       }
@@ -464,8 +468,7 @@ bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
 
     // D2H: copy grayscale
     for (int y = 0; y < height; y++) {
-      cudaMemcpy(host_gray + y * width,
-                 (const uint8_t *)gpu_ptr + y * pitch,
+      cudaMemcpy(host_gray + y * width, (const uint8_t *)gpu_ptr + y * pitch,
                  (size_t)width, cudaMemcpyDeviceToHost);
     }
 
@@ -479,8 +482,8 @@ bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
     // H2D: copy RGB
     for (int y = 0; y < height; y++) {
       cudaMemcpy((uint8_t *)rgb_buffer + y * rgb_pitch,
-                 host_rgb + y * width * 3,
-                 (size_t)width * 3, cudaMemcpyHostToDevice);
+                 host_rgb + y * width * 3, (size_t)width * 3,
+                 cudaMemcpyHostToDevice);
     }
 
     free(host_gray);
@@ -490,8 +493,8 @@ bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
     input_image.pitch[0] = (unsigned int)rgb_pitch;
 
     // Set subsampling to gray for grayscale output
-    status = nvjpegEncoderParamsSetSamplingFactors(state->params, NVJPEG_CSS_GRAY,
-                                                   cuda_stream);
+    status = nvjpegEncoderParamsSetSamplingFactors(
+        state->params, NVJPEG_CSS_GRAY, cuda_stream);
     if (status != NVJPEG_STATUS_SUCCESS) {
       verboseLog(VERBOSE_DEBUG,
                  "nvjpeg_encode: warning - failed to set gray subsampling\n");
@@ -523,8 +526,8 @@ bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
 
   // Get the size of the encoded bitstream
   size_t bitstream_size = 0;
-  status = nvjpegEncodeRetrieveBitstream(g_encode_ctx.handle, state->state, NULL,
-                                         &bitstream_size, cuda_stream);
+  status = nvjpegEncodeRetrieveBitstream(g_encode_ctx.handle, state->state,
+                                         NULL, &bitstream_size, cuda_stream);
   if (status != NVJPEG_STATUS_SUCCESS) {
     verboseLog(VERBOSE_DEBUG,
                "nvjpeg_encode: failed to get bitstream size: %s\n",
@@ -539,7 +542,8 @@ bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
   // Allocate host buffer for JPEG data
   uint8_t *jpeg_data = malloc(bitstream_size);
   if (jpeg_data == NULL) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg_encode: failed to allocate output buffer\n");
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg_encode: failed to allocate output buffer\n");
     if (rgb_buffer != NULL) {
       cudaFreeAsync(rgb_buffer, cuda_stream);
     }
@@ -549,10 +553,12 @@ bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
 
   // Retrieve the encoded bitstream
   // Note: This synchronizes the stream
-  status = nvjpegEncodeRetrieveBitstream(g_encode_ctx.handle, state->state,
-                                         jpeg_data, &bitstream_size, cuda_stream);
+  status =
+      nvjpegEncodeRetrieveBitstream(g_encode_ctx.handle, state->state,
+                                    jpeg_data, &bitstream_size, cuda_stream);
   if (status != NVJPEG_STATUS_SUCCESS) {
-    verboseLog(VERBOSE_DEBUG, "nvjpeg_encode: failed to retrieve bitstream: %s\n",
+    verboseLog(VERBOSE_DEBUG,
+               "nvjpeg_encode: failed to retrieve bitstream: %s\n",
                nvjpeg_status_string(status));
     free(jpeg_data);
     if (rgb_buffer != NULL) {
@@ -584,7 +590,8 @@ bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
 
 bool nvjpeg_encode_gpu_to_file(const void *gpu_ptr, size_t pitch, int width,
                                int height, NvJpegEncodeFormat format,
-                               UnpaperCudaStream *stream, const char *filename) {
+                               UnpaperCudaStream *stream,
+                               const char *filename) {
   if (filename == NULL) {
     return false;
   }
@@ -708,9 +715,9 @@ int nvjpeg_encode_batch(const void *const *gpu_ptrs, const size_t *pitches,
       continue;
     }
 
-    bool result = nvjpeg_encode_from_gpu(gpu_ptrs[i], pitches[i], widths[i],
-                                         heights[i], format, state, NULL,
-                                         &outputs[i]);
+    bool result =
+        nvjpeg_encode_from_gpu(gpu_ptrs[i], pitches[i], widths[i], heights[i],
+                               format, state, NULL, &outputs[i]);
 
     nvjpeg_encode_release_state(state);
 
@@ -757,9 +764,7 @@ void nvjpeg_encode_set_quality(int quality) {
   pthread_mutex_unlock(&g_encode_init_mutex);
 }
 
-int nvjpeg_encode_get_quality(void) {
-  return g_encode_ctx.quality;
-}
+int nvjpeg_encode_get_quality(void) { return g_encode_ctx.quality; }
 
 void nvjpeg_encode_set_subsampling(NvJpegEncodeSubsampling subsampling) {
   pthread_mutex_lock(&g_encode_init_mutex);
@@ -820,7 +825,8 @@ void nvjpeg_encode_release_state(NvJpegEncoderState *state) { (void)state; }
 
 bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
                             int height, NvJpegEncodeFormat format,
-                            NvJpegEncoderState *state, UnpaperCudaStream *stream,
+                            NvJpegEncoderState *state,
+                            UnpaperCudaStream *stream,
                             NvJpegEncodedImage *out) {
   (void)gpu_ptr;
   (void)pitch;
@@ -835,7 +841,8 @@ bool nvjpeg_encode_from_gpu(const void *gpu_ptr, size_t pitch, int width,
 
 bool nvjpeg_encode_gpu_to_file(const void *gpu_ptr, size_t pitch, int width,
                                int height, NvJpegEncodeFormat format,
-                               UnpaperCudaStream *stream, const char *filename) {
+                               UnpaperCudaStream *stream,
+                               const char *filename) {
   (void)gpu_ptr;
   (void)pitch;
   (void)width;
