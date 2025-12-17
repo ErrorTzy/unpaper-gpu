@@ -47,7 +47,8 @@ static void init_test_paths(void) {
   }
 
   // Create output path in temp directory
-  snprintf(output_pdf_path, sizeof(output_pdf_path), "/tmp/pdf_writer_test.pdf");
+  snprintf(output_pdf_path, sizeof(output_pdf_path),
+           "/tmp/pdf_writer_test.pdf");
 }
 
 // Read a file into memory
@@ -445,7 +446,8 @@ static void test_metadata_preservation(void) {
 
   PdfMetadata read_meta = pdf_get_metadata(doc);
 
-  if (read_meta.title == NULL || strcmp(read_meta.title, "Test PDF Title") != 0) {
+  if (read_meta.title == NULL ||
+      strcmp(read_meta.title, "Test PDF Title") != 0) {
     printf("FAILED (title mismatch: expected 'Test PDF Title', got '%s')\n",
            read_meta.title ? read_meta.title : "(null)");
     pdf_free_metadata(&read_meta);
@@ -454,7 +456,8 @@ static void test_metadata_preservation(void) {
     exit(1);
   }
 
-  if (read_meta.author == NULL || strcmp(read_meta.author, "Test Author") != 0) {
+  if (read_meta.author == NULL ||
+      strcmp(read_meta.author, "Test Author") != 0) {
     printf("FAILED (author mismatch)\n");
     pdf_free_metadata(&read_meta);
     pdf_close(doc);
@@ -514,7 +517,8 @@ static void test_multi_page(void) {
   }
 
   if (pdf_writer_page_count(writer) != 3) {
-    printf("FAILED (expected 3 pages, got %d)\n", pdf_writer_page_count(writer));
+    printf("FAILED (expected 3 pages, got %d)\n",
+           pdf_writer_page_count(writer));
     pdf_writer_abort(writer);
     exit(1);
   }

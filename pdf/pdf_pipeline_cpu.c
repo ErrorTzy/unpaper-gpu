@@ -16,11 +16,11 @@
 #include "pdf_writer.h"
 
 #include <libavcodec/avcodec.h>
-#include <libavutil/opt.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/opt.h>
 #include <libavutil/pixfmt.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,7 +32,9 @@
 // JPEG quality for output (when not using direct embedding)
 #define PDF_OUTPUT_JPEG_QUALITY 85
 
-bool pdf_pipeline_is_pdf(const char *filename) { return pdf_is_pdf_file(filename); }
+bool pdf_pipeline_is_pdf(const char *filename) {
+  return pdf_is_pdf_file(filename);
+}
 
 // Decode raw image bytes (JPEG/PNG/etc) using FFmpeg
 // Returns an allocated AVFrame on success, NULL on failure
@@ -64,8 +66,8 @@ static AVFrame *decode_image_bytes(const uint8_t *data, size_t size,
   memcpy(avio_ctx_buffer, data, size);
 
   // Create custom AVIOContext from memory
-  AVIOContext *avio_ctx = avio_alloc_context(avio_ctx_buffer, (int)size, 0,
-                                              NULL, NULL, NULL, NULL);
+  AVIOContext *avio_ctx =
+      avio_alloc_context(avio_ctx_buffer, (int)size, 0, NULL, NULL, NULL, NULL);
   if (!avio_ctx) {
     av_free(avio_ctx_buffer);
     return NULL;
@@ -241,8 +243,7 @@ static Image image_from_frame(AVFrame *frame, Pixel background,
         if (B > 255)
           B = 255;
 
-        uint8_t *dst =
-            img.frame->data[0] + y * img.frame->linesize[0] + x * 3;
+        uint8_t *dst = img.frame->data[0] + y * img.frame->linesize[0] + x * 3;
         dst[0] = (uint8_t)R;
         dst[1] = (uint8_t)G;
         dst[2] = (uint8_t)B;
@@ -275,8 +276,8 @@ static Image image_from_pixels(const uint8_t *pixels, int width, int height,
   // Copy pixels
   int bytes_per_row = width * components;
   for (int y = 0; y < height; y++) {
-    memcpy(img.frame->data[0] + y * img.frame->linesize[0],
-           pixels + y * stride, bytes_per_row);
+    memcpy(img.frame->data[0] + y * img.frame->linesize[0], pixels + y * stride,
+           bytes_per_row);
   }
 
   return img;
@@ -284,7 +285,8 @@ static Image image_from_pixels(const uint8_t *pixels, int width, int height,
 
 // Encode an image to JPEG using FFmpeg
 // Returns allocated buffer and size, caller must free
-static uint8_t *encode_image_jpeg(const Image *img, int quality, size_t *out_len) {
+static uint8_t *encode_image_jpeg(const Image *img, int quality,
+                                  size_t *out_len) {
   if (img == NULL || img->frame == NULL || out_len == NULL) {
     return NULL;
   }
@@ -367,8 +369,7 @@ static uint8_t *encode_image_jpeg(const Image *img, int quality, size_t *out_len
   } else if (img->frame->format == AV_PIX_FMT_RGB24) {
     // RGB24 -> YUVJ420P conversion
     for (int y = 0; y < ctx->height; y++) {
-      const uint8_t *src =
-          img->frame->data[0] + y * img->frame->linesize[0];
+      const uint8_t *src = img->frame->data[0] + y * img->frame->linesize[0];
       uint8_t *dst_y = enc_frame->data[0] + y * enc_frame->linesize[0];
       for (int x = 0; x < ctx->width; x++) {
         int R = src[x * 3 + 0];
@@ -522,8 +523,8 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
                  pdf_img.height);
 
       // Try to decode with FFmpeg
-      AVFrame *frame = decode_image_bytes(pdf_img.data, pdf_img.size,
-                                          pdf_img.format);
+      AVFrame *frame =
+          decode_image_bytes(pdf_img.data, pdf_img.size, pdf_img.format);
       if (frame) {
         page_image = image_from_frame(frame, options->sheet_background,
                                       options->abs_black_threshold);
@@ -540,8 +541,8 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
     // Fall back to rendering if extraction failed
     if (!extracted) {
       int stride = 0;
-      uint8_t *pixels =
-          pdf_render_page(doc, page_idx, PDF_RENDER_DPI, &width, &height, &stride);
+      uint8_t *pixels = pdf_render_page(doc, page_idx, PDF_RENDER_DPI, &width,
+                                        &height, &stride);
       if (pixels) {
         verboseLog(VERBOSE_MORE,
                    "PDF pipeline: rendered page at %d DPI (%dx%d)\n",
@@ -582,9 +583,9 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
     state.input_size = size_of_image(page_image);
 
     // Create sheet from page (single-page layout)
-    state.sheet = create_image(state.input_size, AV_PIX_FMT_RGB24, true,
-                               options->sheet_background,
-                               options->abs_black_threshold);
+    state.sheet =
+        create_image(state.input_size, AV_PIX_FMT_RGB24, true,
+                     options->sheet_background, options->abs_black_threshold);
 
     // Copy page to sheet
     center_image(state.page, state.sheet, POINT_ORIGIN, state.input_size);
@@ -648,21 +649,21 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
     // Encode to JPEG
     size_t jpeg_len = 0;
     int quality = (options->jpeg_quality > 0) ? options->jpeg_quality
-                                               : PDF_OUTPUT_JPEG_QUALITY;
+                                              : PDF_OUTPUT_JPEG_QUALITY;
     uint8_t *jpeg_data = encode_image_jpeg(&state.sheet, quality, &jpeg_len);
 
     bool page_success = false;
     if (jpeg_data && jpeg_len > 0) {
       // Add JPEG page to output PDF
-      page_success = pdf_writer_add_page_jpeg(writer, jpeg_data, jpeg_len,
-                                               out_width, out_height,
-                                               PDF_RENDER_DPI);
+      page_success = pdf_writer_add_page_jpeg(
+          writer, jpeg_data, jpeg_len, out_width, out_height, PDF_RENDER_DPI);
       free(jpeg_data);
     }
 
     if (!page_success) {
       // Fall back to pixel embedding
-      verboseLog(VERBOSE_MORE, "PDF pipeline: JPEG encode failed, using pixels\n");
+      verboseLog(VERBOSE_MORE,
+                 "PDF pipeline: JPEG encode failed, using pixels\n");
       int stride = state.sheet.frame->linesize[0];
       PdfPixelFormat fmt = (state.sheet.frame->format == AV_PIX_FMT_GRAY8)
                                ? PDF_PIXEL_GRAY8
@@ -675,7 +676,8 @@ int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
     perf_stage_end(&perf, PERF_STAGE_ENCODE);
 
     if (!page_success) {
-      verboseLog(VERBOSE_NORMAL, "PDF pipeline: failed to add page %d to output\n",
+      verboseLog(VERBOSE_NORMAL,
+                 "PDF pipeline: failed to add page %d to output\n",
                  page_idx + 1);
       failed_pages++;
     }

@@ -19,8 +19,8 @@ typedef struct PdfWriter PdfWriter;
 
 // Pixel format for pdf_writer_add_page_pixels
 typedef enum {
-  PDF_PIXEL_GRAY8 = 0,  // 8-bit grayscale
-  PDF_PIXEL_RGB24,      // 24-bit RGB (R, G, B, R, G, B, ...)
+  PDF_PIXEL_GRAY8 = 0, // 8-bit grayscale
+  PDF_PIXEL_RGB24,     // 24-bit RGB (R, G, B, R, G, B, ...)
 } PdfPixelFormat;
 
 // ============================================================================

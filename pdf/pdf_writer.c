@@ -301,9 +301,8 @@ bool pdf_writer_add_page_jpeg(PdfWriter *writer, const uint8_t *data,
   int components = detect_jpeg_components(data, len);
 
   fz_try(ctx) {
-    image_obj =
-        create_image_xobject(ctx, writer->doc, data, len, width, height, true,
-                             components);
+    image_obj = create_image_xobject(ctx, writer->doc, data, len, width, height,
+                                     true, components);
     result = add_page_with_image(writer, image_obj, width, height, dpi);
   }
   fz_always(ctx) { pdf_drop_obj(ctx, image_obj); }

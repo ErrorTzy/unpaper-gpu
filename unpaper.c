@@ -1189,8 +1189,8 @@ int main(int argc, char *argv[]) {
                                 blackfilterExclude, 0);
 
       // Run PDF pipeline
-      int failed = pdf_pipeline_cpu_process(input_file, output_file, &options,
-                                            &config);
+      int failed =
+          pdf_pipeline_cpu_process(input_file, output_file, &options, &config);
 
       return (failed > 0) ? 1 : 0;
     }
