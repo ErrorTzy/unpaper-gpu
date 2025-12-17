@@ -47,6 +47,10 @@
 #include "unpaper.h"
 #include "version.h"
 
+#if defined(UNPAPER_WITH_PDF) && (UNPAPER_WITH_PDF)
+#include "pdf/pdf_pipeline_cpu.h"
+#endif
+
 #define WELCOME                                                                \
   "unpaper " VERSION_STR "\n"                                                  \
   "License GPLv2: GNU GPL version 2.\n"                                        \
@@ -1136,6 +1140,62 @@ int main(int argc, char *argv[]) {
   verboseLog(VERBOSE_NORMAL, WELCOME); // welcome message
 
   image_backend_select(options.device);
+
+#if defined(UNPAPER_WITH_PDF) && (UNPAPER_WITH_PDF)
+  // Check for PDF input/output - use dedicated PDF pipeline
+  // PDF processing uses a separate pipeline that handles multi-page documents
+  {
+    // Get input and output file paths
+    // For PDF, we only support single input -> single output mode
+    const char *input_file = argv[optind];
+    int output_idx = optind + options.input_count;
+    const char *output_file = (output_idx < argc) ? argv[output_idx] : NULL;
+
+    if (input_file && output_file && pdf_pipeline_is_pdf(input_file) &&
+        pdf_pipeline_is_pdf(output_file)) {
+      // Check for unsupported options with PDF mode
+      if (options.input_count != 1 || options.output_count != 1) {
+        errOutput("PDF mode only supports single input/output. "
+                  "Use --input-pages=1 --output-pages=1");
+      }
+
+      // Check if input file exists
+      struct stat statBuf;
+      if (stat(input_file, &statBuf) != 0) {
+        errOutput("unable to open PDF file %s.", input_file);
+      }
+
+      // Check for existing output file
+      if (!options.overwrite_output) {
+        if (stat(output_file, &statBuf) == 0) {
+          errOutput("output file '%s' already present.\n", output_file);
+        }
+      }
+
+      verboseLog(VERBOSE_NORMAL, "PDF mode: %s -> %s\n", input_file,
+                 output_file);
+
+      // Set up sheet processing configuration
+      Rectangle preMasks[MAX_MASKS];
+      size_t preMaskCount = 0;
+      Point points[MAX_POINTS];
+      size_t pointCount = 0;
+      int32_t middleWipe[2] = {0, 0};
+      Rectangle blackfilterExclude[MAX_MASKS];
+
+      SheetProcessConfig config;
+      sheet_process_config_init(&config, &options, preMasks, preMaskCount,
+                                points, pointCount, middleWipe,
+                                blackfilterExclude, 0);
+
+      // Run PDF pipeline
+      int failed = pdf_pipeline_cpu_process(input_file, output_file, &options,
+                                            &config);
+
+      return (failed > 0) ? 1 : 0;
+    }
+  }
+#endif
 
 #ifdef UNPAPER_WITH_CUDA
   // Auto-enable batch mode for CUDA backend with JPEG output

@@ -81,6 +81,7 @@ if have_pdf
     unpaper_sources += [
         'pdf/pdf_reader.c',
         'pdf/pdf_writer.c',
+        'pdf/pdf_pipeline_cpu.c',
     ]
 endif
 
@@ -628,5 +629,50 @@ if have_pdf
     )
 
     test('pdf writer', pdf_writer_test,
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+
+    # PDF pipeline CPU test - uses processing pipeline without main()
+    pdf_pipeline_cpu_test_sources = [
+        'file.c', 'parse.c', 'sheet_process.c',
+        'imageprocess/blit.c',
+        'imageprocess/backend.c',
+        'imageprocess/cuda_mempool.c',
+        'imageprocess/cuda_stream_pool.c',
+        'imageprocess/deskew.c',
+        'imageprocess/interpolate.c',
+        'imageprocess/fill.c',
+        'imageprocess/filters.c',
+        'imageprocess/image.c',
+        'imageprocess/image_cuda.c',
+        'imageprocess/masks.c',
+        'imageprocess/pixel.c',
+        'imageprocess/primitives.c',
+        'imageprocess/backend_cuda_stub.c',
+        'lib/batch.c',
+        'lib/batch_decode_queue.c',
+        'lib/batch_worker.c',
+        'lib/decode_queue.c',
+        'lib/encode_queue.c',
+        'lib/gpu_monitor.c',
+        'lib/logging.c',
+        'lib/perf.c',
+        'lib/options.c',
+        'lib/physical.c',
+        'lib/threadpool.c',
+        'pdf/pdf_reader.c',
+        'pdf/pdf_writer.c',
+        'pdf/pdf_pipeline_cpu.c',
+        'tests/pdf_pipeline_cpu_test.c',
+    ]
+    pdf_pipeline_cpu_test = executable(
+        'pdf_pipeline_cpu_test',
+        pdf_pipeline_cpu_test_sources,
+        c_args : unpaper_c_args,
+        cpp_args : cpp_enabled ? unpaper_cpp_args : [],
+        dependencies : unpaper_all_deps,
+        install : false,
+    )
+
+    test('pdf pipeline cpu', pdf_pipeline_cpu_test,
          env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
 endif

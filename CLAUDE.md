@@ -267,27 +267,44 @@ int pdf_writer_page_count(const PdfWriter *w);
 
 ---
 
-### PR 3: CPU PDF Pipeline
+### PR 3: CPU PDF Pipeline [COMPLETE]
+
+**Status**: Implemented and tested.
 
 **Why**: Functional PDF support without GPU. Uses existing CPU backend with FFmpeg decode/encode.
 
 **Implementation**:
-- Update `parse.c`: detect `.pdf` extension
-- New `pdf/pdf_pipeline_cpu.c`: orchestrate CPU PDF processing
+- New `pdf/pdf_pipeline_cpu.c/.h`: orchestrate CPU PDF processing
+- Wire PDF detection in `unpaper.c` main to auto-switch to PDF pipeline
 - For each page: extract raw bytes or render → FFmpeg decode to AVFrame → CPU process → FFmpeg encode → embed
-- Wire to existing `file.c` decode/encode functions
-- Sequential processing (no batch optimization needed for CPU)
+- Sequential processing (optimized for throughput)
 
 **Processing path**:
 ```
-PDF page → MuPDF extract → FFmpeg decode (JPEG/JP2/PNG) → Image struct → CPU process → FFmpeg encode → PDF
+PDF page → MuPDF extract → FFmpeg decode (JPEG/PNG) → Image struct → CPU process → JPEG encode → PDF
                  ↓ (fallback if extraction fails)
-         MuPDF render to pixels → Image struct → CPU process → FFmpeg encode → PDF
+         MuPDF render to pixels → Image struct → CPU process → JPEG encode → PDF
 ```
 
-**Tests**: `unpaper --device=cpu input.pdf output.pdf` works. Compare output to golden images.
+**Key API** (implemented in `pdf/pdf_pipeline_cpu.h`):
+```c
+int pdf_pipeline_cpu_process(const char *input_path, const char *output_path,
+                             const Options *options,
+                             const SheetProcessConfig *config);
+bool pdf_pipeline_is_pdf(const char *filename);
+```
 
-**Success**: PDF processing works on CPU-only systems. All page formats handled.
+**Tests**: `tests/pdf_pipeline_cpu_test.c` - Unit tests for PDF pipeline.
+- Single-page PDF processing
+- Multi-page PDF processing
+- Invalid input handling
+- Output quality verification
+
+**Build**: `meson setup builddir-pdf -Dpdf=enabled && meson compile -C builddir-pdf`
+
+**Usage**: `unpaper input.pdf output.pdf` - Auto-detects PDF files and uses PDF pipeline.
+
+**Success**: PDF processing works on CPU-only systems. JPEG and rendered pages handled correctly.
 
 ---
 
