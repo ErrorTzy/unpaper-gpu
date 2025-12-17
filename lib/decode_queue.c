@@ -20,6 +20,7 @@
 
 #ifdef UNPAPER_WITH_CUDA
 #include "imageprocess/cuda_runtime.h"
+#include "imageprocess/nvimgcodec.h"
 #include "imageprocess/nvjpeg_decode.h"
 #include <cuda_runtime_api.h>
 #endif
@@ -48,15 +49,43 @@ static bool is_jpeg_file(const char *filename) {
   return false;
 }
 
+// Check if filename has JPEG2000 extension
+static bool is_jp2_file(const char *filename) {
+  if (filename == NULL) {
+    return false;
+  }
+  const char *ext = strrchr(filename, '.');
+  if (ext == NULL) {
+    return false;
+  }
+  // Case-insensitive comparison for JP2/J2K/J2C extensions
+  if (strcasecmp(ext, ".jp2") == 0 || strcasecmp(ext, ".j2k") == 0 ||
+      strcasecmp(ext, ".j2c") == 0 || strcasecmp(ext, ".jpx") == 0) {
+    return true;
+  }
+  return false;
+}
+
+// Check if file is GPU-decodable (JPEG or JP2)
+static bool is_gpu_decodable_file(const char *filename) {
+  return is_jpeg_file(filename) || is_jp2_file(filename);
+}
+
 #ifdef UNPAPER_WITH_CUDA
-// Decode a JPEG file directly to GPU memory using nvJPEG
+// Decode a JPEG or JP2 file directly to GPU memory using nvImageCodec
+// Falls back to nvJPEG for JPEG files if nvImageCodec is not available
 // Returns true if successful, fills in DecodedImage GPU fields
-static bool decode_jpeg_to_gpu(const char *filename, DecodedImage *out) {
-  if (!nvjpeg_is_available()) {
+static bool decode_image_to_gpu(const char *filename, DecodedImage *out) {
+  // Check if nvimgcodec is available (either full or nvJPEG fallback)
+  if (!nvimgcodec_any_available()) {
+    // Fall back to legacy nvJPEG path for JPEG files
+    if (is_jpeg_file(filename) && nvjpeg_is_available()) {
+      goto legacy_nvjpeg;
+    }
     return false;
   }
 
-  // Read the JPEG file into memory
+  // Read the file into memory
   FILE *f = fopen(filename, "rb");
   if (f == NULL) {
     return false;
@@ -71,43 +100,49 @@ static bool decode_jpeg_to_gpu(const char *filename, DecodedImage *out) {
     return false;
   }
 
-  uint8_t *jpeg_data = malloc((size_t)file_size);
-  if (jpeg_data == NULL) {
+  uint8_t *data = malloc((size_t)file_size);
+  if (data == NULL) {
     fclose(f);
     return false;
   }
 
-  size_t bytes_read = fread(jpeg_data, 1, (size_t)file_size, f);
+  size_t bytes_read = fread(data, 1, (size_t)file_size, f);
   fclose(f);
 
   if (bytes_read != (size_t)file_size) {
-    free(jpeg_data);
+    free(data);
     return false;
   }
 
-  // Acquire a stream state for decode
-  NvJpegStreamState *state = nvjpeg_acquire_stream_state();
-  if (state == NULL) {
-    free(jpeg_data);
-    return false;
-  }
-
-  // Decode to GPU - default to grayscale for document processing
-  // The output format can be adjusted based on image channels
-  NvJpegDecodedImage nvout = {0};
-
-  // Get image info first to determine output format
+  // Get image info to determine output format
+  NvImgCodecFormat format = NVIMGCODEC_FORMAT_UNKNOWN;
   int channels = 1;
-  nvjpeg_get_image_info(jpeg_data, (size_t)file_size, NULL, NULL, &channels);
+  nvimgcodec_get_image_info(data, (size_t)file_size, &format, NULL, NULL,
+                            &channels);
+
+  // Check if format is supported (JP2 requires full nvImageCodec)
+  if (format == NVIMGCODEC_FORMAT_JPEG2000 && !nvimgcodec_jp2_supported()) {
+    free(data);
+    return false; // JP2 not supported without nvImageCodec
+  }
+
+  // Acquire decode state
+  NvImgCodecDecodeState *state = nvimgcodec_acquire_decode_state();
+  if (state == NULL) {
+    free(data);
+    return false;
+  }
 
   // Use grayscale for 1-channel, RGB for multi-channel
-  NvJpegOutputFormat fmt = (channels == 1) ? NVJPEG_FMT_GRAY8 : NVJPEG_FMT_RGB;
+  NvImgCodecOutputFormat out_fmt =
+      (channels == 1) ? NVIMGCODEC_OUT_GRAY8 : NVIMGCODEC_OUT_RGB;
 
-  bool result = nvjpeg_decode_to_gpu(jpeg_data, (size_t)file_size, state, NULL,
-                                     fmt, &nvout);
+  NvImgCodecDecodedImage nvout = {0};
+  bool result =
+      nvimgcodec_decode(data, (size_t)file_size, state, NULL, out_fmt, &nvout);
 
-  nvjpeg_release_stream_state(state);
-  free(jpeg_data);
+  nvimgcodec_release_decode_state(state);
+  free(data);
 
   if (!result) {
     return false;
@@ -120,7 +155,7 @@ static bool decode_jpeg_to_gpu(const char *filename, DecodedImage *out) {
   out->gpu_width = nvout.width;
   out->gpu_height = nvout.height;
   out->gpu_channels = nvout.channels;
-  // Map nvJPEG format to AVPixelFormat
+  // Map format to AVPixelFormat
   out->gpu_format = (nvout.channels == 1) ? AV_PIX_FMT_GRAY8 : AV_PIX_FMT_RGB24;
   out->frame = NULL; // No CPU frame needed
   // Store completion event for async decode (caller must sync before use)
@@ -128,6 +163,74 @@ static bool decode_jpeg_to_gpu(const char *filename, DecodedImage *out) {
   out->gpu_event_from_pool = nvout.event_from_pool;
 
   return true;
+
+legacy_nvjpeg:
+  // Legacy nvJPEG path for when nvimgcodec isn't initialized
+  {
+    FILE *f = fopen(filename, "rb");
+    if (f == NULL) {
+      return false;
+    }
+
+    fseek(f, 0, SEEK_END);
+    long file_size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+
+    if (file_size <= 0 || file_size > (long)(100 * 1024 * 1024)) {
+      fclose(f);
+      return false;
+    }
+
+    uint8_t *jpeg_data = malloc((size_t)file_size);
+    if (jpeg_data == NULL) {
+      fclose(f);
+      return false;
+    }
+
+    size_t bytes_read = fread(jpeg_data, 1, (size_t)file_size, f);
+    fclose(f);
+
+    if (bytes_read != (size_t)file_size) {
+      free(jpeg_data);
+      return false;
+    }
+
+    NvJpegStreamState *state = nvjpeg_acquire_stream_state();
+    if (state == NULL) {
+      free(jpeg_data);
+      return false;
+    }
+
+    int channels = 1;
+    nvjpeg_get_image_info(jpeg_data, (size_t)file_size, NULL, NULL, &channels);
+    NvJpegOutputFormat fmt =
+        (channels == 1) ? NVJPEG_FMT_GRAY8 : NVJPEG_FMT_RGB;
+
+    NvJpegDecodedImage nvout = {0};
+    bool result = nvjpeg_decode_to_gpu(jpeg_data, (size_t)file_size, state,
+                                       NULL, fmt, &nvout);
+
+    nvjpeg_release_stream_state(state);
+    free(jpeg_data);
+
+    if (!result) {
+      return false;
+    }
+
+    out->on_gpu = true;
+    out->gpu_ptr = nvout.gpu_ptr;
+    out->gpu_pitch = nvout.pitch;
+    out->gpu_width = nvout.width;
+    out->gpu_height = nvout.height;
+    out->gpu_channels = nvout.channels;
+    out->gpu_format =
+        (nvout.channels == 1) ? AV_PIX_FMT_GRAY8 : AV_PIX_FMT_RGB24;
+    out->frame = NULL;
+    out->gpu_completion_event = nvout.completion_event;
+    out->gpu_event_from_pool = nvout.event_from_pool;
+
+    return true;
+  }
 }
 #endif // UNPAPER_WITH_CUDA
 
@@ -446,11 +549,11 @@ static void *producer_thread_fn(void *arg) {
       slot->image.gpu_event_from_pool = false;
 
 #ifdef UNPAPER_WITH_CUDA
-      // Try GPU decode for JPEG files using nvJPEG
-      // Each nvJPEG stream state has its own dedicated CUDA stream for true
+      // Try GPU decode for JPEG/JP2 files using nvImageCodec (or nvJPEG
+      // fallback) Each decode state has its own dedicated CUDA stream for true
       // parallelism. This avoids the threading issues with shared streams.
-      if (queue->use_gpu_decode && is_jpeg_file(filename)) {
-        decode_success = decode_jpeg_to_gpu(filename, &slot->image);
+      if (queue->use_gpu_decode && is_gpu_decodable_file(filename)) {
+        decode_success = decode_image_to_gpu(filename, &slot->image);
         if (decode_success) {
           slot->image.job_index = (int)job_idx;
           slot->image.input_index = input_idx;

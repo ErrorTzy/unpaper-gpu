@@ -308,7 +308,9 @@ bool pdf_pipeline_is_pdf(const char *filename);
 
 ---
 
-### PR 4: nvImageCodec Integration
+### PR 4: nvImageCodec Integration [COMPLETE]
+
+**Status**: Implemented and tested.
 
 **Why**: Adds JPEG2000 GPU decode/encode. Unified API replaces nvJPEG.
 
@@ -319,19 +321,50 @@ bool pdf_pipeline_is_pdf(const char *filename);
 - Encode GPU buffer to JPEG (quality 1-100) or JP2 (lossless/near-lossless)
 - Update `decode_queue.c` and `encode_queue.c` to use new API
 
-**Key API**:
+**Key API** (implemented in `imageprocess/nvimgcodec.h`):
 ```c
-int nvimgcodec_decode(const uint8_t *data, size_t len, CUstream stream,
-                      void **gpu_ptr, int *w, int *h, CUevent *done);
-int nvimgcodec_encode_jpeg(void *gpu_ptr, int w, int h, int quality,
-                           uint8_t **out, size_t *out_len, CUstream stream);
-int nvimgcodec_encode_jp2(void *gpu_ptr, int w, int h, bool lossless,
-                          uint8_t **out, size_t *out_len, CUstream stream);
+// Format detection
+NvImgCodecFormat nvimgcodec_detect_format(const uint8_t *data, size_t size);
+
+// Initialization
+bool nvimgcodec_init(int num_streams);
+void nvimgcodec_cleanup(void);
+bool nvimgcodec_is_available(void);      // True if nvImageCodec loaded
+bool nvimgcodec_any_available(void);     // True if any codec available (nvJPEG fallback)
+bool nvimgcodec_jp2_supported(void);     // True only with full nvImageCodec
+
+// Decode/encode state management (pool-based, thread-safe)
+NvImgCodecDecodeState *nvimgcodec_acquire_decode_state(void);
+void nvimgcodec_release_decode_state(NvImgCodecDecodeState *state);
+NvImgCodecEncodeState *nvimgcodec_acquire_encode_state(void);
+void nvimgcodec_release_encode_state(NvImgCodecEncodeState *state);
+
+// Decode to GPU
+bool nvimgcodec_decode(const uint8_t *data, size_t size,
+                       NvImgCodecDecodeState *state, UnpaperCudaStream *stream,
+                       NvImgCodecOutputFormat output_fmt, NvImgCodecDecodedImage *out);
+
+// Encode from GPU
+bool nvimgcodec_encode_jpeg(const void *gpu_ptr, size_t pitch, int width, int height,
+                            NvImgCodecEncodeInputFormat input_fmt, int quality,
+                            NvImgCodecEncodeState *state, UnpaperCudaStream *stream,
+                            NvImgCodecEncodedImage *out);
+bool nvimgcodec_encode_jp2(const void *gpu_ptr, size_t pitch, int width, int height,
+                           NvImgCodecEncodeInputFormat input_fmt, bool lossless,
+                           NvImgCodecEncodeState *state, UnpaperCudaStream *stream,
+                           NvImgCodecEncodedImage *out);
 ```
 
-**Tests**: Decode JPEG/JP2, compare to CPU baseline. Encode round-trip quality check.
+**Tests**: `tests/nvimgcodec_test.c` - Unit tests for wrapper API.
+- Format detection tests (JPEG, JP2, unknown)
+- State acquire/release tests
+- JPEG decode to GPU test
+- JPEG encode from GPU test
+- JP2 support status verification
 
-**Success**: JPEG2000 decodes on GPU. Existing JPEG tests pass. No performance regression.
+**Build**: `meson setup builddir-cuda -Dcuda=enabled && meson compile -C builddir-cuda`
+
+**Success**: JPEG2000 decodes on GPU when nvImageCodec is available. Falls back to nvJPEG for JPEG-only when nvImageCodec is not installed. Existing JPEG tests pass. No performance regression.
 
 ---
 

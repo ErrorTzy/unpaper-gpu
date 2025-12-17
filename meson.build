@@ -178,6 +178,37 @@ if have_cuda
         '/usr/lib/x86_64-linux-gnu'
     ], required : true)
     unpaper_deps += [nvjpeg_dep]
+
+    # nvImageCodec for unified JPEG/JPEG2000 GPU decode/encode (PR4)
+    # This is optional - falls back to nvJPEG if unavailable
+    nvimgcodec_opt = get_option('nvimgcodec')
+    have_nvimgcodec = false
+    if nvimgcodec_opt.enabled() or nvimgcodec_opt.auto()
+        nvimgcodec_dep = cc.find_library('nvimgcodec', dirs : [
+            '/usr/local/cuda-13.0/lib64',
+            '/usr/local/cuda/lib64',
+            '/opt/nvidia/nvimgcodec/lib',
+            '/usr/lib/x86_64-linux-gnu'
+        ], required : nvimgcodec_opt.enabled())
+        if nvimgcodec_dep.found()
+            have_nvimgcodec = true
+            unpaper_c_args += ['-DUNPAPER_WITH_NVIMGCODEC=1']
+            unpaper_deps += [nvimgcodec_dep]
+            # Also need nvjpeg2k for JPEG2000 support
+            nvjpeg2k_dep = cc.find_library('nvjpeg2k', dirs : [
+                '/usr/local/cuda-13.0/lib64',
+                '/usr/local/cuda/lib64',
+                '/opt/nvidia/nvjpeg2k/lib',
+                '/usr/lib/x86_64-linux-gnu'
+            ], required : false)
+            if nvjpeg2k_dep.found()
+                unpaper_deps += [nvjpeg2k_dep]
+            endif
+        endif
+    endif
+
+    # Always add nvimgcodec wrapper source - it has fallback code to nvJPEG
+    unpaper_sources += ['imageprocess/nvimgcodec.c']
 endif
 
 if have_cuda
@@ -581,6 +612,26 @@ if have_cuda
     # nvjpeg_encode_test doesn't switch backends, can run in parallel
     test('nvjpeg encode', nvjpeg_encode_test,
          env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+
+    nvimgcodec_test = executable(
+        'nvimgcodec_test',
+        [
+            'tests/nvimgcodec_test.c',
+            'imageprocess/cuda_runtime.c',
+            'imageprocess/nvimgcodec.c',
+            'imageprocess/nvjpeg_decode.c',
+            'imageprocess/nvjpeg_encode.c',
+            'lib/logging.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    # nvimgcodec_test tests the unified GPU codec wrapper
+    test('nvimgcodec wrapper', nvimgcodec_test,
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/',
+               'CUDA_LAUNCH_BLOCKING=1'])
 
     # gpu jpeg pipeline test runs the unpaper binary, can run in parallel
     test(

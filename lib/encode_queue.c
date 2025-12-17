@@ -20,6 +20,7 @@
 
 #ifdef UNPAPER_WITH_CUDA
 #include "imageprocess/cuda_runtime.h"
+#include "imageprocess/nvimgcodec.h"
 #include "imageprocess/nvjpeg_encode.h"
 #include <cuda_runtime.h>
 #endif
@@ -879,6 +880,27 @@ static bool is_jpeg_output(const char *filename) {
   return false;
 }
 
+// Helper: Check if filename has JP2 extension
+static bool is_jp2_output(const char *filename) {
+  if (filename == NULL) {
+    return false;
+  }
+  const char *ext = strrchr(filename, '.');
+  if (ext == NULL) {
+    return false;
+  }
+  if (strcasecmp(ext, ".jp2") == 0 || strcasecmp(ext, ".j2k") == 0 ||
+      strcasecmp(ext, ".j2c") == 0 || strcasecmp(ext, ".jpx") == 0) {
+    return true;
+  }
+  return false;
+}
+
+// Helper: Check if file is GPU-encodable (JPEG or JP2)
+static bool is_gpu_encodable_output(const char *filename) {
+  return is_jpeg_output(filename) || is_jp2_output(filename);
+}
+
 bool encode_queue_submit_gpu(EncodeQueue *queue, void *gpu_ptr, size_t pitch,
                              int width, int height, int channels,
                              char **output_files, int output_count,
@@ -892,32 +914,83 @@ bool encode_queue_submit_gpu(EncodeQueue *queue, void *gpu_ptr, size_t pitch,
     return false;
   }
 
-  // Check if all outputs are JPEG and GPU encoding is available
+  // Check output file types
   bool all_jpeg = true;
+  bool any_jp2 = false;
+  bool all_gpu_encodable = true;
   for (int i = 0; i < output_count; i++) {
     if (!is_jpeg_output(output_files[i])) {
       all_jpeg = false;
-      break;
+    }
+    if (is_jp2_output(output_files[i])) {
+      any_jp2 = true;
+    }
+    if (!is_gpu_encodable_output(output_files[i])) {
+      all_gpu_encodable = false;
     }
   }
 
-  bool use_gpu_encode =
-      queue->gpu_encode_enabled && all_jpeg && nvjpeg_encode_is_available();
+  // Determine GPU encode strategy:
+  // 1. If any JP2 output: need nvimgcodec (with JP2 support)
+  // 2. If all JPEG: can use nvJPEG or nvimgcodec
+  bool use_gpu_encode = false;
+  bool use_nvimgcodec_path = false;
+
+  if (queue->gpu_encode_enabled && all_gpu_encodable) {
+    if (any_jp2) {
+      // JP2 requires nvimgcodec with JP2 support
+      if (nvimgcodec_jp2_supported()) {
+        use_gpu_encode = true;
+        use_nvimgcodec_path = true;
+      }
+    } else if (all_jpeg) {
+      // JPEG-only: prefer nvimgcodec if available, fall back to nvJPEG
+      if (nvimgcodec_any_available()) {
+        use_gpu_encode = true;
+        use_nvimgcodec_path = true;
+      } else if (nvjpeg_encode_is_available()) {
+        use_gpu_encode = true;
+        use_nvimgcodec_path = false;
+      }
+    }
+  }
 
   if (use_gpu_encode) {
     // Direct GPU encoding path - no queue needed, encode immediately
     // This avoids the D2H transfer entirely
-    NvJpegEncodeFormat fmt =
-        (channels == 1) ? NVJPEG_ENC_FMT_GRAY8 : NVJPEG_ENC_FMT_RGB;
-
     uint64_t encode_start = get_time_us();
 
-    for (int i = 0; i < output_count; i++) {
-      bool result = nvjpeg_encode_gpu_to_file(gpu_ptr, pitch, width, height,
-                                              fmt, NULL, output_files[i]);
-      if (!result) {
-        // Fall back to CPU encoding for this file
-        goto fallback_cpu;
+    if (use_nvimgcodec_path) {
+      // Use nvimgcodec for unified JPEG/JP2 encoding
+      NvImgCodecEncodeInputFormat fmt =
+          (channels == 1) ? NVIMGCODEC_ENC_FMT_GRAY8 : NVIMGCODEC_ENC_FMT_RGB;
+
+      for (int i = 0; i < output_count; i++) {
+        NvImgCodecEncodeParams params;
+        if (is_jp2_output(output_files[i])) {
+          params = nvimgcodec_default_jp2_lossless_params();
+        } else {
+          params = nvimgcodec_default_jpeg_params();
+          params.quality = queue->gpu_encode_quality;
+        }
+
+        bool result = nvimgcodec_encode_to_file(
+            gpu_ptr, pitch, width, height, fmt, NULL, &params, output_files[i]);
+        if (!result) {
+          goto fallback_cpu;
+        }
+      }
+    } else {
+      // Legacy nvJPEG path (JPEG only)
+      NvJpegEncodeFormat fmt =
+          (channels == 1) ? NVJPEG_ENC_FMT_GRAY8 : NVJPEG_ENC_FMT_RGB;
+
+      for (int i = 0; i < output_count; i++) {
+        bool result = nvjpeg_encode_gpu_to_file(gpu_ptr, pitch, width, height,
+                                                fmt, NULL, output_files[i]);
+        if (!result) {
+          goto fallback_cpu;
+        }
       }
     }
 
