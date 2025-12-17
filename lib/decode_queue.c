@@ -662,7 +662,7 @@ void decode_queue_destroy(DecodeQueue *queue) {
     // Clean up completion event if not already synced
     if (slot->image.gpu_completion_event != NULL) {
       nvimgcodec_release_completion_event(slot->image.gpu_completion_event,
-                                      slot->image.gpu_event_from_pool);
+                                          slot->image.gpu_event_from_pool);
       slot->image.gpu_completion_event = NULL;
       slot->image.gpu_event_from_pool = false;
     }
@@ -796,7 +796,7 @@ void decode_queue_release(DecodeQueue *queue, DecodedImage *image) {
       // Clean up completion event if not already synced
       if (slot->image.gpu_completion_event != NULL) {
         nvimgcodec_release_completion_event(slot->image.gpu_completion_event,
-                                        slot->image.gpu_event_from_pool);
+                                            slot->image.gpu_event_from_pool);
         slot->image.gpu_completion_event = NULL;
         slot->image.gpu_event_from_pool = false;
       }
@@ -862,7 +862,7 @@ void decoded_image_wait_gpu_complete(DecodedImage *image) {
     }
     // Release event back to pool or destroy
     nvimgcodec_release_completion_event(image->gpu_completion_event,
-                                    image->gpu_event_from_pool);
+                                        image->gpu_event_from_pool);
     image->gpu_completion_event = NULL;
     image->gpu_event_from_pool = false;
   }

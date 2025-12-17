@@ -11,7 +11,6 @@
 #ifdef UNPAPER_WITH_CUDA
 #include "imageprocess/cuda_runtime.h"
 #include "imageprocess/nvimgcodec.h"
-#include "imageprocess/nvjpeg_decode.h"
 #include <cuda_runtime.h>
 #endif
 
@@ -136,17 +135,10 @@ static void test_init(void) {
   printf("Test: nvimgcodec_init... ");
 
 #ifdef UNPAPER_WITH_CUDA
-  // First ensure nvJPEG is available (required for fallback)
-  if (!nvjpeg_context_init(4)) {
-    printf("SKIPPED (nvJPEG init failed)\n");
-    return;
-  }
-
   // Initialize with 4 stream states
   bool result = nvimgcodec_init(4);
   if (!result) {
     printf("FAILED (init returned false)\n");
-    nvjpeg_context_cleanup();
     exit(1);
   }
 
@@ -154,12 +146,11 @@ static void test_init(void) {
   if (!nvimgcodec_any_available()) {
     printf("FAILED (not available after init)\n");
     nvimgcodec_cleanup();
-    nvjpeg_context_cleanup();
     exit(1);
   }
 
   printf("PASSED (nvimgcodec: %s, jp2: %s)\n",
-         nvimgcodec_is_available() ? "yes" : "no (fallback)",
+         nvimgcodec_is_available() ? "yes" : "no",
          nvimgcodec_jp2_supported() ? "yes" : "no");
 #else
   printf("SKIPPED (CUDA not available)\n");
@@ -721,7 +712,6 @@ static void test_cleanup(void) {
 
 #ifdef UNPAPER_WITH_CUDA
   nvimgcodec_cleanup();
-  nvjpeg_context_cleanup();
 
   printf("PASSED\n");
 #else

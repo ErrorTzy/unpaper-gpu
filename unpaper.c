@@ -30,7 +30,6 @@
 #include "imageprocess/interpolate.h"
 #include "imageprocess/masks.h"
 #include "imageprocess/nvimgcodec.h"
-#include "imageprocess/nvjpeg_encode.h"
 #include "imageprocess/opencv_bridge.h"
 #include "imageprocess/pixel.h"
 #include "lib/batch.h"
@@ -1555,8 +1554,9 @@ int main(int argc, char *argv[]) {
                          "nvImageCodec GPU decode: enabled (%d streams)\n",
                          nvimgcodec_streams);
             } else {
-              verboseLog(VERBOSE_NORMAL,
-                         "nvImageCodec GPU decode: unavailable, using CPU decode\n");
+              verboseLog(
+                  VERBOSE_NORMAL,
+                  "nvImageCodec GPU decode: unavailable, using CPU decode\n");
             }
           }
 #endif
@@ -1627,20 +1627,18 @@ int main(int argc, char *argv[]) {
         // Auto-enable GPU encode for JPEG outputs when using CUDA backend
         if (options.device == UNPAPER_DEVICE_CUDA &&
             batch_has_jpeg_output(&batch_queue)) {
-          // Use same number of encoder states as CUDA streams for parallelism
-          int num_encoders = num_encoder_threads > 4 ? num_encoder_threads : 4;
           int jpeg_quality =
               options.jpeg_quality > 0 ? options.jpeg_quality : 85;
-          if (nvjpeg_encode_init(num_encoders, jpeg_quality,
-                                 NVJPEG_ENC_SUBSAMPLING_420)) {
+          // nvimgcodec is already initialized and handles encoding
+          if (nvimgcodec_any_available()) {
             encode_queue_enable_gpu(encode_queue, true, jpeg_quality);
             verboseLog(VERBOSE_NORMAL,
-                       "nvJPEG GPU encode: auto-enabled for JPEG outputs "
-                       "(%d states, quality %d)\n",
-                       num_encoders, jpeg_quality);
+                       "nvImageCodec GPU encode: auto-enabled for JPEG outputs "
+                       "(quality %d)\n",
+                       jpeg_quality);
           } else {
             verboseLog(VERBOSE_NORMAL,
-                       "nvJPEG GPU encode: unavailable, using CPU encode\n");
+                       "GPU encode: unavailable, using CPU encode\n");
           }
         }
 #endif
@@ -1715,15 +1713,7 @@ int main(int argc, char *argv[]) {
       }
 
 #ifdef UNPAPER_WITH_CUDA
-      // Cleanup nvJPEG encode first (uses shared handle from decode context)
-      if (nvjpeg_encode_is_available()) {
-        if (options.perf) {
-          nvjpeg_encode_print_stats();
-        }
-        nvjpeg_encode_cleanup();
-      }
-
-      // Cleanup nvImageCodec decode context
+      // Cleanup nvImageCodec context (handles both decode and encode)
       nvimgcodec_cleanup();
 #endif
 

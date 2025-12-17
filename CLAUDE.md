@@ -577,29 +577,32 @@ int nvimgcodec_decode_batch(
 
 ---
 
-### PR 5.6: Delete nvjpeg_decode.c and nvjpeg_encode.c
+### PR 5.6: Delete nvjpeg_decode.c and nvjpeg_encode.c [COMPLETE]
 
-**Status**: Not started.
+**Status**: Implemented and tested.
 
 **Why**: No longer needed - nvimgcodec handles everything through nvImageCodec's nvjpeg_ext plugin.
 
-**Tasks**:
-1. Delete `imageprocess/nvjpeg_decode.c` (1498 lines)
-2. Delete `imageprocess/nvjpeg_decode.h`
-3. Delete `imageprocess/nvjpeg_encode.c` (894 lines)
-4. Delete `imageprocess/nvjpeg_encode.h`
-5. Update `meson.build` to remove these files from build
-6. Remove any remaining includes across codebase
+**Implementation**:
+- Deleted `imageprocess/nvjpeg_decode.c` (1498 lines)
+- Deleted `imageprocess/nvjpeg_decode.h`
+- Deleted `imageprocess/nvjpeg_encode.c` (894 lines)
+- Deleted `imageprocess/nvjpeg_encode.h`
+- Deleted test files: `tests/nvjpeg_decode_test.c`, `tests/nvjpeg_batched_test.c`, `tests/nvjpeg_encode_test.c`
+- Updated `meson.build` to remove nvjpeg source files and tests
+- Updated `lib/encode_queue.c` to use nvimgcodec exclusively (removed legacy nvJPEG path)
+- Updated `unpaper.c` to use nvimgcodec for GPU encode initialization and cleanup
+- Updated `tests/nvimgcodec_test.c` to not depend on nvjpeg
 
-**Files deleted**:
-- `imageprocess/nvjpeg_decode.c` (-1498 lines)
-- `imageprocess/nvjpeg_decode.h`
-- `imageprocess/nvjpeg_encode.c` (-894 lines)
-- `imageprocess/nvjpeg_encode.h`
+**Files changed**:
+- `lib/encode_queue.c` - Removed nvjpeg_encode.h include, simplified GPU encode path (~50 lines removed)
+- `unpaper.c` - Removed nvjpeg_encode.h include, updated GPU encode init/cleanup (~15 lines simplified)
+- `tests/nvimgcodec_test.c` - Removed nvjpeg_decode.h include, updated init/cleanup tests (~20 lines simplified)
+- `meson.build` - Removed nvjpeg source files and tests (~70 lines removed)
 
-**Total lines removed**: ~2400 lines
+**Total lines removed**: ~2500+ lines
 
-**Success criteria**: Build succeeds without nvjpeg_*.c files. All tests pass.
+**Success**: Build succeeds without nvjpeg_*.c files. All 14 CUDA tests pass.
 
 ---
 

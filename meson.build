@@ -160,8 +160,6 @@ if have_cuda
         'imageprocess/cuda_runtime.c',
         'imageprocess/npp_wrapper.c',
         'imageprocess/npp_integral.c',
-        'imageprocess/nvjpeg_decode.c',
-        'imageprocess/nvjpeg_encode.c',
         'imageprocess/opencv_bridge.cpp',
         'imageprocess/opencv_ops.cpp',
     ]
@@ -603,68 +601,12 @@ if have_cuda
     # cuda_grayfilter_scan_test doesn't switch backends, can run in parallel
     test('cuda grayfilter scan', cuda_grayfilter_scan_test)
 
-    nvjpeg_decode_test = executable(
-        'nvjpeg_decode_test',
-        [
-            'tests/nvjpeg_decode_test.c',
-            'imageprocess/cuda_runtime.c',
-            'imageprocess/nvjpeg_decode.c',
-            'lib/logging.c',
-        ],
-        c_args : unpaper_c_args,
-        dependencies : unpaper_deps,
-        install : false,
-    )
-
-    # nvjpeg_decode_test doesn't switch backends, can run in parallel
-    # CUDA_LAUNCH_BLOCKING=1 needed to avoid async race in test
-    test('nvjpeg decode', nvjpeg_decode_test,
-         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/',
-               'CUDA_LAUNCH_BLOCKING=1'])
-
-    nvjpeg_batched_test = executable(
-        'nvjpeg_batched_test',
-        [
-            'tests/nvjpeg_batched_test.c',
-            'imageprocess/cuda_runtime.c',
-            'imageprocess/nvjpeg_decode.c',
-            'lib/logging.c',
-        ],
-        c_args : unpaper_c_args,
-        dependencies : unpaper_deps,
-        install : false,
-    )
-
-    # nvjpeg_batched_test doesn't switch backends, can run in parallel
-    test('nvjpeg batched decode', nvjpeg_batched_test,
-         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
-
-    nvjpeg_encode_test = executable(
-        'nvjpeg_encode_test',
-        [
-            'tests/nvjpeg_encode_test.c',
-            'imageprocess/cuda_runtime.c',
-            'imageprocess/nvjpeg_decode.c',
-            'imageprocess/nvjpeg_encode.c',
-            'lib/logging.c',
-        ],
-        c_args : unpaper_c_args,
-        dependencies : unpaper_deps,
-        install : false,
-    )
-
-    # nvjpeg_encode_test doesn't switch backends, can run in parallel
-    test('nvjpeg encode', nvjpeg_encode_test,
-         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
-
     nvimgcodec_test = executable(
         'nvimgcodec_test',
         [
             'tests/nvimgcodec_test.c',
             'imageprocess/cuda_runtime.c',
             'imageprocess/nvimgcodec.c',
-            'imageprocess/nvjpeg_decode.c',
-            'imageprocess/nvjpeg_encode.c',
             'lib/logging.c',
         ],
         c_args : unpaper_c_args,
@@ -768,8 +710,6 @@ if have_pdf
             'imageprocess/cuda_runtime.c',
             'imageprocess/npp_wrapper.c',
             'imageprocess/npp_integral.c',
-            'imageprocess/nvjpeg_decode.c',
-            'imageprocess/nvjpeg_encode.c',
             'imageprocess/nvimgcodec.c',
             'imageprocess/opencv_bridge.cpp',
             'imageprocess/opencv_ops.cpp',

@@ -21,7 +21,6 @@
 #ifdef UNPAPER_WITH_CUDA
 #include "imageprocess/cuda_runtime.h"
 #include "imageprocess/nvimgcodec.h"
-#include "imageprocess/nvjpeg_encode.h"
 #include <cuda_runtime.h>
 #endif
 
@@ -845,8 +844,8 @@ void encode_queue_enable_gpu(EncodeQueue *queue, bool enable, int quality) {
   }
 
 #ifdef UNPAPER_WITH_CUDA
-  if (enable && nvjpeg_encode_is_available()) {
-    nvjpeg_encode_set_quality(queue->gpu_encode_quality);
+  if (enable && nvimgcodec_any_available()) {
+    nvimgcodec_set_jpeg_quality(queue->gpu_encode_quality);
   }
 #endif
 }
@@ -931,27 +930,20 @@ bool encode_queue_submit_gpu(EncodeQueue *queue, void *gpu_ptr, size_t pitch,
   }
 
   // Determine GPU encode strategy:
-  // 1. If any JP2 output: need nvimgcodec (with JP2 support)
-  // 2. If all JPEG: can use nvJPEG or nvimgcodec
+  // 1. If any JP2 output: need nvimgcodec with JP2 support
+  // 2. If all JPEG: use nvimgcodec
   bool use_gpu_encode = false;
-  bool use_nvimgcodec_path = false;
 
-  if (queue->gpu_encode_enabled && all_gpu_encodable) {
+  if (queue->gpu_encode_enabled && all_gpu_encodable &&
+      nvimgcodec_any_available()) {
     if (any_jp2) {
       // JP2 requires nvimgcodec with JP2 support
       if (nvimgcodec_jp2_supported()) {
         use_gpu_encode = true;
-        use_nvimgcodec_path = true;
       }
     } else if (all_jpeg) {
-      // JPEG-only: prefer nvimgcodec if available, fall back to nvJPEG
-      if (nvimgcodec_any_available()) {
-        use_gpu_encode = true;
-        use_nvimgcodec_path = true;
-      } else if (nvjpeg_encode_is_available()) {
-        use_gpu_encode = true;
-        use_nvimgcodec_path = false;
-      }
+      // JPEG-only: use nvimgcodec
+      use_gpu_encode = true;
     }
   }
 
@@ -960,37 +952,23 @@ bool encode_queue_submit_gpu(EncodeQueue *queue, void *gpu_ptr, size_t pitch,
     // This avoids the D2H transfer entirely
     uint64_t encode_start = get_time_us();
 
-    if (use_nvimgcodec_path) {
-      // Use nvimgcodec for unified JPEG/JP2 encoding
-      NvImgCodecEncodeInputFormat fmt =
-          (channels == 1) ? NVIMGCODEC_ENC_FMT_GRAY8 : NVIMGCODEC_ENC_FMT_RGB;
+    // Use nvimgcodec for unified JPEG/JP2 encoding
+    NvImgCodecEncodeInputFormat fmt =
+        (channels == 1) ? NVIMGCODEC_ENC_FMT_GRAY8 : NVIMGCODEC_ENC_FMT_RGB;
 
-      for (int i = 0; i < output_count; i++) {
-        NvImgCodecEncodeParams params;
-        if (is_jp2_output(output_files[i])) {
-          params = nvimgcodec_default_jp2_lossless_params();
-        } else {
-          params = nvimgcodec_default_jpeg_params();
-          params.quality = queue->gpu_encode_quality;
-        }
-
-        bool result = nvimgcodec_encode_to_file(
-            gpu_ptr, pitch, width, height, fmt, NULL, &params, output_files[i]);
-        if (!result) {
-          goto fallback_cpu;
-        }
+    for (int i = 0; i < output_count; i++) {
+      NvImgCodecEncodeParams params;
+      if (is_jp2_output(output_files[i])) {
+        params = nvimgcodec_default_jp2_lossless_params();
+      } else {
+        params = nvimgcodec_default_jpeg_params();
+        params.quality = queue->gpu_encode_quality;
       }
-    } else {
-      // Legacy nvJPEG path (JPEG only)
-      NvJpegEncodeFormat fmt =
-          (channels == 1) ? NVJPEG_ENC_FMT_GRAY8 : NVJPEG_ENC_FMT_RGB;
 
-      for (int i = 0; i < output_count; i++) {
-        bool result = nvjpeg_encode_gpu_to_file(gpu_ptr, pitch, width, height,
-                                                fmt, NULL, output_files[i]);
-        if (!result) {
-          goto fallback_cpu;
-        }
+      bool result = nvimgcodec_encode_to_file(
+          gpu_ptr, pitch, width, height, fmt, NULL, &params, output_files[i]);
+      if (!result) {
+        goto fallback_cpu;
       }
     }
 
