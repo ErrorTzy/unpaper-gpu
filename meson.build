@@ -717,7 +717,6 @@ if have_pdf
         'imageprocess/masks.c',
         'imageprocess/pixel.c',
         'imageprocess/primitives.c',
-        'imageprocess/backend_cuda_stub.c',
         'lib/batch.c',
         'lib/batch_decode_queue.c',
         'lib/batch_worker.c',
@@ -734,6 +733,22 @@ if have_pdf
         'pdf/pdf_pipeline_cpu.c',
         'tests/pdf_pipeline_cpu_test.c',
     ]
+    if have_cuda
+        pdf_pipeline_cpu_test_sources += [
+            'imageprocess/backend_cuda.c',
+            'imageprocess/cuda_runtime.c',
+            'imageprocess/npp_wrapper.c',
+            'imageprocess/npp_integral.c',
+            'imageprocess/nvjpeg_decode.c',
+            'imageprocess/nvjpeg_encode.c',
+            'imageprocess/nvimgcodec.c',
+            'imageprocess/opencv_bridge.cpp',
+            'imageprocess/opencv_ops.cpp',
+            cuda_kernels_ptx_c,
+        ]
+    else
+        pdf_pipeline_cpu_test_sources += ['imageprocess/backend_cuda_stub.c']
+    endif
     if have_jbig2
         pdf_pipeline_cpu_test_sources += ['lib/jbig2_decode.c']
     endif

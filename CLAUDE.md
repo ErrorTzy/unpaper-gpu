@@ -415,17 +415,36 @@ PDF JBIG2 → MuPDF extract (data + globals) → jbig2dec → 1-bit bitmap → e
 
 ---
 
-### PR 6: GPU PDF Pipeline Integration
+### PR 6: GPU PDF Pipeline Integration [IN PROGRESS]
+
+**Status**: Partial implementation. CUDA kernel added, pipeline integration pending.
 
 **Why**: Wire GPU decode/encode to PDF pipeline for maximum performance.
 
-**Implementation**:
+**Completed work**:
+- Added `unpaper_expand_1bit_to_8bit` CUDA kernel in `cuda_kernels.cu` for GPU-based 1-bit to 8-bit expansion
+- Created benchmark infrastructure: `tools/bench_jbig2_pdf.py` and `tools/create_jbig2_benchmark_pdf.py`
+- Created 50-page JBIG2 test PDF: `tests/pdf_samples/benchmark_jbig2_50page.pdf`
+- Fixed meson.build to support combined CUDA+PDF builds (`builddir-cuda-pdf/`)
+
+**Baseline benchmark** (CPU pipeline, 50 JBIG2 pages):
+- Time: ~295s (0.2 pages/sec, ~5.9s per page)
+
+**Remaining work**:
 - New `pdf/pdf_pipeline_gpu.c`: orchestrate GPU PDF processing
 - Update `parse.c`: add options:
   - `--pdf-quality=high|fast` (high=JP2 lossless, fast=JPEG 85)
   - `--pdf-dpi=N` (for rendered fallback, default 300)
 - Wire: PDF extract → nvImageCodec decode → GPU process → nvImageCodec encode → PDF embed
 - Auto-select GPU vs CPU pipeline based on `--device` flag
+- Integrate 1-bit GPU expansion kernel for JBIG2 (avoids 8x H2D transfer)
+
+**Key optimization for JBIG2**:
+```
+Current (CPU expansion):  JBIG2 → jbig2dec → 1-bit → CPU expand 8-bit → H2D (8.7MB) → GPU
+Optimized (GPU expansion): JBIG2 → jbig2dec → 1-bit → H2D (1.1MB) → GPU expand → GPU
+```
+The GPU expansion path transfers 8x less data and expansion is trivially parallel on GPU.
 
 **Pipeline selection**:
 | Input Format | `--pdf-quality` | Output Format |
@@ -439,7 +458,7 @@ PDF JBIG2 → MuPDF extract (data + globals) → jbig2dec → 1-bit bitmap → e
 
 **Tests**: `unpaper --device=cuda input.pdf output.pdf` works. GPU path used for JPEG/JP2.
 
-**Success**: Full GPU PDF→PDF pipeline works. `--pdf-quality` produces expected output sizes.
+**Success criteria**: Full GPU PDF→PDF pipeline works. JBIG2 processing >10x faster than CPU baseline.
 
 ---
 

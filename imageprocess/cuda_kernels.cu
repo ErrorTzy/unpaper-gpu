@@ -1953,3 +1953,56 @@ extern "C" __global__ void unpaper_batch_scan_brightness_count(
     out_counts[pos_idx] = sh_count[0];
   }
 }
+
+// ============================================================================
+// 1-bit to 8-bit expansion kernel for JBIG2 images
+// ============================================================================
+// Expands packed 1-bit data to 8-bit grayscale (0 or 255 per pixel)
+// Each thread processes 8 output pixels (1 input byte)
+// This is the hot path for JBIG2 PDF processing on GPU
+//
+// Parameters:
+//   src: packed 1-bit data (MSB first, as from JBIG2 decoder)
+//   src_stride: bytes per row in source (includes padding)
+//   dst: 8-bit grayscale output
+//   dst_stride: bytes per row in destination
+//   width: image width in pixels
+//   height: image height in pixels
+//   invert: if true, 1-bit=white(255), 0-bit=black(0)
+//           if false, 1-bit=black(0), 0-bit=white(255)
+extern "C" __global__ void
+unpaper_expand_1bit_to_8bit(const uint8_t *src, int src_stride, uint8_t *dst,
+                            int dst_stride, int width, int height, int invert) {
+  // Each thread handles one byte of input (8 pixels of output)
+  const int byte_x = (int)(blockIdx.x * blockDim.x + threadIdx.x);
+  const int y = (int)(blockIdx.y * blockDim.y + threadIdx.y);
+
+  if (y >= height)
+    return;
+
+  const int src_bytes_per_row = (width + 7) / 8;
+  if (byte_x >= src_bytes_per_row)
+    return;
+
+  // Read one byte of packed 1-bit data
+  const uint8_t packed = src[(size_t)y * (size_t)src_stride + (size_t)byte_x];
+
+  // Output pixel values based on invert flag
+  // JBIG2 typically: 1=black, 0=white (so invert=true gives expected grayscale)
+  const uint8_t val_bit_set = invert ? 255u : 0u;
+  const uint8_t val_bit_clr = invert ? 0u : 255u;
+
+  // Expand 8 bits to 8 bytes
+  const int pixel_x = byte_x * 8;
+  uint8_t *dst_row = dst + (size_t)y * (size_t)dst_stride + (size_t)pixel_x;
+
+// Unrolled loop for 8 pixels - MSB first
+#pragma unroll
+  for (int bit = 0; bit < 8; bit++) {
+    const int px = pixel_x + bit;
+    if (px < width) {
+      const bool bit_set = (packed & (0x80u >> bit)) != 0;
+      dst_row[bit] = bit_set ? val_bit_set : val_bit_clr;
+    }
+  }
+}

@@ -14,10 +14,10 @@ extern "C" {
 
 // Decoded JBIG2 image (1-bit packed bitmap)
 typedef struct {
-  uint8_t *data;     // 1-bit packed pixels (MSB first, rows padded to byte)
-  uint32_t width;    // Image width in pixels
-  uint32_t height;   // Image height in pixels
-  uint32_t stride;   // Bytes per row (includes padding)
+  uint8_t *data;   // 1-bit packed pixels (MSB first, rows padded to byte)
+  uint32_t width;  // Image width in pixels
+  uint32_t height; // Image height in pixels
+  uint32_t stride; // Bytes per row (includes padding)
 } Jbig2DecodedImage;
 
 // Decode JBIG2 data to a 1-bit bitmap.
@@ -25,9 +25,9 @@ typedef struct {
 // Parameters:
 //   data: Raw JBIG2 stream data (from PDF image stream)
 //   size: Size of data in bytes
-//   globals: Optional global dictionary data (from PDF JBIG2Globals, may be NULL)
-//   globals_size: Size of globals in bytes (0 if no globals)
-//   out: Output structure filled with decoded bitmap
+//   globals: Optional global dictionary data (from PDF JBIG2Globals, may be
+//   NULL) globals_size: Size of globals in bytes (0 if no globals) out: Output
+//   structure filled with decoded bitmap
 //
 // Returns true on success, false on failure.
 // Caller must free out->data with jbig2_free_image().

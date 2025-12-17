@@ -55,9 +55,8 @@ bool jbig2_decode(const uint8_t *data, size_t size, const uint8_t *globals,
 
   // If we have globals, create a global context first
   if (globals != NULL && globals_size > 0) {
-    Jbig2Ctx *globals_ctx =
-        jbig2_ctx_new(NULL, JBIG2_OPTIONS_EMBEDDED, NULL, jbig2_error_callback,
-                      NULL);
+    Jbig2Ctx *globals_ctx = jbig2_ctx_new(NULL, JBIG2_OPTIONS_EMBEDDED, NULL,
+                                          jbig2_error_callback, NULL);
     if (globals_ctx == NULL) {
       set_error("Failed to create JBIG2 globals context");
       return false;
