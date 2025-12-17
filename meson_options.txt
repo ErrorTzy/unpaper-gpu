@@ -6,7 +6,7 @@ option(
   'cuda',
   type: 'feature',
   value: 'disabled',
-  description: 'Enable CUDA backend support (requires OpenCV with CUDA modules)',
+  description: 'Enable CUDA backend support (requires OpenCV with CUDA modules and nvImageCodec)',
 )
 
 option(
@@ -14,13 +14,6 @@ option(
   type: 'feature',
   value: 'disabled',
   description: 'Enable PDF support (requires MuPDF library)',
-)
-
-option(
-  'nvimgcodec',
-  type: 'feature',
-  value: 'auto',
-  description: 'Enable nvImageCodec for JPEG2000 GPU support (requires nvImageCodec library)',
 )
 
 option(

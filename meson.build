@@ -202,35 +202,36 @@ if have_cuda
     ], required : true)
     unpaper_deps += [nvjpeg_dep]
 
-    # nvImageCodec for unified JPEG/JPEG2000 GPU decode/encode (PR4)
-    # This is optional - falls back to nvJPEG if unavailable
-    nvimgcodec_opt = get_option('nvimgcodec')
-    have_nvimgcodec = false
-    if nvimgcodec_opt.enabled() or nvimgcodec_opt.auto()
-        nvimgcodec_dep = cc.find_library('nvimgcodec', dirs : [
-            '/usr/local/cuda-13.0/lib64',
-            '/usr/local/cuda/lib64',
-            '/opt/nvidia/nvimgcodec/lib',
-            '/usr/lib/x86_64-linux-gnu'
-        ], required : nvimgcodec_opt.enabled())
-        if nvimgcodec_dep.found()
-            have_nvimgcodec = true
-            unpaper_c_args += ['-DUNPAPER_WITH_NVIMGCODEC=1']
-            unpaper_deps += [nvimgcodec_dep]
-            # Also need nvjpeg2k for JPEG2000 support
-            nvjpeg2k_dep = cc.find_library('nvjpeg2k', dirs : [
-                '/usr/local/cuda-13.0/lib64',
-                '/usr/local/cuda/lib64',
-                '/opt/nvidia/nvjpeg2k/lib',
-                '/usr/lib/x86_64-linux-gnu'
-            ], required : false)
-            if nvjpeg2k_dep.found()
-                unpaper_deps += [nvjpeg2k_dep]
-            endif
-        endif
+    # nvImageCodec for unified JPEG/JPEG2000 GPU decode/encode
+    # Required for CUDA builds - provides GPU decode/encode via nvjpeg_ext plugin
+    nvimgcodec_dep = cc.find_library('nvimgcodec', dirs : [
+        '/usr/local/cuda-13.0/lib64',
+        '/usr/local/cuda/lib64',
+        '/opt/nvidia/nvimgcodec_cuda13/lib64',
+        '/opt/nvidia/nvimgcodec_cuda12/lib64',
+        '/opt/nvidia/nvimgcodec/lib',
+        '/usr/lib/x86_64-linux-gnu'
+    ], required : true)
+    unpaper_c_args += ['-DUNPAPER_WITH_NVIMGCODEC=1']
+    unpaper_deps += [nvimgcodec_dep]
+
+    # Add nvImageCodec include path
+    unpaper_c_args += ['-I/opt/nvidia/nvimgcodec_cuda13/include', '-I/opt/nvidia/nvimgcodec_cuda12/include']
+
+    # Also need nvjpeg2k for JPEG2000 support (optional)
+    nvjpeg2k_dep = cc.find_library('nvjpeg2k', dirs : [
+        '/usr/local/cuda-13.0/lib64',
+        '/usr/local/cuda/lib64',
+        '/opt/nvidia/nvjpeg2k_cuda13/lib64',
+        '/opt/nvidia/nvjpeg2k_cuda12/lib64',
+        '/opt/nvidia/nvjpeg2k/lib',
+        '/usr/lib/x86_64-linux-gnu'
+    ], required : false)
+    if nvjpeg2k_dep.found()
+        unpaper_deps += [nvjpeg2k_dep]
     endif
 
-    # Always add nvimgcodec wrapper source - it has fallback code to nvJPEG
+    # nvimgcodec wrapper source
     unpaper_sources += ['imageprocess/nvimgcodec.c']
 endif
 

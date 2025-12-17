@@ -18,7 +18,8 @@
 #include "lib/math_util.h"
 
 // Internal helper for mask detection using edge scanning
-static bool detect_mask_cuda_internal(Image image, MaskDetectionParameters params,
+static bool detect_mask_cuda_internal(Image image,
+                                      MaskDetectionParameters params,
                                       Point origin, Rectangle *mask) {
   const RectangleSize image_size = size_of_image(image);
 

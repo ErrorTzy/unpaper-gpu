@@ -465,33 +465,27 @@ The fallback architecture is unnecessary since nvImageCodec handles JPEG through
 
 ---
 
-### PR 5.2: Remove nvJPEG Fallback from nvimgcodec.c
+### PR 5.2: Remove nvJPEG Fallback from nvimgcodec.c [COMPLETE]
 
-**Status**: Not started.
+**Status**: Implemented and tested.
 
-**Why**: nvImageCodec is the unified framework - the nvJPEG fallback path (lines 970-1433) is unnecessary complexity.
-
-**Current structure**:
-```
-nvimgcodec.c (1604 lines):
-├── Lines 7-969:     nvImageCodec implementation
-├── Lines 970-1433:  nvJPEG fallback (REDUNDANT - to be removed)
-└── Lines 1434-1602: Non-CUDA stubs
-```
+**Why**: nvImageCodec is the unified framework - the nvJPEG fallback path was unnecessary complexity.
 
 **Implementation**:
-- Remove the `#else // !UNPAPER_WITH_NVIMGCODEC` section that wraps nvJPEG (lines 970-1433)
-- Keep only: nvImageCodec implementation + non-CUDA stubs
-- Update `meson.build`: make nvImageCodec required for `-Dcuda=enabled` builds
-- Update error messages to guide users to install nvImageCodec
+- Removed the `#else // !UNPAPER_WITH_NVIMGCODEC` section that wrapped nvJPEG (lines 970-1433)
+- Kept only: nvImageCodec implementation + non-CUDA stubs
+- Updated `meson.build`: nvImageCodec now required for `-Dcuda=enabled` builds
+- Updated `meson_options.txt`: removed redundant `nvimgcodec` option, updated `cuda` description
+- Updated to nvImageCodec 0.7.0 API (new function signatures, quality_type/quality_value, futures)
 
 **Files changed**:
-- `imageprocess/nvimgcodec.c` - Remove ~460 lines of fallback code
-- `meson.build` - nvImageCodec required for CUDA builds
+- `imageprocess/nvimgcodec.c` - Removed ~460 lines of fallback code, updated to 0.7.0 API
+- `meson.build` - nvImageCodec required for CUDA builds, added include paths
+- `meson_options.txt` - Removed `nvimgcodec` option
 
-**Result**: nvimgcodec.c drops from 1604 to ~1140 lines.
+**Result**: nvimgcodec.c dropped from 1604 to ~1160 lines.
 
-**Success criteria**: CUDA build requires nvImageCodec. All existing tests pass.
+**Success**: CUDA build requires nvImageCodec. All 17 CUDA tests pass.
 
 ---
 

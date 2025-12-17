@@ -779,7 +779,8 @@ static bool noisefilter_cuda_opencv(Image image, uint64_t intensity,
   return true;
 }
 
-void noisefilter_cuda(Image image, uint64_t intensity, uint8_t min_white_level) {
+void noisefilter_cuda(Image image, uint64_t intensity,
+                      uint8_t min_white_level) {
   if (image.frame == NULL) {
     return;
   }
