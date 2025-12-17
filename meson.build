@@ -80,6 +80,7 @@ if have_pdf
     unpaper_c_args += ['-DUNPAPER_WITH_PDF=1']
     unpaper_sources += [
         'pdf/pdf_reader.c',
+        'pdf/pdf_writer.c',
     ]
 endif
 
@@ -612,5 +613,20 @@ if have_pdf
     )
 
     test('pdf reader', pdf_reader_test,
+         env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
+
+    pdf_writer_test = executable(
+        'pdf_writer_test',
+        [
+            'tests/pdf_writer_test.c',
+            'pdf/pdf_reader.c',
+            'pdf/pdf_writer.c',
+        ],
+        c_args : unpaper_c_args,
+        dependencies : unpaper_deps,
+        install : false,
+    )
+
+    test('pdf writer', pdf_writer_test,
          env: ['TEST_IMGSRC_DIR=' + meson.project_source_root() + '/tests/source_images/'])
 endif

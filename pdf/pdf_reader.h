@@ -18,13 +18,13 @@ typedef struct PdfDocument PdfDocument;
 // Image format detected from PDF stream
 typedef enum {
   PDF_IMAGE_UNKNOWN = 0,
-  PDF_IMAGE_JPEG,    // DCT-encoded (JPEG)
-  PDF_IMAGE_JP2,     // JPX-encoded (JPEG2000)
-  PDF_IMAGE_JBIG2,   // JBIG2-encoded (B&W)
-  PDF_IMAGE_CCITT,   // CCITT Fax encoded (B&W)
-  PDF_IMAGE_PNG,     // Flate with PNG predictor
-  PDF_IMAGE_RAW,     // Raw uncompressed samples
-  PDF_IMAGE_FLATE,   // Flate compressed
+  PDF_IMAGE_JPEG,  // DCT-encoded (JPEG)
+  PDF_IMAGE_JP2,   // JPX-encoded (JPEG2000)
+  PDF_IMAGE_JBIG2, // JBIG2-encoded (B&W)
+  PDF_IMAGE_CCITT, // CCITT Fax encoded (B&W)
+  PDF_IMAGE_PNG,   // Flate with PNG predictor
+  PDF_IMAGE_RAW,   // Raw uncompressed samples
+  PDF_IMAGE_FLATE, // Flate compressed
 } PdfImageFormat;
 
 // Information about an extracted image
@@ -53,9 +53,9 @@ typedef struct {
 
 // Page information
 typedef struct {
-  float width;    // Page width in points (1/72 inch)
-  float height;   // Page height in points
-  int rotation;   // Rotation in degrees (0, 90, 180, 270)
+  float width;  // Page width in points (1/72 inch)
+  float height; // Page height in points
+  int rotation; // Rotation in degrees (0, 90, 180, 270)
 } PdfPageInfo;
 
 // ============================================================================

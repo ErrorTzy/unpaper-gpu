@@ -42,6 +42,9 @@ unpaper/
 │   ├── bench_a1.py        # Single-image A1 benchmark
 │   ├── bench_batch.py     # Batch processing benchmark
 │   └── bench_jpeg_pipeline.py # JPEG pipeline benchmark
+├── pdf/                   # PDF support
+│   ├── pdf_reader.c/.h    # PDF reading (MuPDF)
+│   └── pdf_writer.c/.h    # PDF writing (MuPDF)
 └── doc/                   # Documentation
     └── CUDA_BACKEND_HISTORY.md  # Completed PR history
 ```
@@ -226,27 +229,39 @@ PdfMetadata pdf_get_metadata(PdfDocument *doc);
 
 ---
 
-### PR 2: PDF Writer + Metadata Preservation
+### PR 2: PDF Writer + Metadata Preservation [COMPLETE]
+
+**Status**: Implemented and tested.
 
 **Why**: Create output PDFs with direct image embedding (no transcoding overhead).
 
 **Implementation**:
 - New `pdf/pdf_writer.c/.h`: create PDF, add pages, embed images
-- Support JPEG and JP2 MIME embedding (MuPDF `pdf_add_image`)
-- Add `pdf_writer_add_page_pixels()` for raw RGB/grayscale data (CPU path)
+- Support JPEG and JP2 direct embedding (zero-copy path)
+- Add `pdf_writer_add_page_pixels()` for raw RGB/grayscale data (Flate compression)
 - Copy metadata from input PDF (title, author, subject, keywords, dates)
-- Page size from original or computed from image dimensions + DPI
+- Page size computed from image dimensions + DPI
+- Abort support for error handling without partial file creation
 
-**Key API**:
+**Key API** (implemented in `pdf/pdf_writer.h`):
 ```c
-PdfWriter *pdf_writer_create(const char *path, PdfMetadata *meta);
-void pdf_writer_add_page_jpeg(PdfWriter *w, uint8_t *data, size_t len, int width, int height);
-void pdf_writer_add_page_jp2(PdfWriter *w, uint8_t *data, size_t len, int width, int height);
-void pdf_writer_add_page_pixels(PdfWriter *w, uint8_t *pixels, int w, int h, int stride, int fmt);
-void pdf_writer_close(PdfWriter *w);
+PdfWriter *pdf_writer_create(const char *path, const PdfMetadata *meta, int dpi);
+bool pdf_writer_add_page_jpeg(PdfWriter *w, const uint8_t *data, size_t len, int width, int height, int dpi);
+bool pdf_writer_add_page_jp2(PdfWriter *w, const uint8_t *data, size_t len, int width, int height, int dpi);
+bool pdf_writer_add_page_pixels(PdfWriter *w, const uint8_t *pixels, int w, int h, int stride, PdfPixelFormat fmt, int dpi);
+bool pdf_writer_close(PdfWriter *w);
+void pdf_writer_abort(PdfWriter *w);
+int pdf_writer_page_count(const PdfWriter *w);
 ```
 
-**Tests**: Create PDF with embedded JPEG, verify it opens in viewers, verify metadata preserved.
+**Tests**: `tests/pdf_writer_test.c` - Unit tests for all API functions.
+- Create PDF with embedded JPEG
+- Create PDF with pixel data (grayscale and RGB)
+- Multi-page PDF creation
+- Metadata preservation verification
+- Extract JPEG from source PDF and re-embed
+
+**Build**: `meson setup builddir-pdf -Dpdf=enabled && meson compile -C builddir-pdf`
 
 **Success**: Output PDF contains directly embedded images, metadata matches input.
 

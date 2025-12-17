@@ -18,7 +18,7 @@ static __thread char last_error[512] = {0};
 struct PdfDocument {
   fz_context *ctx;
   fz_document *doc;
-  pdf_document *pdf;  // NULL if not a PDF (could be other doc type)
+  pdf_document *pdf; // NULL if not a PDF (could be other doc type)
   char *path;
   int page_count;
 };
@@ -31,9 +31,7 @@ static void set_error(const char *fmt, ...) {
   va_end(args);
 }
 
-const char *pdf_get_last_error(void) {
-  return last_error;
-}
+const char *pdf_get_last_error(void) { return last_error; }
 
 const char *pdf_image_format_name(PdfImageFormat format) {
   switch (format) {
@@ -83,9 +81,7 @@ PdfDocument *pdf_open(const char *path) {
   }
 
   // Register document handlers
-  fz_try(ctx) {
-    fz_register_document_handlers(ctx);
-  }
+  fz_try(ctx) { fz_register_document_handlers(ctx); }
   fz_catch(ctx) {
     set_error("Failed to register document handlers: %s",
               fz_caught_message(ctx));
@@ -95,9 +91,7 @@ PdfDocument *pdf_open(const char *path) {
 
   // Open document
   fz_document *doc = NULL;
-  fz_try(ctx) {
-    doc = fz_open_document(ctx, path);
-  }
+  fz_try(ctx) { doc = fz_open_document(ctx, path); }
   fz_catch(ctx) {
     set_error("Failed to open document: %s", fz_caught_message(ctx));
     fz_drop_context(ctx);
@@ -106,9 +100,7 @@ PdfDocument *pdf_open(const char *path) {
 
   // Count pages
   int page_count = 0;
-  fz_try(ctx) {
-    page_count = fz_count_pages(ctx, doc);
-  }
+  fz_try(ctx) { page_count = fz_count_pages(ctx, doc); }
   fz_catch(ctx) {
     set_error("Failed to count pages: %s", fz_caught_message(ctx));
     fz_drop_document(ctx, doc);
@@ -148,9 +140,7 @@ PdfDocument *pdf_open_memory(const uint8_t *data, size_t size) {
     return NULL;
   }
 
-  fz_try(ctx) {
-    fz_register_document_handlers(ctx);
-  }
+  fz_try(ctx) { fz_register_document_handlers(ctx); }
   fz_catch(ctx) {
     set_error("Failed to register document handlers: %s",
               fz_caught_message(ctx));
@@ -166,9 +156,7 @@ PdfDocument *pdf_open_memory(const uint8_t *data, size_t size) {
     stream = fz_open_memory(ctx, data, size);
     doc = fz_open_document_with_stream(ctx, "application/pdf", stream);
   }
-  fz_always(ctx) {
-    fz_drop_stream(ctx, stream);
-  }
+  fz_always(ctx) { fz_drop_stream(ctx, stream); }
   fz_catch(ctx) {
     set_error("Failed to open document from memory: %s",
               fz_caught_message(ctx));
@@ -177,9 +165,7 @@ PdfDocument *pdf_open_memory(const uint8_t *data, size_t size) {
   }
 
   int page_count = 0;
-  fz_try(ctx) {
-    page_count = fz_count_pages(ctx, doc);
-  }
+  fz_try(ctx) { page_count = fz_count_pages(ctx, doc); }
   fz_catch(ctx) {
     set_error("Failed to count pages: %s", fz_caught_message(ctx));
     fz_drop_document(ctx, doc);
@@ -261,9 +247,7 @@ bool pdf_get_page_info(PdfDocument *doc, int page, PdfPageInfo *info) {
           pdf_to_int(doc->ctx, pdf_dict_gets(doc->ctx, pageobj, "Rotate"));
     }
   }
-  fz_always(doc->ctx) {
-    fz_drop_page(doc->ctx, fzpage);
-  }
+  fz_always(doc->ctx) { fz_drop_page(doc->ctx, fzpage); }
   fz_catch(doc->ctx) {
     set_error("Failed to get page info: %s", fz_caught_message(doc->ctx));
     return false;
@@ -372,9 +356,7 @@ static bool extract_image_from_resources(PdfDocument *doc, pdf_page *page,
     image->format = convert_image_type(cbuf->params.type);
     image->is_mask = best_image->imagemask;
   }
-  fz_always(ctx) {
-    fz_drop_image(ctx, best_image);
-  }
+  fz_always(ctx) { fz_drop_image(ctx, best_image); }
   fz_catch(ctx) {
     set_error("Failed to extract image: %s", fz_caught_message(ctx));
     free(image->data);
@@ -458,7 +440,7 @@ uint8_t *pdf_render_page(PdfDocument *doc, int page, int dpi, int *width,
     // Create RGB pixmap
     fz_colorspace *cs = fz_device_rgb(ctx);
     pix = fz_new_pixmap_with_bbox(ctx, cs, bbox, NULL, 0);
-    fz_clear_pixmap_with_value(ctx, pix, 255);  // White background
+    fz_clear_pixmap_with_value(ctx, pix, 255); // White background
 
     // Render page
     fz_device *dev = fz_new_draw_device(ctx, ctm, pix);
