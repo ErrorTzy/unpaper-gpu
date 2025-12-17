@@ -10,11 +10,21 @@ unpaper/
 ├── sheet_process.c/.h     # Per-sheet processing logic
 ├── imageprocess/          # Image processing
 │   ├── backend.c/.h       # Backend vtable (CPU/CUDA dispatch)
-│   ├── backend_cuda.c     # CUDA backend implementation
+│   ├── backend_cuda.c     # CUDA backend: infrastructure, vtable
+│   ├── backend_cuda_internal.h # CUDA backend: shared declarations
+│   ├── backend_cuda_blit.c    # CUDA backend: rectangle ops, transforms
+│   ├── backend_cuda_masks.c   # CUDA backend: mask/border operations
+│   ├── backend_cuda_filters.c # CUDA backend: blackfilter, blurfilter, etc.
+│   ├── backend_cuda_deskew.c  # CUDA backend: rotation detection/deskew
 │   ├── image.c/.h         # Image struct, CPU memory
 │   ├── image_cuda.c       # GPU residency, dirty flags
 │   ├── cuda_runtime.c/.h  # CUDA abstraction (streams, memory)
-│   ├── cuda_kernels.cu    # Custom CUDA kernels
+│   ├── cuda_kernels.cu    # CUDA kernels: main entry, grayscale ops
+│   ├── cuda_kernels_common.cuh  # CUDA kernels: shared macros/helpers
+│   ├── cuda_kernels_blit.cu     # CUDA kernels: rectangle ops, transforms
+│   ├── cuda_kernels_masks.cu    # CUDA kernels: mask/border operations
+│   ├── cuda_kernels_filters.cu  # CUDA kernels: blackfilter, flood-fill
+│   ├── cuda_kernels_deskew.cu   # CUDA kernels: rotation detection
 │   ├── cuda_mempool.c/.h  # GPU memory pool (images + integrals)
 │   ├── cuda_stream_pool.c/.h # CUDA stream pool
 │   ├── nvjpeg_decode.c/.h # nvJPEG GPU decode
@@ -23,10 +33,10 @@ unpaper/
 │   ├── npp_integral.c/.h  # NPP integral image computation
 │   ├── opencv_bridge.cpp/.h # OpenCV CUDA bridge (filters)
 │   ├── opencv_ops.cpp/.h  # OpenCV CUDA operations
-│   ├── blit.c             # Rectangle operations
-│   ├── deskew.c           # Rotation detection/correction
-│   ├── filters.c          # blackfilter, blurfilter, etc.
-│   └── masks.c            # Mask detection, borders
+│   ├── blit.c             # CPU: rectangle operations
+│   ├── deskew.c           # CPU: rotation detection/correction
+│   ├── filters.c          # CPU: blackfilter, blurfilter, etc.
+│   └── masks.c            # CPU: mask detection, borders
 ├── lib/                   # Utilities
 │   ├── batch.c/.h         # Batch job queue
 │   ├── batch_worker.c/.h  # Batch worker coordination
@@ -71,6 +81,14 @@ Selection: `--device=cpu|cuda`
 Requires OpenCV with CUDA modules (`cudaarithm`, `cudaimgproc`, `cudawarping`).
 Custom kernels for: mono formats, blackfilter flood-fill, rotation detection.
 Performance: ~7x speedup vs CPU (A1 benchmark).
+
+The CUDA backend is split into modular files mirroring the CPU structure:
+- `backend_cuda.c` - Infrastructure, kernel loading, shared helpers, vtable
+- `backend_cuda_blit.c` - Rectangle ops (wipe, copy, rotate90, mirror, stretch, resize)
+- `backend_cuda_masks.c` - Mask detection and border operations
+- `backend_cuda_filters.c` - blackfilter, blurfilter, noisefilter, grayfilter
+- `backend_cuda_deskew.c` - Rotation detection and deskew
+- `backend_cuda_internal.h` - Shared declarations across modules
 
 ### Pipeline Auto-Selection
 
@@ -415,6 +433,245 @@ PDF JBIG2 → MuPDF extract (data + globals) → jbig2dec → 1-bit bitmap → e
 
 ---
 
+### PR 5.1: Establish nvImageCodec Migration Baseline
+
+**Status**: Not started.
+
+**Why**: Before migrating from nvJPEG to nvImageCodec, we need quantitative baseline performance numbers to ensure no regression.
+
+**Background**: nvImageCodec is NVIDIA's unified codec framework that internally uses nvJPEG (via `nvjpeg_ext` plugin) for JPEG support. The current codebase has:
+- `nvjpeg_decode.c` (1498 lines) - Direct nvJPEG wrapper with optimizations
+- `nvjpeg_encode.c` (894 lines) - Direct nvJPEG encoder wrapper
+- `nvimgcodec.c` (1604 lines) - nvImageCodec wrapper with redundant nvJPEG fallback
+
+The fallback architecture is unnecessary since nvImageCodec handles JPEG through its nvjpeg_ext plugin.
+
+**Tasks**:
+1. Run `tools/bench_batch.py --images 50 --jpeg --devices cuda --sequential`
+2. Run `tools/bench_jpeg_pipeline.py --images 50`
+3. Document baseline throughput (target: ~10 img/s for 50 JPEGs)
+4. Save results to `doc/nvimgcodec_migration_baseline.md`
+
+**Success criteria**: Documented baseline numbers before any code changes.
+
+---
+
+### PR 5.2: Remove nvJPEG Fallback from nvimgcodec.c
+
+**Status**: Not started.
+
+**Why**: nvImageCodec is the unified framework - the nvJPEG fallback path (lines 970-1433) is unnecessary complexity.
+
+**Current structure**:
+```
+nvimgcodec.c (1604 lines):
+├── Lines 7-969:     nvImageCodec implementation
+├── Lines 970-1433:  nvJPEG fallback (REDUNDANT - to be removed)
+└── Lines 1434-1602: Non-CUDA stubs
+```
+
+**Implementation**:
+- Remove the `#else // !UNPAPER_WITH_NVIMGCODEC` section that wraps nvJPEG (lines 970-1433)
+- Keep only: nvImageCodec implementation + non-CUDA stubs
+- Update `meson.build`: make nvImageCodec required for `-Dcuda=enabled` builds
+- Update error messages to guide users to install nvImageCodec
+
+**Files changed**:
+- `imageprocess/nvimgcodec.c` - Remove ~460 lines of fallback code
+- `meson.build` - nvImageCodec required for CUDA builds
+
+**Result**: nvimgcodec.c drops from 1604 to ~1140 lines.
+
+**Success criteria**: CUDA build requires nvImageCodec. All existing tests pass.
+
+---
+
+### PR 5.3: Add Batch Decode API to nvimgcodec.c
+
+**Status**: Not started.
+
+**Why**: `batch_decode_queue.c` needs a batch decode function. Uses per-image decode internally (batched decode mode was proven slower and is being dropped).
+
+**Current API** (single image only):
+```c
+bool nvimgcodec_decode(const uint8_t *data, size_t size,
+                       NvImgCodecDecodeState *state, ...);
+```
+
+**New batch API** (per-image internally, parallel streams):
+```c
+// Batch decode - processes images in parallel using per-image decode
+int nvimgcodec_decode_batch(
+    const uint8_t *const *data_ptrs,    // Array of image data pointers
+    const size_t *sizes,                 // Array of data sizes
+    int batch_size,                      // Number of images
+    NvImgCodecOutputFormat output_fmt,   // Output format
+    NvImgCodecDecodedImage *outputs      // Output array
+);
+```
+
+**Implementation approach**:
+- Acquire N decode states from pool (up to available states)
+- Launch N parallel decodes on separate CUDA streams
+- Each decode is independent (per-image mode)
+- Return count of successful decodes
+
+**Files changed**:
+- `imageprocess/nvimgcodec.h` - Add batch API declaration
+- `imageprocess/nvimgcodec.c` - Add batch implementation (~100 lines)
+
+**Success criteria**: New batch API works. Unit test passes.
+
+---
+
+### PR 5.4: Migrate batch_decode_queue.c to nvimgcodec
+
+**Status**: Not started.
+
+**Why**: Currently uses nvjpeg_decode.c directly. Must use unified nvimgcodec API.
+
+**Current** (batch_decode_queue.c):
+```c
+#include "imageprocess/nvjpeg_decode.h"
+...
+if (nvjpeg_batched_is_ready()) {
+    int decoded = nvjpeg_decode_batch(jpeg_data, jpeg_sizes, jpeg_count, outputs);
+}
+```
+
+**After**:
+```c
+#include "imageprocess/nvimgcodec.h"
+...
+if (nvimgcodec_is_available()) {
+    int decoded = nvimgcodec_decode_batch(jpeg_data, jpeg_sizes, jpeg_count,
+                                          NVIMGCODEC_OUT_RGB, outputs);
+}
+```
+
+**Tasks**:
+1. Replace `#include "nvjpeg_decode.h"` with `#include "nvimgcodec.h"`
+2. Replace `nvjpeg_batched_is_ready()` → `nvimgcodec_is_available()`
+3. Replace `nvjpeg_decode_batch()` → `nvimgcodec_decode_batch()`
+4. Update `NvJpegDecodedImage` → `NvImgCodecDecodedImage`
+5. Remove nvjpeg-specific initialization (`nvjpeg_batched_init`, `nvjpeg_batched_cleanup`)
+
+**Files changed**:
+- `lib/batch_decode_queue.c` - Update ~100 lines
+
+**Success criteria**: Batch processing works with nvimgcodec. `bench_batch.py` runs successfully.
+
+---
+
+### PR 5.5: Migrate decode_queue.c and Remove Redundant Fallback
+
+**Status**: Not started.
+
+**Why**: Currently has redundant manual fallback to nvjpeg that duplicates nvimgcodec's internal handling.
+
+**Current** (decode_queue.c):
+```c
+#include "imageprocess/nvimgcodec.h"
+#include "imageprocess/nvjpeg_decode.h"  // REMOVE
+...
+if (!nvimgcodec_decode(...)) {
+    goto legacy_nvjpeg;  // REMOVE this fallback
+}
+...
+legacy_nvjpeg:  // REMOVE ~66 lines
+    nvjpeg_decode_to_gpu(...);
+```
+
+**After**:
+```c
+#include "imageprocess/nvimgcodec.h"
+// No nvjpeg include, no fallback
+if (!nvimgcodec_decode(...)) {
+    // Fall back to CPU (FFmpeg), not nvjpeg
+}
+```
+
+**Files changed**:
+- `lib/decode_queue.c` - Remove ~70 lines of redundant fallback
+
+**Success criteria**: decode_queue.c uses only nvimgcodec. All tests pass.
+
+---
+
+### PR 5.6: Delete nvjpeg_decode.c and nvjpeg_encode.c
+
+**Status**: Not started.
+
+**Why**: No longer needed - nvimgcodec handles everything through nvImageCodec's nvjpeg_ext plugin.
+
+**Tasks**:
+1. Delete `imageprocess/nvjpeg_decode.c` (1498 lines)
+2. Delete `imageprocess/nvjpeg_decode.h`
+3. Delete `imageprocess/nvjpeg_encode.c` (894 lines)
+4. Delete `imageprocess/nvjpeg_encode.h`
+5. Update `meson.build` to remove these files from build
+6. Remove any remaining includes across codebase
+
+**Files deleted**:
+- `imageprocess/nvjpeg_decode.c` (-1498 lines)
+- `imageprocess/nvjpeg_decode.h`
+- `imageprocess/nvjpeg_encode.c` (-894 lines)
+- `imageprocess/nvjpeg_encode.h`
+
+**Total lines removed**: ~2400 lines
+
+**Success criteria**: Build succeeds without nvjpeg_*.c files. All tests pass.
+
+---
+
+### PR 5.7: Verify Performance - No Regression
+
+**Status**: Not started.
+
+**Why**: Ensure migration didn't regress performance.
+
+**Tasks**:
+1. Re-run `tools/bench_batch.py --images 50 --jpeg --devices cuda --sequential`
+2. Re-run `tools/bench_jpeg_pipeline.py --images 50`
+3. Compare with PR 5.1 baseline
+4. Target: within 5% of baseline (ideally equal or faster)
+
+**If regression detected**:
+- Profile with `nsys` to identify bottleneck
+- Check nvImageCodec executor configuration
+- Verify custom allocators are being used (stream-ordered allocation)
+- Check CUDA stream handling
+
+**Success criteria**: Performance within 5% of baseline. Document final numbers.
+
+---
+
+### PR 5.x Summary: nvImageCodec Migration
+
+| PR | Description | Lines Changed |
+|----|-------------|---------------|
+| 5.1 | Baseline benchmarks | 0 (documentation only) |
+| 5.2 | Remove nvJPEG fallback from nvimgcodec.c | -460 |
+| 5.3 | Add batch decode API to nvimgcodec | +100 |
+| 5.4 | Migrate batch_decode_queue.c | ~100 modified |
+| 5.5 | Migrate decode_queue.c | -70 |
+| 5.6 | Delete nvjpeg_decode.c/nvjpeg_encode.c | -2400 |
+| 5.7 | Verify performance | 0 (testing only) |
+
+**Net result**: ~2800 lines removed, cleaner architecture, unified codec API.
+
+**Key optimizations preserved** (already in nvimgcodec.c):
+
+| Optimization | Implementation |
+|--------------|----------------|
+| Stream-ordered allocation | `cudaMallocAsync` in decode (line 637-640) |
+| Dedicated CUDA streams | Per-state `cudaStream_t` (line 34) |
+| Pre-allocated events | `completion_event` in state (line 35) |
+| Lock-free state pool | `atomic_compare_exchange` (lines 418-425) |
+| Memory alignment | 256-byte pitch alignment (line 632) |
+
+---
+
 ### PR 6: GPU PDF Pipeline Integration [IN PROGRESS]
 
 **Status**: Partial implementation. CUDA kernel added, pipeline integration pending.
@@ -422,7 +679,7 @@ PDF JBIG2 → MuPDF extract (data + globals) → jbig2dec → 1-bit bitmap → e
 **Why**: Wire GPU decode/encode to PDF pipeline for maximum performance.
 
 **Completed work**:
-- Added `unpaper_expand_1bit_to_8bit` CUDA kernel in `cuda_kernels.cu` for GPU-based 1-bit to 8-bit expansion
+- Added `unpaper_expand_1bit_to_8bit` CUDA kernel in `cuda_kernels_filters.cu` for GPU-based 1-bit to 8-bit expansion
 - Created benchmark infrastructure: `tools/bench_jbig2_pdf.py` and `tools/create_jbig2_benchmark_pdf.py`
 - Created 50-page JBIG2 test PDF: `tests/pdf_samples/benchmark_jbig2_50page.pdf`
 - Fixed meson.build to support combined CUDA+PDF builds (`builddir-cuda-pdf/`)
