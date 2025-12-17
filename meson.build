@@ -85,13 +85,6 @@ if have_pdf
     ]
 endif
 
-# CUDA stub for non-CUDA builds
-if not have_cuda
-    unpaper_sources += [
-        'imageprocess/backend_cuda_stub.c',
-    ]
-endif
-
 # OpenCV and CUDA setup - OpenCV is mandatory when CUDA is enabled
 have_opencv = false
 opencv_dep = disabler()
@@ -118,6 +111,13 @@ elif cuda_opt.auto()
             cuda_include_dir = '/usr/local/cuda/include'
         endif
     endif
+endif
+
+# CUDA stub for non-CUDA builds (must be after CUDA detection)
+if not have_cuda
+    unpaper_sources += [
+        'imageprocess/backend_cuda_stub.c',
+    ]
 endif
 
 # When CUDA is enabled, set up OpenCV (mandatory) and CUDA sources
