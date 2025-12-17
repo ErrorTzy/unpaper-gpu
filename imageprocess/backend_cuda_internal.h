@@ -56,6 +56,7 @@ extern void *k_rotate_bytes;
 extern void *k_rotate_mono;
 extern void *k_batch_scan_grayscale_sum;
 extern void *k_batch_scan_brightness_count;
+extern void *k_expand_1bit_to_8bit;
 
 // Ensure CUDA kernels are loaded (thread-safe, lazy initialization)
 void ensure_kernels_loaded(void);

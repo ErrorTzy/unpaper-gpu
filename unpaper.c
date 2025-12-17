@@ -47,7 +47,11 @@
 #include "version.h"
 
 #if defined(UNPAPER_WITH_PDF) && (UNPAPER_WITH_PDF)
+#include "pdf/pdf_pipeline_batch.h"
 #include "pdf/pdf_pipeline_cpu.h"
+#ifdef UNPAPER_WITH_CUDA
+#include "pdf/pdf_pipeline_gpu.h"
+#endif
 #endif
 
 #define WELCOME                                                                \
@@ -66,6 +70,8 @@
           "         --jobs=N, -j N (parallel workers, 0=auto, default: 0)\n"   \
           "         --cuda-streams=N (CUDA streams, 0=auto, default: 0)\n"     \
           "         --jpeg-quality=N (JPEG output quality, 1-100)\n"           \
+          "         --pdf-quality=fast|high (PDF: fast=JPEG, high=JP2)\n"      \
+          "         --pdf-dpi=N (PDF render DPI, 72-1200, default: 300)\n"     \
           "         --progress (show batch progress)\n"                        \
           "\n"                                                                 \
           "Filenames may contain a formatting placeholder starting with '%%' " \
@@ -207,6 +213,8 @@ enum LONG_OPTION_VALUES {
   OPT_PROGRESS,
   OPT_CUDA_STREAMS,
   OPT_JPEG_QUALITY,
+  OPT_PDF_QUALITY,
+  OPT_PDF_DPI,
 };
 
 /****************************************************************************
@@ -467,6 +475,8 @@ int main(int argc, char *argv[]) {
           {"progress", no_argument, NULL, OPT_PROGRESS},
           {"cuda-streams", required_argument, NULL, OPT_CUDA_STREAMS},
           {"jpeg-quality", required_argument, NULL, OPT_JPEG_QUALITY},
+          {"pdf-quality", required_argument, NULL, OPT_PDF_QUALITY},
+          {"pdf-dpi", required_argument, NULL, OPT_PDF_DPI},
           {NULL, no_argument, NULL, 0}};
 
       c = getopt_long_only(argc, argv, "hVl:S:x::n::M:s:z:p:m:W:B:w:b:Tt:qv",
@@ -1059,6 +1069,25 @@ int main(int argc, char *argv[]) {
                     optarg);
         }
         break;
+
+      case OPT_PDF_QUALITY:
+        if (strcasecmp(optarg, "fast") == 0) {
+          options.pdf_quality_mode = PDF_QUALITY_FAST;
+        } else if (strcasecmp(optarg, "high") == 0) {
+          options.pdf_quality_mode = PDF_QUALITY_HIGH;
+        } else {
+          errOutput("invalid value for --pdf-quality: '%s' (valid: fast, high)",
+                    optarg);
+        }
+        break;
+
+      case OPT_PDF_DPI:
+        if (sscanf(optarg, "%d", &options.pdf_render_dpi) != 1 ||
+            options.pdf_render_dpi < 72 || options.pdf_render_dpi > 1200) {
+          errOutput("invalid value for --pdf-dpi: '%s' (valid: 72-1200)",
+                    optarg);
+        }
+        break;
       }
     }
 
@@ -1187,9 +1216,37 @@ int main(int argc, char *argv[]) {
                                 points, pointCount, middleWipe,
                                 blackfilterExclude, 0);
 
-      // Run PDF pipeline
-      int failed =
-          pdf_pipeline_cpu_process(input_file, output_file, &options, &config);
+      // Run PDF pipeline (batch, GPU, or CPU based on options)
+      int failed;
+
+      // Use batch pipeline if batch mode is enabled or parallelism is requested
+      if (options.batch_mode || options.batch_jobs > 1) {
+        PdfBatchConfig batch_config;
+        pdf_batch_config_init(&batch_config);
+        batch_config.parallelism = options.batch_jobs;
+        batch_config.progress = options.batch_progress;
+#ifdef UNPAPER_WITH_CUDA
+        batch_config.use_gpu = (options.device == UNPAPER_DEVICE_CUDA) &&
+                               pdf_pipeline_gpu_available();
+#endif
+        verboseLog(VERBOSE_NORMAL, "Using batch PDF pipeline (%s)\n",
+                   batch_config.use_gpu ? "GPU" : "CPU");
+        failed = pdf_pipeline_batch_process(input_file, output_file, &options,
+                                            &config, &batch_config);
+      }
+#ifdef UNPAPER_WITH_CUDA
+      else if (options.device == UNPAPER_DEVICE_CUDA &&
+               pdf_pipeline_gpu_available()) {
+        verboseLog(VERBOSE_NORMAL, "Using GPU PDF pipeline\n");
+        failed = pdf_pipeline_gpu_process(input_file, output_file, &options,
+                                          &config);
+      }
+#endif
+      else {
+        verboseLog(VERBOSE_NORMAL, "Using CPU PDF pipeline\n");
+        failed = pdf_pipeline_cpu_process(input_file, output_file, &options,
+                                          &config);
+      }
 
       return (failed > 0) ? 1 : 0;
     }

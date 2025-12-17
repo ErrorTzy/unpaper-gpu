@@ -57,6 +57,7 @@ void *k_rotate_bytes;
 void *k_rotate_mono;
 void *k_batch_scan_grayscale_sum;
 void *k_batch_scan_brightness_count;
+void *k_expand_1bit_to_8bit;
 
 void ensure_kernels_loaded(void) {
   // Fast path: already loaded
@@ -132,6 +133,8 @@ void ensure_kernels_loaded(void) {
       module, "unpaper_batch_scan_grayscale_sum");
   k_batch_scan_brightness_count = unpaper_cuda_module_get_function(
       module, "unpaper_batch_scan_brightness_count");
+  k_expand_1bit_to_8bit =
+      unpaper_cuda_module_get_function(module, "unpaper_expand_1bit_to_8bit");
 
   // Publish the module pointer last (release semantics)
   atomic_store_explicit(&cuda_module, module, memory_order_release);

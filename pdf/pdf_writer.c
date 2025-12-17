@@ -253,8 +253,9 @@ static bool add_page_with_image(PdfWriter *writer, pdf_obj *image_obj,
     // Create resources with the image
     resources = pdf_new_dict(ctx, doc, 2);
     xobjects = pdf_new_dict(ctx, doc, 1);
-    pdf_obj *im0_name = pdf_new_name(ctx, "Im0");
-    pdf_dict_put_drop(ctx, xobjects, im0_name, image_obj);
+    // Use pdf_dict_puts to add the XObject reference with a string key
+    // This ensures the indirect reference is properly serialized
+    pdf_dict_puts(ctx, xobjects, "Im0", image_obj);
     pdf_dict_put(ctx, resources, PDF_NAME(XObject), xobjects);
 
     // Create the page

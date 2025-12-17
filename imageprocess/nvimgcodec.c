@@ -253,7 +253,8 @@ static bool init_decode_state(NvImgCodecDecodeState *state) {
   exec_params.max_num_cpu_threads = 1;
   exec_params.num_backends = 0; // Use all available backends
   // Use custom async allocators to avoid synchronous cudaMalloc/cudaFree
-  // which block all streams. This improves nvJPEG internal allocation performance.
+  // which block all streams. This improves nvJPEG internal allocation
+  // performance.
   exec_params.device_allocator = &g_device_allocator;
   exec_params.pinned_allocator = &g_pinned_allocator;
 
@@ -314,7 +315,8 @@ static bool init_encode_state(NvImgCodecEncodeState *state) {
   exec_params.device_id = 0;
   exec_params.max_num_cpu_threads = 1;
   // Use custom async allocators to avoid synchronous cudaMalloc/cudaFree
-  // which block all streams. This improves nvJPEG internal allocation performance.
+  // which block all streams. This improves nvJPEG internal allocation
+  // performance.
   exec_params.device_allocator = &g_device_allocator;
   exec_params.pinned_allocator = &g_pinned_allocator;
 
@@ -766,7 +768,8 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   // Create or reuse output image
   // Passing &state->cached_image reuses existing object if non-NULL
   // (nvImageCodec 0.7+ feature: avoids per-operation allocation overhead)
-  status = nvimgcodecImageCreate(g_ctx.instance, &state->cached_image, &out_info);
+  status =
+      nvimgcodecImageCreate(g_ctx.instance, &state->cached_image, &out_info);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
     cudaFreeAsync(gpu_buffer, state->stream);
     // Don't destroy cached objects - they will be reused on next call
@@ -780,9 +783,9 @@ bool nvimgcodec_decode(const uint8_t *data, size_t size,
   decode_params.apply_exif_orientation = 0;
 
   nvimgcodecFuture_t future = NULL;
-  status = nvimgcodecDecoderDecode(state->decoder, &state->cached_code_stream,
-                                   &state->cached_image, 1, &decode_params,
-                                   &future);
+  status =
+      nvimgcodecDecoderDecode(state->decoder, &state->cached_code_stream,
+                              &state->cached_image, 1, &decode_params, &future);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
     cudaFreeAsync(gpu_buffer, state->stream);
     // Don't destroy cached objects - they will be reused on next call
@@ -1080,8 +1083,8 @@ bool nvimgcodec_encode(const void *gpu_ptr, size_t pitch, int width, int height,
   // Encode
   nvimgcodecFuture_t future = NULL;
   status = nvimgcodecEncoderEncode(state->encoder, &state->cached_image,
-                                   &state->cached_code_stream, 1, &encode_params,
-                                   &future);
+                                   &state->cached_code_stream, 1,
+                                   &encode_params, &future);
   if (status != NVIMGCODEC_STATUS_SUCCESS) {
     free(buf_ctx.buffer);
     // Don't destroy cached objects - they will be reused on next call

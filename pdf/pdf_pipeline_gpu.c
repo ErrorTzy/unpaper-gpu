@@ -6,7 +6,6 @@
 
 #include "constants.h"
 #include "imageprocess/backend.h"
-#include "sheet_process.h"
 #include "imageprocess/backend_cuda_internal.h"
 #include "imageprocess/blit.h"
 #include "imageprocess/cuda_runtime.h"
@@ -20,6 +19,7 @@
 #include "lib/perf.h"
 #include "pdf_reader.h"
 #include "pdf_writer.h"
+#include "sheet_process.h"
 
 #ifdef UNPAPER_WITH_JBIG2
 #include "lib/jbig2_decode.h"
@@ -56,8 +56,8 @@ bool pdf_pipeline_gpu_available(void) {
 static bool gpu_expand_1bit_to_8bit(UnpaperCudaStream *stream,
                                     const uint8_t *src_1bit_host,
                                     int src_stride_1bit, int width, int height,
-                                    uint64_t *dst_8bit_gpu, int *dst_stride_8bit,
-                                    bool invert) {
+                                    uint64_t *dst_8bit_gpu,
+                                    int *dst_stride_8bit, bool invert) {
   ensure_kernels_loaded();
 
   // Calculate sizes
@@ -99,8 +99,9 @@ static bool gpu_expand_1bit_to_8bit(UnpaperCudaStream *stream,
   // Launch kernel
   int invert_int = invert ? 1 : 0;
   void *params[] = {
-      (void *)&src_gpu,   (void *)&src_bytes_per_row, (void *)dst_8bit_gpu,
-      (void *)dst_stride_8bit, (void *)&width,        (void *)&height,
+      (void *)&src_gpu,     (void *)&src_bytes_per_row,
+      (void *)dst_8bit_gpu, (void *)dst_stride_8bit,
+      (void *)&width,       (void *)&height,
       (void *)&invert_int,
   };
 
@@ -143,9 +144,9 @@ static bool decode_jbig2_to_gpu(const PdfImage *pdf_img,
 
   // GPU expand 1-bit to 8-bit
   // JBIG2 uses 1=black, 0=white, so invert to get 0=black, 255=white
-  bool ok = gpu_expand_1bit_to_8bit(stream, jbig2_img.data,
-                                    (int)jbig2_img.stride, *width, *height,
-                                    gpu_ptr, gpu_pitch, true);
+  bool ok =
+      gpu_expand_1bit_to_8bit(stream, jbig2_img.data, (int)jbig2_img.stride,
+                              *width, *height, gpu_ptr, gpu_pitch, true);
 
   jbig2_free_image(&jbig2_img);
   return ok;
@@ -218,10 +219,9 @@ static bool render_page_to_gpu(PdfDocument *doc, int page_idx, int dpi,
   } else {
     // Copy row by row
     for (int y = 0; y < *height; y++) {
-      unpaper_cuda_memcpy_h2d_async(stream,
-                                    *gpu_ptr + (size_t)y * (size_t)(*gpu_pitch),
-                                    pixels + (size_t)y * (size_t)stride,
-                                    (size_t)(*gpu_pitch));
+      unpaper_cuda_memcpy_h2d_async(
+          stream, *gpu_ptr + (size_t)y * (size_t)(*gpu_pitch),
+          pixels + (size_t)y * (size_t)stride, (size_t)(*gpu_pitch));
     }
   }
 
@@ -284,7 +284,8 @@ int pdf_pipeline_gpu_process(const char *input_path, const char *output_path,
   PdfWriter *writer =
       pdf_writer_create(output_path, &meta, options->pdf_render_dpi);
   if (writer == NULL) {
-    verboseLog(VERBOSE_NORMAL, "GPU PDF pipeline: failed to create output: %s\n",
+    verboseLog(VERBOSE_NORMAL,
+               "GPU PDF pipeline: failed to create output: %s\n",
                pdf_writer_get_last_error());
     pdf_free_metadata(&meta);
     pdf_close(doc);
@@ -310,7 +311,7 @@ int pdf_pipeline_gpu_process(const char *input_path, const char *output_path,
 
   // JPEG quality to use
   int jpeg_quality = (options->jpeg_quality > 0) ? options->jpeg_quality
-                                                  : DEFAULT_JPEG_QUALITY;
+                                                 : DEFAULT_JPEG_QUALITY;
 
   // Process each page
   for (int page_idx = 0; page_idx < page_count; page_idx++) {
@@ -343,11 +344,10 @@ int pdf_pipeline_gpu_process(const char *input_path, const char *output_path,
           // Sync stream before creating Image
           unpaper_cuda_stream_synchronize_on(stream);
 
-          page_image =
-              create_image_from_gpu((void *)(uintptr_t)gpu_ptr, (size_t)gpu_pitch,
-                                    width, height, AV_PIX_FMT_GRAY8,
-                                    options->sheet_background,
-                                    options->abs_black_threshold, true);
+          page_image = create_image_from_gpu(
+              (void *)(uintptr_t)gpu_ptr, (size_t)gpu_pitch, width, height,
+              AV_PIX_FMT_GRAY8, options->sheet_background,
+              options->abs_black_threshold, true);
           decoded = (page_image.frame != NULL);
           verboseLog(VERBOSE_MORE,
                      "GPU PDF pipeline: JBIG2 decoded to GPU %dx%d\n", width,
@@ -355,36 +355,37 @@ int pdf_pipeline_gpu_process(const char *input_path, const char *output_path,
         }
       } else
 #endif
-          // Handle JPEG/JP2 with nvImageCodec
-          if (pdf_img.format == PDF_IMAGE_JPEG ||
-              pdf_img.format == PDF_IMAGE_JP2) {
-        NvImgCodecDecodeState *dec_state = nvimgcodec_acquire_decode_state();
-        if (dec_state != NULL) {
-          NvImgCodecDecodedImage gpu_img = {0};
-          if (decode_bytes_to_gpu(pdf_img.data, pdf_img.size, pdf_img.format,
-                                  dec_state, stream, &gpu_img)) {
-            width = gpu_img.width;
-            height = gpu_img.height;
+        // Handle JPEG/JP2 with nvImageCodec
+        if (pdf_img.format == PDF_IMAGE_JPEG ||
+            pdf_img.format == PDF_IMAGE_JP2) {
+          NvImgCodecDecodeState *dec_state = nvimgcodec_acquire_decode_state();
+          if (dec_state != NULL) {
+            NvImgCodecDecodedImage gpu_img = {0};
+            if (decode_bytes_to_gpu(pdf_img.data, pdf_img.size, pdf_img.format,
+                                    dec_state, stream, &gpu_img)) {
+              width = gpu_img.width;
+              height = gpu_img.height;
 
-            // Wait for decode completion
-            nvimgcodec_wait_decode_complete(&gpu_img);
+              // Wait for decode completion
+              nvimgcodec_wait_decode_complete(&gpu_img);
 
-            page_image = create_image_from_gpu(
-                gpu_img.gpu_ptr, gpu_img.pitch, width, height, AV_PIX_FMT_GRAY8,
-                options->sheet_background, options->abs_black_threshold, true);
-            decoded = (page_image.frame != NULL);
+              page_image = create_image_from_gpu(
+                  gpu_img.gpu_ptr, gpu_img.pitch, width, height,
+                  AV_PIX_FMT_GRAY8, options->sheet_background,
+                  options->abs_black_threshold, true);
+              decoded = (page_image.frame != NULL);
 
-            // Release completion event
-            nvimgcodec_release_completion_event(gpu_img.completion_event,
-                                                gpu_img.event_from_pool);
+              // Release completion event
+              nvimgcodec_release_completion_event(gpu_img.completion_event,
+                                                  gpu_img.event_from_pool);
 
-            verboseLog(VERBOSE_MORE,
-                       "GPU PDF pipeline: %s decoded to GPU %dx%d\n",
-                       pdf_image_format_name(pdf_img.format), width, height);
+              verboseLog(VERBOSE_MORE,
+                         "GPU PDF pipeline: %s decoded to GPU %dx%d\n",
+                         pdf_image_format_name(pdf_img.format), width, height);
+            }
+            nvimgcodec_release_decode_state(dec_state);
           }
-          nvimgcodec_release_decode_state(dec_state);
         }
-      }
 
       pdf_free_image(&pdf_img);
     }
@@ -398,11 +399,10 @@ int pdf_pipeline_gpu_process(const char *input_path, const char *output_path,
         // Sync stream
         unpaper_cuda_stream_synchronize_on(stream);
 
-        page_image =
-            create_image_from_gpu((void *)(uintptr_t)gpu_ptr, (size_t)gpu_pitch,
-                                  width, height, AV_PIX_FMT_GRAY8,
-                                  options->sheet_background,
-                                  options->abs_black_threshold, true);
+        page_image = create_image_from_gpu(
+            (void *)(uintptr_t)gpu_ptr, (size_t)gpu_pitch, width, height,
+            AV_PIX_FMT_GRAY8, options->sheet_background,
+            options->abs_black_threshold, true);
         decoded = (page_image.frame != NULL);
         verboseLog(VERBOSE_MORE,
                    "GPU PDF pipeline: rendered and uploaded to GPU %dx%d\n",
@@ -413,8 +413,8 @@ int pdf_pipeline_gpu_process(const char *input_path, const char *output_path,
     perf_stage_end(&perf, PERF_STAGE_DECODE);
 
     if (!decoded || page_image.frame == NULL) {
-      verboseLog(VERBOSE_NORMAL,
-                 "GPU PDF pipeline: failed to decode page %d\n", page_idx + 1);
+      verboseLog(VERBOSE_NORMAL, "GPU PDF pipeline: failed to decode page %d\n",
+                 page_idx + 1);
       failed_pages++;
       continue;
     }
@@ -423,7 +423,7 @@ int pdf_pipeline_gpu_process(const char *input_path, const char *output_path,
     BatchJob job = {0};
     job.sheet_nr = page_idx + 1;
     job.input_count = 1;
-    job.output_count = 0;  // No file output
+    job.output_count = 0; // No file output
     job.input_files[0] = NULL;
 
     SheetProcessState state;
@@ -481,23 +481,23 @@ int pdf_pipeline_gpu_process(const char *input_path, const char *output_path,
                                             out_height, input_fmt, true,
                                             enc_state, stream, &encoded);
           if (encode_ok && encoded.data != NULL) {
-            page_success = pdf_writer_add_page_jp2(writer, encoded.data,
-                                                   encoded.size, out_width,
-                                                   out_height, options->pdf_render_dpi);
+            page_success = pdf_writer_add_page_jp2(
+                writer, encoded.data, encoded.size, out_width, out_height,
+                options->pdf_render_dpi);
             free(encoded.data);
           }
         } else {
           // Fast mode: JPEG
-          encode_ok = nvimgcodec_encode_jpeg(gpu_ptr, gpu_pitch, out_width,
-                                             out_height, input_fmt, jpeg_quality,
-                                             enc_state, stream, &encoded);
+          encode_ok = nvimgcodec_encode_jpeg(
+              gpu_ptr, gpu_pitch, out_width, out_height, input_fmt,
+              jpeg_quality, enc_state, stream, &encoded);
           verboseLog(VERBOSE_MORE,
                      "GPU PDF pipeline: JPEG encode_ok=%d data=%p size=%zu\n",
                      encode_ok, encoded.data, encoded.size);
           if (encode_ok && encoded.data != NULL) {
-            page_success = pdf_writer_add_page_jpeg(writer, encoded.data,
-                                                    encoded.size, out_width,
-                                                    out_height, options->pdf_render_dpi);
+            page_success = pdf_writer_add_page_jpeg(
+                writer, encoded.data, encoded.size, out_width, out_height,
+                options->pdf_render_dpi);
             verboseLog(VERBOSE_MORE,
                        "GPU PDF pipeline: add_page_jpeg success=%d\n",
                        page_success);

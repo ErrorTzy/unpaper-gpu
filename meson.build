@@ -83,6 +83,8 @@ if have_pdf
         'pdf/pdf_reader.c',
         'pdf/pdf_writer.c',
         'pdf/pdf_pipeline_cpu.c',
+        'pdf/pdf_page_accumulator.c',
+        'pdf/pdf_pipeline_batch.c',
     ]
 endif
 
