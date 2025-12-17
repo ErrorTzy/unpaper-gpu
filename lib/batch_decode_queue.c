@@ -21,7 +21,7 @@
 
 #ifdef UNPAPER_WITH_CUDA
 #include "imageprocess/cuda_runtime.h"
-#include "imageprocess/nvjpeg_decode.h"
+#include "imageprocess/nvimgcodec.h"
 #include <cuda_runtime_api.h>
 #endif
 
@@ -539,14 +539,14 @@ static void process_chunk(BatchDecodeQueue *queue, CollectedFile *files,
     }
   }
 
-  // Batch decode JPEG files using nvJPEG
-  if (jpeg_count > 0 && nvjpeg_batched_is_ready()) {
+  // Batch decode JPEG files using nvimgcodec
+  if (jpeg_count > 0 && nvimgcodec_is_available()) {
     double decode_start = get_time_ms();
 
     // Prepare arrays for batch decode
     const uint8_t *jpeg_data[MAX_DECODE_CHUNK_SIZE];
     size_t jpeg_sizes[MAX_DECODE_CHUNK_SIZE];
-    NvJpegDecodedImage outputs[MAX_DECODE_CHUNK_SIZE];
+    NvImgCodecDecodedImage outputs[MAX_DECODE_CHUNK_SIZE];
 
     for (size_t i = 0; i < jpeg_count; i++) {
       jpeg_data[i] = jpeg_files[i]->data;
@@ -554,8 +554,8 @@ static void process_chunk(BatchDecodeQueue *queue, CollectedFile *files,
     }
 
     // Single batch decode call - key performance optimization!
-    int decoded =
-        nvjpeg_decode_batch(jpeg_data, jpeg_sizes, (int)jpeg_count, outputs);
+    (void)nvimgcodec_decode_batch(jpeg_data, jpeg_sizes, (int)jpeg_count,
+                                  NVIMGCODEC_OUT_RGB, outputs);
 
     double decode_end = get_time_ms();
     atomic_fetch_add(&queue->decode_time_us,
@@ -578,21 +578,22 @@ static void process_chunk(BatchDecodeQueue *queue, CollectedFile *files,
         img.gpu_format =
             (outputs[i].channels == 1) ? AV_PIX_FMT_GRAY8 : AV_PIX_FMT_RGB24;
         img.frame = NULL;
-        img.gpu_pool_owned = true; // Pool buffer - managed by nvjpeg_batched
+        img.gpu_pool_owned =
+            false; // nvimgcodec allocates per-image - must free
         atomic_fetch_add(&queue->gpu_batched_decodes, 1);
       } else {
         // Batch decode failed for this image - try single decode fallback
-        NvJpegStreamState *state = nvjpeg_acquire_stream_state();
+        NvImgCodecDecodeState *state = nvimgcodec_acquire_decode_state();
         if (state != NULL) {
-          NvJpegDecodedImage nvout = {0};
+          NvImgCodecDecodedImage nvout = {0};
           int channels = 1;
-          nvjpeg_get_image_info(jpeg_data[i], jpeg_sizes[i], NULL, NULL,
-                                &channels);
-          NvJpegOutputFormat fmt =
-              (channels == 1) ? NVJPEG_FMT_GRAY8 : NVJPEG_FMT_RGB;
+          nvimgcodec_get_image_info(jpeg_data[i], jpeg_sizes[i], NULL, NULL,
+                                    NULL, &channels);
+          NvImgCodecOutputFormat fmt =
+              (channels == 1) ? NVIMGCODEC_OUT_GRAY8 : NVIMGCODEC_OUT_RGB;
 
-          if (nvjpeg_decode_to_gpu(jpeg_data[i], jpeg_sizes[i], state, NULL,
-                                   fmt, &nvout)) {
+          if (nvimgcodec_decode(jpeg_data[i], jpeg_sizes[i], state, NULL, fmt,
+                                &nvout)) {
             img.valid = true;
             img.on_gpu = true;
             img.gpu_ptr = nvout.gpu_ptr;
@@ -618,7 +619,7 @@ static void process_chunk(BatchDecodeQueue *queue, CollectedFile *files,
               atomic_fetch_add(&queue->decode_failures, 1);
             }
           }
-          nvjpeg_release_stream_state(state);
+          nvimgcodec_release_decode_state(state);
         } else {
           // No stream state available - CPU fallback
           AVFrame *frame = decode_image_file_ffmpeg(jpeg_files[i]->path);
@@ -728,25 +729,6 @@ static void *orchestrator_thread_fn(void *arg) {
     return NULL;
   }
 
-#ifdef UNPAPER_WITH_CUDA
-  // Now initialize batched decoder with the ACTUAL image count.
-  // This ensures we can decode ALL images in one batch call, avoiding
-  // pool buffer reuse issues that occur with chunking.
-  if (queue->use_gpu_decode) {
-    int batch_size = (int)queue->io_work_total;
-    // Cap at reasonable limit to avoid excessive GPU memory usage
-    // (each buffer is max_width * max_height * 3 bytes)
-    if (batch_size > 256) {
-      batch_size = 256;
-    }
-    if (!nvjpeg_batched_init(batch_size, queue->max_width, queue->max_height,
-                             NVJPEG_FMT_RGB)) {
-      verboseLog(VERBOSE_DEBUG, "batch_decode: nvjpeg_batched_init failed, "
-                                "using single-image decode\n");
-    }
-  }
-#endif
-
   // Allocate collected files buffer (sized for chunk processing)
   queue->collected_capacity = queue->io_work_total;
   queue->collected_files =
@@ -790,11 +772,10 @@ static void *orchestrator_thread_fn(void *arg) {
     pthread_join(queue->io_threads[i], NULL);
   }
 
-  // Process all collected files in one batch (or chunks if >256 images)
-  // With batched decode initialized to match image count, we can decode
-  // all images at once - no pool buffer reuse issues.
+  // Process all collected files in chunks
+  // nvimgcodec_decode_batch handles state acquisition internally
   size_t total_collected = atomic_load(&queue->collected_count);
-  size_t max_chunk = 256; // Match the cap in nvjpeg_batched_init
+  size_t max_chunk = 256; // Limit chunk size to bound GPU memory usage
   for (size_t offset = 0;
        offset < total_collected && atomic_load(&queue->running);
        offset += max_chunk) {
@@ -895,7 +876,7 @@ void batch_decode_queue_destroy(BatchDecodeQueue *queue) {
   batch_decode_queue_stop(queue);
 
   // Free any remaining resources in slots
-  // Note: pool-managed GPU buffers are freed by nvjpeg_batched_cleanup
+  // Note: nvimgcodec allocates per-image, so all gpu_ptr must be freed
   for (size_t i = 0; i < queue->queue_depth; i++) {
     DecodeSlot *slot = &queue->slots[i];
 #ifdef UNPAPER_WITH_CUDA
@@ -988,11 +969,6 @@ void batch_decode_queue_stop(BatchDecodeQueue *queue) {
   // Wait for orchestrator to finish
   pthread_join(queue->orchestrator_thread, NULL);
   queue->orchestrator_started = false;
-
-#ifdef UNPAPER_WITH_CUDA
-  // Cleanup batched decoder
-  nvjpeg_batched_cleanup();
-#endif
 }
 
 bool batch_decode_queue_done(BatchDecodeQueue *queue) {

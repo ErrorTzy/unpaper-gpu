@@ -528,42 +528,26 @@ int nvimgcodec_decode_batch(
 
 ---
 
-### PR 5.4: Migrate batch_decode_queue.c to nvimgcodec
+### PR 5.4: Migrate batch_decode_queue.c to nvimgcodec [COMPLETE]
 
-**Status**: Not started.
+**Status**: Implemented and tested.
 
 **Why**: Currently uses nvjpeg_decode.c directly. Must use unified nvimgcodec API.
 
-**Current** (batch_decode_queue.c):
-```c
-#include "imageprocess/nvjpeg_decode.h"
-...
-if (nvjpeg_batched_is_ready()) {
-    int decoded = nvjpeg_decode_batch(jpeg_data, jpeg_sizes, jpeg_count, outputs);
-}
-```
-
-**After**:
-```c
-#include "imageprocess/nvimgcodec.h"
-...
-if (nvimgcodec_is_available()) {
-    int decoded = nvimgcodec_decode_batch(jpeg_data, jpeg_sizes, jpeg_count,
-                                          NVIMGCODEC_OUT_RGB, outputs);
-}
-```
-
-**Tasks**:
-1. Replace `#include "nvjpeg_decode.h"` with `#include "nvimgcodec.h"`
-2. Replace `nvjpeg_batched_is_ready()` → `nvimgcodec_is_available()`
-3. Replace `nvjpeg_decode_batch()` → `nvimgcodec_decode_batch()`
-4. Update `NvJpegDecodedImage` → `NvImgCodecDecodedImage`
-5. Remove nvjpeg-specific initialization (`nvjpeg_batched_init`, `nvjpeg_batched_cleanup`)
+**Implementation**:
+- Replaced `#include "nvjpeg_decode.h"` with `#include "nvimgcodec.h"`
+- Replaced `nvjpeg_batched_is_ready()` → `nvimgcodec_is_available()`
+- Replaced `nvjpeg_decode_batch()` → `nvimgcodec_decode_batch()`
+- Updated `NvJpegDecodedImage` → `NvImgCodecDecodedImage`
+- Updated single decode fallback to use nvimgcodec API
+- Removed `nvjpeg_batched_init()` - nvimgcodec handles initialization internally
+- Removed `nvjpeg_batched_cleanup()` - nvimgcodec cleanup is handled separately
+- Updated `gpu_pool_owned` to `false` since nvimgcodec allocates per-image (no pool)
 
 **Files changed**:
-- `lib/batch_decode_queue.c` - Update ~100 lines
+- `lib/batch_decode_queue.c` - Updated ~80 lines
 
-**Success criteria**: Batch processing works with nvimgcodec. `bench_batch.py` runs successfully.
+**Success**: All 17 CUDA tests pass. `bench_batch.py` and `bench_jpeg_pipeline.py` run successfully.
 
 ---
 
