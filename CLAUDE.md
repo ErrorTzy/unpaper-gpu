@@ -608,39 +608,60 @@ int nvimgcodec_decode_batch(
 
 ### PR 5.7: Verify Performance - No Regression
 
-**Status**: Not started.
+**Status**: REGRESSION IDENTIFIED - needs investigation.
 
 **Why**: Ensure migration didn't regress performance.
 
-**Tasks**:
-1. Re-run `tools/bench_batch.py --images 50 --jpeg --devices cuda --sequential`
-2. Re-run `tools/bench_jpeg_pipeline.py --images 50`
-3. Compare with PR 5.1 baseline
-4. Target: within 5% of baseline (ideally equal or faster)
+**Benchmark Results** (50 JPEG images, 8 streams/jobs):
 
-**If regression detected**:
-- Profile with `nsys` to identify bottleneck
-- Check nvImageCodec executor configuration
-- Verify custom allocators are being used (stream-ordered allocation)
-- Check CUDA stream handling
+| Metric | Baseline (nvJPEG) | HEAD (nvImageCodec) | Regression |
+|--------|-------------------|---------------------|------------|
+| GPU pipeline | 264.8ms/img | 348.6ms/img | **31.6%** |
+| Throughput | 3.77 img/s | 2.87 img/s | **-24%** |
 
-**Success criteria**: Performance within 5% of baseline. Document final numbers.
+**Does NOT meet 5% threshold.**
+
+**Root Cause Analysis** (via nsys profiling, 10 images):
+
+| CUDA API Call | Baseline | HEAD | Issue |
+|---------------|----------|------|-------|
+| cuMemFree_v2 | 58 calls, 2ms total (35us/call) | 260 calls, 1.59s total (6.1ms/call) | 4.5x more calls, 175x slower/call |
+| cuStreamDestroy_v2 | 38 calls, 0.2ms total (5.8us/call) | 140 calls, 240ms total (1.7ms/call) | 3.7x more calls, 290x slower/call |
+
+**Analysis**:
+
+The baseline used direct nvJPEG API (`nvjpeg_decode_to_gpu` from `nvjpeg_decode.c`) which has minimal overhead. The HEAD uses nvImageCodec's higher-level API which:
+
+1. Creates/destroys `nvimgcodecImage_t` and `nvimgcodecCodeStream_t` objects per decode/encode
+2. Each object destruction triggers synchronous CUDA memory frees
+3. nvImageCodec may create internal streams/resources that add overhead
+
+**Potential Fixes** (for future PR):
+
+1. **Revert to direct nvJPEG for JPEG**: Use nvImageCodec only for JP2, keep nvJPEG for JPEG
+2. **Pool nvImageCodec objects**: Reuse Image/CodeStream objects instead of create/destroy per operation
+3. **Async cleanup**: Batch destroy calls or use deferred cleanup to avoid synchronization
+4. **nvImageCodec configuration**: Investigate executor params to reduce internal resource creation
+
+**Success criteria**: Performance within 5% of baseline - **NOT MET**.
 
 ---
 
 ### PR 5.x Summary: nvImageCodec Migration
 
-| PR | Description | Lines Changed |
-|----|-------------|---------------|
-| 5.1 | Baseline benchmarks | 0 (documentation only) |
-| 5.2 | Remove nvJPEG fallback from nvimgcodec.c | -460 |
-| 5.3 | Add batch decode API to nvimgcodec | +100 |
-| 5.4 | Migrate batch_decode_queue.c | ~100 modified |
-| 5.5 | Migrate decode_queue.c | -70 |
-| 5.6 | Delete nvjpeg_decode.c/nvjpeg_encode.c | -2400 |
-| 5.7 | Verify performance | 0 (testing only) |
+| PR | Description | Lines Changed | Status |
+|----|-------------|---------------|--------|
+| 5.1 | Baseline benchmarks | 0 (documentation only) | Complete |
+| 5.2 | Remove nvJPEG fallback from nvimgcodec.c | -460 | Complete |
+| 5.3 | Add batch decode API to nvimgcodec | +100 | Complete |
+| 5.4 | Migrate batch_decode_queue.c | ~100 modified | Complete |
+| 5.5 | Migrate decode_queue.c | -70 | Complete |
+| 5.6 | Delete nvjpeg_decode.c/nvjpeg_encode.c | -2400 | Complete |
+| 5.7 | Verify performance | 0 (testing only) | **REGRESSION** |
 
 **Net result**: ~2800 lines removed, cleaner architecture, unified codec API.
+
+**WARNING**: 31.6% performance regression detected. Migration needs optimization before production use.
 
 **Key optimizations preserved** (already in nvimgcodec.c):
 
