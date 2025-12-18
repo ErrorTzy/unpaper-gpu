@@ -32,6 +32,7 @@ typedef enum {
   SLOT_IN_USE,    // Consumer is using this slot
 } SlotState;
 
+#ifdef UNPAPER_WITH_CUDA
 // Check if filename has JPEG extension
 static bool is_jpeg_file(const char *filename) {
   if (filename == NULL) {
@@ -69,6 +70,7 @@ static bool is_jp2_file(const char *filename) {
 static bool is_gpu_decodable_file(const char *filename) {
   return is_jpeg_file(filename) || is_jp2_file(filename);
 }
+#endif
 
 #ifdef UNPAPER_WITH_CUDA
 // Decode a JPEG or JP2 file directly to GPU memory using nvImageCodec
@@ -192,6 +194,10 @@ struct DecodeQueue {
   // Configuration
   bool use_pinned_memory;
   bool use_gpu_decode; // Enable nvJPEG GPU decode for JPEG files
+
+  // Optional custom decode callback (for non-file sources like PDF pages)
+  DecodeQueueCustomDecoder custom_decoder;
+  void *custom_decoder_ctx;
 
   // Synchronization
   pthread_mutex_t mutex;
@@ -474,11 +480,61 @@ static void *producer_thread_fn(void *arg) {
       slot->image.gpu_completion_event = NULL;
       slot->image.gpu_event_from_pool = false;
 
+      // Custom decode path (e.g., PDF page extraction/render).
+      if (queue->custom_decoder != NULL) {
+        slot->image.frame = NULL;
+        slot->image.valid = false;
+        slot->image.uses_pinned_memory = false;
+        slot->image.on_gpu = false;
+
+        bool ok = queue->custom_decoder(queue->custom_decoder_ctx, job,
+                                        (int)job_idx, input_idx, &slot->image);
+
+        if (ok && slot->image.frame != NULL) {
+          bool is_pinned = false;
+          AVFrame *final_frame = slot->image.frame;
+
+          if (queue->use_pinned_memory) {
+            AVFrame *pinned_frame =
+                copy_to_pinned_frame(final_frame, &is_pinned);
+            if (pinned_frame) {
+              av_frame_free(&final_frame);
+              final_frame = pinned_frame;
+              if (is_pinned) {
+                atomic_fetch_add(&queue->pinned_allocations, 1);
+              }
+            }
+          }
+
+          slot->image.frame = final_frame;
+          slot->image.job_index = (int)job_idx;
+          slot->image.input_index = input_idx;
+          slot->image.valid = true;
+          slot->image.uses_pinned_memory = is_pinned;
+          slot->image.on_gpu = false;
+          atomic_fetch_add(&queue->cpu_decodes, 1);
+        } else {
+          if (slot->image.frame != NULL) {
+            av_frame_free(&slot->image.frame);
+          }
+          slot->image.frame = NULL;
+          slot->image.job_index = (int)job_idx;
+          slot->image.input_index = input_idx;
+          slot->image.valid = false;
+          slot->image.uses_pinned_memory = false;
+          slot->image.on_gpu = false;
+        }
+
+        // Custom decoder is authoritative: do not fall back to file decode.
+        decode_success = true;
+      }
+
 #ifdef UNPAPER_WITH_CUDA
       // Try GPU decode for JPEG/JP2 files using nvImageCodec
       // Each decode state has its own dedicated CUDA stream for true
       // parallelism. This avoids the threading issues with shared streams.
-      if (queue->use_gpu_decode && is_gpu_decodable_file(filename)) {
+      if (!decode_success && queue->use_gpu_decode &&
+          is_gpu_decodable_file(filename)) {
         decode_success = decode_image_to_gpu(filename, &slot->image);
         if (decode_success) {
           slot->image.job_index = (int)job_idx;
@@ -591,6 +647,8 @@ static DecodeQueue *decode_queue_create_internal(size_t queue_depth,
   queue->queue_depth = queue_depth;
   queue->use_pinned_memory = use_pinned_memory;
   queue->use_gpu_decode = false; // Disabled by default
+  queue->custom_decoder = NULL;
+  queue->custom_decoder_ctx = NULL;
   queue->num_producers = num_producers;
   queue->producer_started = false;
   atomic_init(&queue->producer_running, false);
@@ -645,6 +703,16 @@ void decode_queue_enable_gpu_decode(DecodeQueue *queue, bool enable) {
 #else
   (void)enable;
 #endif
+}
+
+void decode_queue_set_custom_decoder(DecodeQueue *queue,
+                                     DecodeQueueCustomDecoder decoder,
+                                     void *user_ctx) {
+  if (!queue) {
+    return;
+  }
+  queue->custom_decoder = decoder;
+  queue->custom_decoder_ctx = user_ctx;
 }
 
 void decode_queue_destroy(DecodeQueue *queue) {

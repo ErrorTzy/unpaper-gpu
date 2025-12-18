@@ -43,6 +43,18 @@ void decoded_image_wait_gpu_complete(DecodedImage *image);
 // Decode queue - bounded queue of pre-decoded images
 typedef struct DecodeQueue DecodeQueue;
 
+// Optional custom decoder for non-file inputs (e.g., PDF pages).
+// If set, the producer will call this instead of decoding from disk.
+//
+// Implementations should:
+// - set out->frame to an allocated AVFrame on success (DecodeQueue will free it)
+// - return true on success, false on failure
+//
+// out is pre-zeroed for GPU fields by DecodeQueue.
+typedef bool (*DecodeQueueCustomDecoder)(void *user_ctx, const BatchJob *job,
+                                         int job_index, int input_index,
+                                         DecodedImage *out);
+
 // Statistics for the decode queue
 typedef struct {
   size_t images_decoded;     // Total images decoded by producer
@@ -79,6 +91,12 @@ void decode_queue_destroy(DecodeQueue *queue);
 // When enabled, JPEG files will be decoded directly to GPU memory,
 // eliminating the H2D transfer for JPEG inputs.
 void decode_queue_enable_gpu_decode(DecodeQueue *queue, bool enable);
+
+// Set an optional custom decoder callback.
+// Must be called before decode_queue_start_producer().
+void decode_queue_set_custom_decoder(DecodeQueue *queue,
+                                     DecodeQueueCustomDecoder decoder,
+                                     void *user_ctx);
 
 // Start the producer thread
 // - queue: The decode queue

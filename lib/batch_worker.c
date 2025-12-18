@@ -32,6 +32,8 @@ void batch_worker_init(BatchWorkerContext *ctx, const Options *options,
   ctx->decode_queue = NULL;
   ctx->batch_decode_queue = NULL;
   ctx->encode_queue = NULL;
+  ctx->post_process_fn = NULL;
+  ctx->post_process_user_ctx = NULL;
   pthread_mutex_init(&ctx->progress_mutex, NULL);
 }
 
@@ -61,6 +63,16 @@ void batch_worker_set_batch_decode_queue(BatchWorkerContext *ctx,
 void batch_worker_set_encode_queue(BatchWorkerContext *ctx,
                                    EncodeQueue *encode_queue) {
   ctx->encode_queue = encode_queue;
+}
+
+void batch_worker_set_post_process_callback(BatchWorkerContext *ctx,
+                                            BatchWorkerPostProcessFn fn,
+                                            void *user_ctx) {
+  if (!ctx) {
+    return;
+  }
+  ctx->post_process_fn = fn;
+  ctx->post_process_user_ctx = user_ctx;
 }
 
 bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
@@ -173,6 +185,12 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
   }
 
   bool success = process_sheet(&state, ctx->config);
+
+  if (success && ctx->post_process_fn != NULL) {
+    if (!ctx->post_process_fn(ctx, job_index, &state, ctx->post_process_user_ctx)) {
+      success = false;
+    }
+  }
 
   // Release decoded images back to queue
   if (ctx->batch_decode_queue != NULL) {

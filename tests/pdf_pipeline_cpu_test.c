@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "lib/options.h"
+#include "pdf/pdf_pipeline_batch.h"
 #include "pdf/pdf_pipeline_cpu.h"
 #include "pdf/pdf_reader.h"
 #include "sheet_process.h"
@@ -210,6 +211,77 @@ static void test_multi_page_pdf(void) {
   printf("PASSED (%d pages)\n", output_pages);
 }
 
+static void test_multi_page_pdf_batch_pipeline(void) {
+  printf("Test: multi-page PDF batch pipeline (CPU wrapper)... ");
+
+  PdfDocument *doc = pdf_open(test_2page_pdf_path);
+  if (doc == NULL) {
+    printf("SKIPPED (test PDF not found: %s)\n", test_2page_pdf_path);
+    return;
+  }
+  int input_pages = pdf_page_count(doc);
+  pdf_close(doc);
+
+  if (input_pages < 2) {
+    printf("SKIPPED (test PDF has only %d page)\n", input_pages);
+    return;
+  }
+
+  cleanup_output();
+
+  Options options;
+  options_init(&options);
+  options.device = UNPAPER_DEVICE_CPU;
+  options.write_output = true;
+  options.perf = false;
+
+  Rectangle preMasks[MAX_MASKS];
+  Point points[MAX_POINTS];
+  int32_t middleWipe[2] = {0, 0};
+  Rectangle blackfilterExclude[MAX_MASKS];
+
+  options_init_filter_defaults(&options, blackfilterExclude);
+
+  SheetProcessConfig config;
+  sheet_process_config_init(&config, &options, preMasks, 0, points, 0,
+                            middleWipe, blackfilterExclude, 0);
+
+  PdfBatchConfig batch_config;
+  pdf_batch_config_init(&batch_config);
+  batch_config.parallelism = 2;
+  batch_config.progress = false;
+  batch_config.use_gpu = false;
+
+  int failed = pdf_pipeline_batch_process(test_2page_pdf_path, test_output_path,
+                                          &options, &config, &batch_config);
+
+  if (failed != 0) {
+    printf("FAILED (%d pages failed)\n", failed);
+    cleanup_output();
+    exit(1);
+  }
+
+  doc = pdf_open(test_output_path);
+  if (doc == NULL) {
+    printf("FAILED (output PDF not created: %s)\n", pdf_get_last_error());
+    cleanup_output();
+    exit(1);
+  }
+
+  int output_pages = pdf_page_count(doc);
+  pdf_close(doc);
+
+  if (output_pages != input_pages) {
+    printf("FAILED (page count mismatch: %d -> %d)\n", input_pages,
+           output_pages);
+    cleanup_output();
+    exit(1);
+  }
+
+  cleanup_output();
+  printf("PASSED (%d pages)\n", output_pages);
+}
+
 static void test_invalid_input(void) {
   printf("Test: invalid input handling... ");
 
@@ -333,6 +405,7 @@ int main(void) {
   test_invalid_input();
   test_single_page_pdf();
   test_multi_page_pdf();
+  test_multi_page_pdf_batch_pipeline();
   test_output_quality();
 
   printf("\nAll tests passed!\n");

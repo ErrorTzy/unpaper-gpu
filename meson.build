@@ -83,6 +83,8 @@ if have_pdf
         'pdf/pdf_reader.c',
         'pdf/pdf_writer.c',
         'pdf/pdf_pipeline_cpu.c',
+        'pdf/pdf_pipeline_cpu_batch.c',
+        'pdf/pdf_pipeline_decode.c',
         'pdf/pdf_page_accumulator.c',
         'pdf/pdf_pipeline_batch.c',
         'pdf/pdf_perf.c',
@@ -710,6 +712,11 @@ if have_pdf
         'pdf/pdf_reader.c',
         'pdf/pdf_writer.c',
         'pdf/pdf_pipeline_cpu.c',
+        'pdf/pdf_pipeline_cpu_batch.c',
+        'pdf/pdf_pipeline_decode.c',
+        'pdf/pdf_page_accumulator.c',
+        'pdf/pdf_pipeline_batch.c',
+        'pdf/pdf_perf.c',
         'tests/pdf_pipeline_cpu_test.c',
     ]
     if have_cuda

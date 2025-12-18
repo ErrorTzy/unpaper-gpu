@@ -17,9 +17,15 @@ struct UnpaperCudaStream;
 struct DecodeQueue;
 struct BatchDecodeQueue;
 struct EncodeQueue;
+typedef struct BatchWorkerContext BatchWorkerContext;
+
+typedef bool (*BatchWorkerPostProcessFn)(BatchWorkerContext *ctx,
+                                        size_t job_index,
+                                        SheetProcessState *state,
+                                        void *user_ctx);
 
 // Batch worker context - shared state for all workers
-typedef struct {
+struct BatchWorkerContext {
   const Options *options;
   BatchQueue *queue;
   const SheetProcessConfig *config; // Sheet processing configuration
@@ -30,7 +36,11 @@ typedef struct {
       *decode_queue; // Pre-decode queue for async decode (optional)
   struct BatchDecodeQueue *batch_decode_queue; // Batched decode queue (PR36B)
   struct EncodeQueue *encode_queue; // Encode queue for async encode (optional)
-} BatchWorkerContext;
+
+  // Optional hook invoked after successful process_sheet().
+  BatchWorkerPostProcessFn post_process_fn;
+  void *post_process_user_ctx;
+};
 
 // Per-job context passed to worker function
 typedef struct {
@@ -63,6 +73,12 @@ void batch_worker_set_batch_decode_queue(
 // Set encode queue for async encoding pipeline
 void batch_worker_set_encode_queue(BatchWorkerContext *ctx,
                                    struct EncodeQueue *encode_queue);
+
+// Set an optional callback to run after a job is processed successfully.
+// This is used for pipelines where output is not file-based (e.g., PDF).
+void batch_worker_set_post_process_callback(BatchWorkerContext *ctx,
+                                            BatchWorkerPostProcessFn fn,
+                                            void *user_ctx);
 
 // Process all jobs in the queue using the thread pool
 // Returns number of failed jobs (0 = all succeeded)
