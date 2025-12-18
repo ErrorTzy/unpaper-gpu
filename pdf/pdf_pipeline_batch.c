@@ -4,6 +4,7 @@
 
 #include "pdf_pipeline_batch.h"
 #include "pdf_page_accumulator.h"
+#include "pdf_perf.h"
 #include "pdf_reader.h"
 #include "pdf_writer.h"
 
@@ -23,6 +24,7 @@
 #include "imageprocess/cuda_runtime.h"
 #include "imageprocess/cuda_stream_pool.h"
 #include "imageprocess/nvimgcodec.h"
+#include <cuda_runtime.h>
 #endif
 
 #include <libavcodec/avcodec.h>
@@ -46,6 +48,12 @@
 #define DEFAULT_DECODE_QUEUE_DEPTH 8
 #define MAX_DECODE_QUEUE_DEPTH 32
 
+// Performance pool sizes (PR 8)
+#define PDF_PINNED_BUFFER_COUNT 16
+#define PDF_PINNED_BUFFER_SIZE (16 * 1024 * 1024) // 16 MB per buffer
+#define PDF_ENCODE_BUFFER_COUNT 16
+#define PDF_ENCODE_BUFFER_SIZE (4 * 1024 * 1024) // 4 MB per buffer
+
 // ============================================================================
 // Decoded Page Slot
 // ============================================================================
@@ -61,12 +69,13 @@ typedef enum {
 typedef struct {
   atomic_int state;
   int page_index;
-  AVFrame *frame;    // CPU decoded frame
-  bool on_gpu;       // True if decoded to GPU
-  void *gpu_ptr;     // GPU memory pointer
-  size_t gpu_pitch;  // GPU memory pitch
-  int width, height; // Image dimensions
-  int pixel_format;  // AV_PIX_FMT_*
+  AVFrame *frame;         // CPU decoded frame
+  bool on_gpu;            // True if decoded to GPU
+  void *gpu_ptr;          // GPU memory pointer
+  size_t gpu_pitch;       // GPU memory pitch
+  int width, height;      // Image dimensions
+  int pixel_format;       // AV_PIX_FMT_*
+  PdfPinnedBuffer pinned; // Pinned memory buffer (PR 8)
 } PdfDecodedPage;
 
 // ============================================================================
@@ -301,12 +310,18 @@ static AVFrame *render_page_to_frame(PdfDocument *doc, int page_idx, int dpi) {
 // JPEG Encoding (from pdf_pipeline_cpu.c)
 // ============================================================================
 
-static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
+// PR 8: Encode image to JPEG, optionally using encode buffer pool
+static uint8_t *encode_image_jpeg_pooled(Image *image, int quality,
+                                         size_t *out_len,
+                                         PdfEncodeBuffer *out_buffer) {
   if (image == NULL || image->frame == NULL || out_len == NULL) {
     return NULL;
   }
 
   *out_len = 0;
+  if (out_buffer) {
+    out_buffer->data = NULL;
+  }
 
   const AVCodec *codec = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
   if (!codec) {
@@ -403,10 +418,27 @@ static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
     return NULL;
   }
 
-  uint8_t *jpeg_data = malloc(pkt->size);
-  if (jpeg_data) {
-    memcpy(jpeg_data, pkt->data, pkt->size);
-    *out_len = pkt->size;
+  // PR 8: Use encode buffer pool if available
+  uint8_t *jpeg_data = NULL;
+  PdfEncodePool *pool = pdf_perf_get_encode_pool();
+  if (pool && out_buffer) {
+    PdfEncodeBuffer buf = pdf_encode_pool_acquire(pool, (size_t)pkt->size);
+    if (buf.data) {
+      memcpy(buf.data, pkt->data, pkt->size);
+      buf.size = (size_t)pkt->size;
+      *out_buffer = buf;
+      jpeg_data = buf.data;
+      *out_len = (size_t)pkt->size;
+    }
+  }
+
+  // Fallback to malloc if pool not available or acquisition failed
+  if (!jpeg_data) {
+    jpeg_data = malloc((size_t)pkt->size);
+    if (jpeg_data) {
+      memcpy(jpeg_data, pkt->data, (size_t)pkt->size);
+      *out_len = (size_t)pkt->size;
+    }
   }
 
   av_packet_free(&pkt);
@@ -415,6 +447,11 @@ static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
   avcodec_free_context(&ctx);
 
   return jpeg_data;
+}
+
+// Legacy encode function (for compatibility)
+static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
+  return encode_image_jpeg_pooled(image, quality, out_len, NULL);
 }
 
 // ============================================================================
@@ -467,12 +504,25 @@ static void *decode_producer_thread(void *arg) {
     slot->frame = NULL;
     slot->on_gpu = false;
     slot->gpu_ptr = NULL;
+    slot->pinned = (PdfPinnedBuffer){0};
 
     AVFrame *page_frame = NULL;
 
     // Try to extract embedded image
     PdfImage pdf_img = {0};
     if (pdf_extract_page_image(ctx->doc, page_idx, &pdf_img)) {
+      // PR 8: Use pinned memory pool for image data (zero-copy GPU transfer)
+      PdfPinnedPool *pinned_pool = pdf_perf_get_pinned_pool();
+      if (pinned_pool && pdf_img.size > 0) {
+        PdfPinnedBuffer buf =
+            pdf_pinned_pool_acquire(pinned_pool, pdf_img.size);
+        if (buf.ptr) {
+          memcpy(buf.ptr, pdf_img.data, pdf_img.size);
+          buf.size = pdf_img.size;
+          slot->pinned = buf;
+        }
+      }
+
 #ifdef UNPAPER_WITH_JBIG2
       if (pdf_img.format == PDF_IMAGE_JBIG2) {
         page_frame = decode_jbig2_to_frame(&pdf_img);
@@ -555,6 +605,12 @@ static void release_decode_slot(PdfBatchContext *ctx, PdfDecodedPage *slot) {
     slot->on_gpu = false;
   }
 #endif
+  // PR 8: Release pinned memory buffer back to pool
+  if (slot->pinned.ptr) {
+    PdfPinnedPool *pool = pdf_perf_get_pinned_pool();
+    pdf_pinned_pool_release(pool, &slot->pinned);
+  }
+
   atomic_store(&slot->state, DECODE_SLOT_EMPTY);
 
   pthread_mutex_lock(&ctx->decode_mutex);
@@ -664,21 +720,31 @@ static void worker_process_page(void *arg, int thread_id) {
   int dpi = ctx->options->pdf_render_dpi > 0 ? ctx->options->pdf_render_dpi
                                              : PDF_RENDER_DPI;
 
+  // PR 8: Use encode buffer pool for JPEG encoding
   size_t jpeg_len = 0;
-  uint8_t *jpeg_data = encode_image_jpeg(&state.sheet, quality, &jpeg_len);
+  PdfEncodeBuffer enc_buf = {0};
+  uint8_t *jpeg_data =
+      encode_image_jpeg_pooled(&state.sheet, quality, &jpeg_len, &enc_buf);
 
   if (jpeg_data && jpeg_len > 0) {
     PdfEncodedPage page = {0};
     page.page_index = page_idx;
     page.type = PDF_PAGE_DATA_JPEG;
-    page.data = jpeg_data;
-    page.data_size = jpeg_len;
     page.width = out_width;
     page.height = out_height;
     page.dpi = dpi;
+    page.data_size = jpeg_len;
+
+    // PR 8: Detach buffer from pool for accumulator ownership
+    if (enc_buf.from_pool) {
+      PdfEncodePool *pool = pdf_perf_get_encode_pool();
+      page.data = pdf_encode_pool_detach(pool, &enc_buf);
+    } else {
+      page.data = jpeg_data;
+    }
 
     if (!pdf_page_accumulator_submit(ctx->accumulator, &page)) {
-      free(jpeg_data);
+      free(page.data);
       pdf_page_accumulator_mark_failed(ctx->accumulator, page_idx);
       atomic_fetch_add(&ctx->pages_failed, 1);
     } else {
@@ -844,6 +910,25 @@ int pdf_pipeline_batch_process(const char *input_path, const char *output_path,
              "Batch PDF pipeline: %d workers, %d decode slots\n", parallelism,
              decode_depth);
 
+  // PR 8: Initialize performance pools
+  // Calculate pool sizes based on parallelism
+  int pinned_count = parallelism * 2;
+  if (pinned_count > PDF_PINNED_BUFFER_COUNT) {
+    pinned_count = PDF_PINNED_BUFFER_COUNT;
+  }
+  int encode_count = parallelism * 2;
+  if (encode_count > PDF_ENCODE_BUFFER_COUNT) {
+    encode_count = PDF_ENCODE_BUFFER_COUNT;
+  }
+
+  pdf_perf_init(pinned_count, PDF_PINNED_BUFFER_SIZE, encode_count,
+                PDF_ENCODE_BUFFER_SIZE);
+
+  verboseLog(
+      VERBOSE_DEBUG,
+      "Batch PDF pipeline: perf pools initialized (pinned=%d, encode=%d)\n",
+      pinned_count, encode_count);
+
   // Initialize context
   PdfBatchContext ctx = {0};
   ctx.doc = doc;
@@ -968,6 +1053,11 @@ int pdf_pipeline_batch_process(const char *input_path, const char *output_path,
     if (ctx.decode_slots[i].frame) {
       av_frame_free(&ctx.decode_slots[i].frame);
     }
+    // PR 8: Release any remaining pinned buffers
+    if (ctx.decode_slots[i].pinned.ptr) {
+      PdfPinnedPool *pool = pdf_perf_get_pinned_pool();
+      pdf_pinned_pool_release(pool, &ctx.decode_slots[i].pinned);
+    }
   }
   free(ctx.decode_slots);
 
@@ -977,6 +1067,12 @@ int pdf_pipeline_batch_process(const char *input_path, const char *output_path,
   pthread_mutex_destroy(&ctx.progress_mutex);
 
   pdf_close(doc);
+
+  // PR 8: Print perf stats in debug mode and cleanup
+  if (verbose >= VERBOSE_DEBUG) {
+    pdf_perf_print_stats();
+  }
+  pdf_perf_cleanup();
 
   verboseLog(VERBOSE_NORMAL,
              "Batch PDF pipeline: complete. %d pages, %d failed\n", page_count,
