@@ -87,7 +87,6 @@ if have_pdf
         'pdf/pdf_pipeline_decode.c',
         'pdf/pdf_page_accumulator.c',
         'pdf/pdf_pipeline_batch.c',
-        'pdf/pdf_perf.c',
     ]
 endif
 
@@ -716,7 +715,6 @@ if have_pdf
         'pdf/pdf_pipeline_decode.c',
         'pdf/pdf_page_accumulator.c',
         'pdf/pdf_pipeline_batch.c',
-        'pdf/pdf_perf.c',
         'tests/pdf_pipeline_cpu_test.c',
     ]
     if have_cuda
