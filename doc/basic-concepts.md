@@ -193,6 +193,19 @@ placed fully on the left-hand half and the right-hand half of the
 
 ![Sequence of multiple output images](img/multiple-output-files.png)
 
+When using PDF input and output, you can selectively disable splitting per
+page with `--skip-split` (page indices are 1-based). Skipped pages are
+treated as single-page layout even when `--split` or `--output-pages 2`
+is set. Using `--skip-split` with non-PDF inputs is an error.
+
+Cover + double pages (skip page 1):
+
+    unpaper --split --skip-split 1 input.pdf output.pdf
+
+Cover + back cover in a 12-page scan:
+
+    unpaper --split --skip-split 1,12 input.pdf output.pdf
+
 By default, processing of multiple *sheets* starts with *sheet* number
 1, and also with input and output *image-files* number 1. `unpaper`
 will run as long as input *image-files* with the current index number

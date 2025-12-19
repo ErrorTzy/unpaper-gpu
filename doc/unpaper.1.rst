@@ -571,7 +571,13 @@ Options
 .. option:: --skip-split page-range
 
    PDF-only. Skip splitting for the listed PDF page indices (1-based), e.g.
-   ``1,3-5,10``. Using this option with non-PDF inputs is an error.
+   ``1,3-5,10``. Requires PDF input and output files.
+
+   Skipped pages are treated as single-page layout even if ``--split`` or
+   ``--output-pages 2`` is in effect, so exactly one output page is emitted.
+   The output PDF page count is the sum of per-page outputs.
+
+   Example (cover + double pages): ``unpaper --split --skip-split 1 input.pdf output.pdf``.
 
 .. option:: -S { width, height \| size-name }; --sheet-size { width, height \| size-name }
 
