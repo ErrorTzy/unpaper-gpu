@@ -490,7 +490,14 @@ static void *producer_thread_fn(void *arg) {
         bool ok = queue->custom_decoder(queue->custom_decoder_ctx, job,
                                         (int)job_idx, input_idx, &slot->image);
 
-        if (ok && slot->image.frame != NULL) {
+        if (ok && slot->image.on_gpu && slot->image.gpu_ptr != NULL) {
+          // GPU-decoded image returned by custom decoder.
+          slot->image.job_index = (int)job_idx;
+          slot->image.input_index = input_idx;
+          slot->image.valid = true;
+          slot->image.uses_pinned_memory = false;
+          atomic_fetch_add(&queue->gpu_decodes, 1);
+        } else if (ok && slot->image.frame != NULL) {
           bool is_pinned = false;
           AVFrame *final_frame = slot->image.frame;
 
@@ -517,6 +524,12 @@ static void *producer_thread_fn(void *arg) {
           if (slot->image.frame != NULL) {
             av_frame_free(&slot->image.frame);
           }
+          if (slot->image.on_gpu && slot->image.gpu_ptr != NULL) {
+#ifdef UNPAPER_WITH_CUDA
+            cudaFree(slot->image.gpu_ptr);
+#endif
+          }
+          slot->image.gpu_ptr = NULL;
           slot->image.frame = NULL;
           slot->image.job_index = (int)job_idx;
           slot->image.input_index = input_idx;

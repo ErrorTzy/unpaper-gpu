@@ -13,8 +13,9 @@
 extern "C" {
 #endif
 
-// Internal helper: CPU PDF processing implemented as a wrapper around the
+// Internal helper: Batch PDF processing implemented as a wrapper around the
 // generic batch pipeline (decode_queue + batch_process_parallel).
+// Honors options->device (CPU/CUDA) for backend selection.
 //
 // parallelism/decode_queue_depth:
 // - 0 means "auto" (parallelism) or "auto: parallelism * 2" (depth)
@@ -32,4 +33,3 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
 #ifdef __cplusplus
 }
 #endif
-

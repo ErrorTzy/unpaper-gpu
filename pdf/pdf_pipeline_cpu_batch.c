@@ -16,6 +16,17 @@
 #include "pdf_reader.h"
 #include "pdf_writer.h"
 
+#ifdef UNPAPER_WITH_CUDA
+#include "imageprocess/cuda_runtime.h"
+#include "imageprocess/cuda_stream_pool.h"
+#include "imageprocess/nvimgcodec.h"
+#include <cuda_runtime.h>
+#endif
+
+#ifdef UNPAPER_WITH_JBIG2
+#include "lib/jbig2_decode.h"
+#endif
+
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
 #include <libavutil/frame.h>
@@ -149,7 +160,156 @@ typedef struct {
   int render_dpi;
   int input_pages_per_sheet;
   int total_pages;
+  bool use_gpu;
+  bool nvimgcodec_ok;
 } PdfDecodeQueueContext;
+
+#ifdef UNPAPER_WITH_CUDA
+static bool pdf_upload_frame_to_gpu(AVFrame *frame, DecodedImage *out) {
+  if (!frame || !out) {
+    return false;
+  }
+
+  int channels = 0;
+  if (frame->format == AV_PIX_FMT_GRAY8) {
+    channels = 1;
+  } else if (frame->format == AV_PIX_FMT_RGB24) {
+    channels = 3;
+  } else {
+    return false;
+  }
+
+  if (frame->linesize[0] <= 0 || frame->width <= 0 || frame->height <= 0) {
+    return false;
+  }
+  if (frame->linesize[0] < frame->width * channels) {
+    return false;
+  }
+
+  size_t pitch = (size_t)frame->linesize[0];
+  size_t bytes = pitch * (size_t)frame->height;
+
+  void *gpu_ptr = NULL;
+  cudaError_t err = cudaMalloc(&gpu_ptr, bytes);
+  if (err != cudaSuccess || gpu_ptr == NULL) {
+    return false;
+  }
+
+  err = cudaMemcpy(gpu_ptr, frame->data[0], bytes, cudaMemcpyHostToDevice);
+  if (err != cudaSuccess) {
+    cudaFree(gpu_ptr);
+    return false;
+  }
+
+  out->on_gpu = true;
+  out->gpu_ptr = gpu_ptr;
+  out->gpu_pitch = pitch;
+  out->gpu_width = frame->width;
+  out->gpu_height = frame->height;
+  out->gpu_channels = channels;
+  out->gpu_format = frame->format;
+  out->gpu_completion_event = NULL;
+  out->gpu_event_from_pool = false;
+  out->frame = NULL;
+  out->valid = true;
+  return true;
+}
+
+static bool pdf_decode_pdfimage_to_gpu(const PdfImage *pdf_img,
+                                       DecodedImage *out) {
+  if (!pdf_img || !pdf_img->data || pdf_img->size == 0 || !out) {
+    return false;
+  }
+
+  NvImgCodecDecodeState *dec_state = nvimgcodec_acquire_decode_state();
+  if (dec_state == NULL) {
+    return false;
+  }
+
+  NvImgCodecDecodedImage gpu_img = {0};
+  bool ok =
+      nvimgcodec_decode(pdf_img->data, pdf_img->size, dec_state, NULL,
+                        NVIMGCODEC_OUT_GRAY8, &gpu_img);
+  nvimgcodec_release_decode_state(dec_state);
+
+  if (!ok || gpu_img.gpu_ptr == NULL) {
+    return false;
+  }
+
+  out->on_gpu = true;
+  out->gpu_ptr = gpu_img.gpu_ptr;
+  out->gpu_pitch = gpu_img.pitch;
+  out->gpu_width = gpu_img.width;
+  out->gpu_height = gpu_img.height;
+  out->gpu_channels = gpu_img.channels;
+  out->gpu_format =
+      (gpu_img.channels == 1) ? AV_PIX_FMT_GRAY8 : AV_PIX_FMT_RGB24;
+  out->gpu_completion_event = gpu_img.completion_event;
+  out->gpu_event_from_pool = gpu_img.event_from_pool;
+  out->frame = NULL;
+  out->valid = true;
+  return true;
+}
+#endif
+
+#if defined(UNPAPER_WITH_JBIG2) && defined(UNPAPER_WITH_CUDA)
+static bool pdf_decode_jbig2_to_gpu(const PdfImage *pdf_img, DecodedImage *out) {
+  if (!pdf_img || !pdf_img->data || pdf_img->size == 0 || !out) {
+    return false;
+  }
+
+  Jbig2DecodedImage jbig2_img = {0};
+  if (!jbig2_decode(pdf_img->data, pdf_img->size, pdf_img->jbig2_globals,
+                    pdf_img->jbig2_globals_size, &jbig2_img)) {
+    return false;
+  }
+
+  const int width = (int)jbig2_img.width;
+  const int height = (int)jbig2_img.height;
+  size_t stride = (size_t)width;
+  size_t bytes = stride * (size_t)height;
+  uint8_t *gray = malloc(bytes);
+  if (gray == NULL) {
+    jbig2_free_image(&jbig2_img);
+    return false;
+  }
+
+  if (!jbig2_expand_to_gray8(&jbig2_img, gray, stride, false)) {
+    free(gray);
+    jbig2_free_image(&jbig2_img);
+    return false;
+  }
+
+  void *gpu_ptr = NULL;
+  cudaError_t err = cudaMalloc(&gpu_ptr, bytes);
+  if (err != cudaSuccess || gpu_ptr == NULL) {
+    free(gray);
+    jbig2_free_image(&jbig2_img);
+    return false;
+  }
+
+  err = cudaMemcpy(gpu_ptr, gray, bytes, cudaMemcpyHostToDevice);
+  free(gray);
+  jbig2_free_image(&jbig2_img);
+  if (err != cudaSuccess) {
+    cudaFree(gpu_ptr);
+    return false;
+  }
+
+  out->on_gpu = true;
+  out->gpu_ptr = gpu_ptr;
+  out->gpu_pitch = stride;
+  out->gpu_width = width;
+  out->gpu_height = height;
+  out->gpu_channels = 1;
+  out->gpu_format = AV_PIX_FMT_GRAY8;
+  out->gpu_completion_event = NULL;
+  out->gpu_event_from_pool = false;
+  out->frame = NULL;
+  out->valid = true;
+  return true;
+}
+#endif
 
 static bool pdf_decode_queue_decoder(void *user_ctx, const BatchJob *job,
                                      int job_index, int input_index,
@@ -170,6 +330,68 @@ static bool pdf_decode_queue_decoder(void *user_ctx, const BatchJob *job,
     return false;
   }
 
+  if (ctx->use_gpu) {
+#ifdef UNPAPER_WITH_CUDA
+    PdfImage pdf_img = {0};
+    bool extracted = pdf_extract_page_image(ctx->doc, page_idx, &pdf_img);
+    if (extracted) {
+      verboseLog(VERBOSE_MORE, "GPU PDF pipeline: extracted %s image %dx%d\n",
+                 pdf_image_format_name(pdf_img.format), pdf_img.width,
+                 pdf_img.height);
+    }
+
+    if (extracted && ctx->nvimgcodec_ok &&
+        (pdf_img.format == PDF_IMAGE_JPEG ||
+         pdf_img.format == PDF_IMAGE_JP2)) {
+      if (pdf_decode_pdfimage_to_gpu(&pdf_img, out)) {
+        verboseLog(VERBOSE_MORE,
+                   "GPU PDF pipeline: %s decoded to GPU %dx%d\n",
+                   pdf_image_format_name(pdf_img.format), out->gpu_width,
+                   out->gpu_height);
+        pdf_free_image(&pdf_img);
+        return true;
+      }
+    }
+
+#if defined(UNPAPER_WITH_JBIG2)
+    if (extracted && pdf_img.format == PDF_IMAGE_JBIG2) {
+      if (pdf_decode_jbig2_to_gpu(&pdf_img, out)) {
+        verboseLog(VERBOSE_MORE,
+                   "GPU PDF pipeline: JBIG2 decoded to GPU %dx%d\n",
+                   out->gpu_width, out->gpu_height);
+        pdf_free_image(&pdf_img);
+        return true;
+      }
+    }
+#endif
+
+    if (extracted) {
+      pdf_free_image(&pdf_img);
+    }
+
+    AVFrame *frame =
+        pdf_pipeline_decode_page_to_frame(ctx->doc, page_idx, ctx->render_dpi);
+    if (frame) {
+      if (pdf_upload_frame_to_gpu(frame, out)) {
+        verboseLog(VERBOSE_MORE,
+                   "GPU PDF pipeline: rendered and uploaded to GPU %dx%d\n",
+                   out->gpu_width, out->gpu_height);
+        av_frame_free(&frame);
+        return true;
+      }
+
+      out->frame = frame;
+      out->valid = true;
+      out->uses_pinned_memory = false;
+      out->on_gpu = false;
+      return true;
+    }
+    return false;
+#else
+    return false;
+#endif
+  }
+
   AVFrame *frame =
       pdf_pipeline_decode_page_to_frame(ctx->doc, page_idx, ctx->render_dpi);
   out->frame = frame;
@@ -185,27 +407,83 @@ static bool pdf_decode_queue_decoder(void *user_ctx, const BatchJob *job,
 typedef struct {
   PdfPageAccumulator *accumulator;
   const Options *options;
+  bool use_gpu_encode;
 } PdfBatchWriteContext;
 
 static bool pdf_submit_image_as_page(PdfPageAccumulator *accumulator,
                                      const Options *options, Image *image,
-                                     int page_index) {
+                                     int page_index, bool use_gpu_encode) {
   if (accumulator == NULL || options == NULL || image == NULL ||
       image->frame == NULL || page_index < 0) {
     return false;
   }
 
-  image_ensure_cpu(image);
-
   int out_width = image->frame->width;
   int out_height = image->frame->height;
-  int stride = image->frame->linesize[0];
   int dpi =
       options->pdf_render_dpi > 0 ? options->pdf_render_dpi : PDF_RENDER_DPI;
 
   int quality = (options->jpeg_quality > 0) ? options->jpeg_quality
                                             : PDF_OUTPUT_JPEG_QUALITY;
 
+#ifdef UNPAPER_WITH_CUDA
+  if (use_gpu_encode && nvimgcodec_any_available()) {
+    image_ensure_cuda(image);
+    void *gpu_ptr = image_get_gpu_ptr(image);
+    size_t gpu_pitch = image_get_gpu_pitch(image);
+    if (gpu_ptr != NULL && gpu_pitch > 0) {
+      NvImgCodecEncodeState *enc_state = nvimgcodec_acquire_encode_state();
+      if (enc_state != NULL) {
+        NvImgCodecEncodedImage encoded = {0};
+        NvImgCodecEncodeInputFormat input_fmt =
+            (image->frame->format == AV_PIX_FMT_GRAY8)
+                ? NVIMGCODEC_ENC_FMT_GRAY8
+                : NVIMGCODEC_ENC_FMT_RGB;
+        bool ok = false;
+        PdfPageDataType page_type = PDF_PAGE_DATA_JPEG;
+
+        if (options->pdf_quality_mode == PDF_QUALITY_HIGH &&
+            nvimgcodec_jp2_supported()) {
+          ok = nvimgcodec_encode_jp2(gpu_ptr, gpu_pitch, out_width, out_height,
+                                     input_fmt, true, enc_state,
+                                     unpaper_cuda_get_current_stream(),
+                                     &encoded);
+          page_type = PDF_PAGE_DATA_JP2;
+        } else {
+          ok = nvimgcodec_encode_jpeg(gpu_ptr, gpu_pitch, out_width, out_height,
+                                      input_fmt, quality, enc_state,
+                                      unpaper_cuda_get_current_stream(),
+                                      &encoded);
+          page_type = PDF_PAGE_DATA_JPEG;
+        }
+
+        nvimgcodec_release_encode_state(enc_state);
+
+        if (ok && encoded.data != NULL && encoded.size > 0) {
+          PdfEncodedPage page = {0};
+          page.page_index = page_index;
+          page.type = page_type;
+          page.data = encoded.data; // Ownership transfers to accumulator
+          page.data_size = encoded.size;
+          page.width = out_width;
+          page.height = out_height;
+          page.dpi = dpi;
+
+          if (!pdf_page_accumulator_submit(accumulator, &page)) {
+            free(encoded.data);
+            return false;
+          }
+
+          return true;
+        }
+      }
+    }
+  }
+#endif
+
+  image_ensure_cpu(image);
+
+  int stride = image->frame->linesize[0];
   size_t jpeg_len = 0;
   uint8_t *jpeg_data = encode_image_jpeg(image, quality, &jpeg_len);
 
@@ -289,7 +567,7 @@ static bool pdf_batch_post_process(BatchWorkerContext *worker_ctx,
 
   if (output_pages == 1) {
     if (!pdf_submit_image_as_page(ctx->accumulator, ctx->options, &state->sheet,
-                                  base_out_page)) {
+                                  base_out_page, ctx->use_gpu_encode)) {
       pdf_page_accumulator_mark_failed(ctx->accumulator, base_out_page);
       ok = false;
     }
@@ -299,6 +577,10 @@ static bool pdf_batch_post_process(BatchWorkerContext *worker_ctx,
   int sheet_width = state->sheet.frame->width;
   int sheet_height = state->sheet.frame->height;
   int page_width = sheet_width / output_pages;
+
+  if (ctx->use_gpu_encode) {
+    image_ensure_cuda(&state->sheet);
+  }
 
   for (int o = 0; o < output_pages; o++) {
     Image page_img = create_compatible_image(
@@ -311,7 +593,7 @@ static bool pdf_batch_post_process(BatchWorkerContext *worker_ctx,
                    POINT_ORIGIN);
 
     if (!pdf_submit_image_as_page(ctx->accumulator, ctx->options, &page_img,
-                                  base_out_page + o)) {
+                                  base_out_page + o, ctx->use_gpu_encode)) {
       pdf_page_accumulator_mark_failed(ctx->accumulator, base_out_page + o);
       ok = false;
     }
@@ -330,14 +612,28 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
                                    bool progress) {
   if (input_path == NULL || output_path == NULL || options == NULL ||
       config == NULL) {
-    verboseLog(VERBOSE_NORMAL, "PDF pipeline (CPU batch): invalid arguments\n");
+    verboseLog(VERBOSE_NORMAL, "PDF pipeline (batch): invalid arguments\n");
     return -1;
   }
 
-  verboseLog(VERBOSE_NORMAL, "PDF pipeline (CPU batch): %s -> %s\n", input_path,
-             output_path);
+  bool use_gpu = false;
+  bool nvimgcodec_ok = false;
+#ifdef UNPAPER_WITH_CUDA
+  if (options->device == UNPAPER_DEVICE_CUDA) {
+    UnpaperCudaInitStatus cuda_status = unpaper_cuda_try_init();
+    if (cuda_status == UNPAPER_CUDA_INIT_OK) {
+      use_gpu = true;
+    } else {
+      verboseLog(VERBOSE_NORMAL, "PDF pipeline: CUDA unavailable (%s)\n",
+                 unpaper_cuda_init_status_string(cuda_status));
+    }
+  }
+#endif
 
-  image_backend_select(UNPAPER_DEVICE_CPU);
+  verboseLog(VERBOSE_NORMAL, "PDF pipeline (batch %s): %s -> %s\n",
+             use_gpu ? "GPU" : "CPU", input_path, output_path);
+
+  image_backend_select(use_gpu ? UNPAPER_DEVICE_CUDA : UNPAPER_DEVICE_CPU);
 
   PdfDocument *doc = pdf_open(input_path);
   if (doc == NULL) {
@@ -480,13 +776,18 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   // Create modified options/config so process_sheet does not write files.
   Options pdf_options = *options;
   pdf_options.write_output = false;
-  pdf_options.device = UNPAPER_DEVICE_CPU;
+  pdf_options.device = use_gpu ? UNPAPER_DEVICE_CUDA : UNPAPER_DEVICE_CPU;
 
   SheetProcessConfig pdf_config = *config;
   pdf_config.options = &pdf_options;
 
   // Decode queue with a PDF-page custom decoder.
-  DecodeQueue *decode_queue = decode_queue_create((size_t)depth, false);
+  bool use_pinned_memory = use_gpu;
+  int num_decode_threads = 1;
+
+  // PDF decoding uses MuPDF which is not thread-safe for concurrent decode on
+  // a shared document. Keep a single producer thread.
+  DecodeQueue *decode_queue = decode_queue_create((size_t)depth, use_pinned_memory);
   if (decode_queue == NULL) {
     batch_queue_free(&batch_queue);
     pdf_page_accumulator_destroy(accumulator);
@@ -498,7 +799,44 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   PdfDecodeQueueContext decode_ctx = {.doc = doc,
                                       .render_dpi = dpi,
                                       .input_pages_per_sheet = input_pages,
-                                      .total_pages = page_count};
+                                      .total_pages = page_count,
+                                      .use_gpu = use_gpu,
+                                      .nvimgcodec_ok = false};
+
+#ifdef UNPAPER_WITH_CUDA
+  if (use_gpu) {
+    int nvimgcodec_streams =
+        (options->cuda_streams > 0) ? options->cuda_streams : num_decode_threads;
+    if (nvimgcodec_streams < 1) {
+      nvimgcodec_streams = 1;
+    }
+    if (nvimgcodec_init(nvimgcodec_streams)) {
+      nvimgcodec_ok = true;
+      decode_ctx.nvimgcodec_ok = true;
+      verboseLog(VERBOSE_NORMAL,
+                 "nvImageCodec GPU decode: enabled (%d streams)\n",
+                 nvimgcodec_streams);
+    } else {
+      verboseLog(VERBOSE_NORMAL,
+                 "nvImageCodec GPU decode: unavailable, using CPU decode\n");
+    }
+
+    size_t stream_count =
+        (options->cuda_streams > 0) ? (size_t)options->cuda_streams
+                                    : (size_t)workers;
+    if (stream_count < 1) {
+      stream_count = 1;
+    }
+    if (cuda_stream_pool_global_init(stream_count)) {
+      verboseLog(VERBOSE_NORMAL, "GPU stream pool: %zu streams\n",
+                 stream_count);
+    } else {
+      verboseLog(VERBOSE_NORMAL,
+                 "GPU stream pool initialization failed, using default stream\n");
+    }
+  }
+#endif
+
   decode_queue_set_custom_decoder(decode_queue, pdf_decode_queue_decoder,
                                   &decode_ctx);
 
@@ -516,9 +854,15 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   batch_worker_init(&worker_ctx, &pdf_options, &batch_queue);
   batch_worker_set_config(&worker_ctx, &pdf_config);
   batch_worker_set_decode_queue(&worker_ctx, decode_queue);
+#ifdef UNPAPER_WITH_CUDA
+  if (use_gpu && cuda_stream_pool_global_active()) {
+    batch_worker_enable_stream_pool(&worker_ctx, true);
+  }
+#endif
 
   PdfBatchWriteContext write_ctx = {.accumulator = accumulator,
-                                   .options = &pdf_options};
+                                   .options = &pdf_options,
+                                   .use_gpu_encode = (use_gpu && nvimgcodec_ok)};
   batch_worker_set_post_process_callback(&worker_ctx, pdf_batch_post_process,
                                          &write_ctx);
 

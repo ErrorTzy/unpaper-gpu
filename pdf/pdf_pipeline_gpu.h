@@ -14,12 +14,11 @@ extern "C" {
 #endif
 
 // Process a PDF file through the GPU pipeline.
-// Uses nvImageCodec for GPU decode/encode and CUDA backend for processing.
-//
-// Pipeline flow:
-// - JPEG/JP2: GPU decode -> GPU process -> GPU encode -> PDF embed
-// - JBIG2: CPU decode -> GPU expand 1-bit to 8-bit -> GPU process -> GPU encode
-// - Fallback: CPU render -> H2D -> GPU process -> GPU encode -> PDF embed
+// This is a thin wrapper over the batch PDF pipeline with CUDA enabled.
+// It reuses the generic batch worker infrastructure (decode_queue +
+// batch_process_parallel) with a PDF custom decoder that can return
+// GPU-resident images and a PDF post-process that GPU-encodes into the page
+// accumulator.
 //
 // input_path: Path to input PDF file
 // output_path: Path to output PDF file
