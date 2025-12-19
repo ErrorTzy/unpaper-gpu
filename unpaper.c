@@ -1444,8 +1444,8 @@ int main(int argc, char *argv[]) {
       bool mempool_active = false;
       bool integralpool_active = false;
       bool streampool_active = false;
-      size_t auto_stream_count = 8;  // Default for non-GPU pipeline (PNG)
-      size_t auto_buffer_count = 24; // 3x streams for triple-buffering
+      size_t auto_stream_count = 4;  // Default for non-GPU pipeline (PNG)
+      size_t auto_buffer_count = 12; // 3x streams for triple-buffering
       if (options.device == UNPAPER_DEVICE_CUDA) {
         // Check available GPU memory before starting batch
         GpuMemoryInfo mem_info = {0};
@@ -1465,8 +1465,8 @@ int main(int argc, char *argv[]) {
           if (tier > 8)
             tier = 8; // Cap at 8x scaling
 
-          // Scale streams: 4 per tier (4, 8, 12, 16, 20, 24, 28, 32)
-          auto_stream_count = 4 * tier;
+          // Scale streams: 1 per tier (1..8; capped below)
+          auto_stream_count = tier;
           if (auto_stream_count > 32)
             auto_stream_count = 32;
 
