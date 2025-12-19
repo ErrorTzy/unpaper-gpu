@@ -449,6 +449,8 @@ def fast_device():
     return "cuda" if cuda_runtime_available() else "cpu"
 
 
+@pytest.mark.fast
+@pytest.mark.gpu
 @pytest.mark.parametrize(
     "extra_args",
     [
@@ -471,6 +473,8 @@ def test_cuda_pre_ops_match_cpu(imgsrc_path, tmp_path, extra_args):
     assert compare_images(golden=cpu_path, result=cuda_path) == 0.0
 
 
+@pytest.mark.slow
+@pytest.mark.gpu
 @pytest.mark.parametrize("interp", ["nearest", "linear", "cubic"])
 def test_cuda_stretch_and_post_size_match_cpu(imgsrc_path, tmp_path, interp):
     if not cuda_runtime_available():
@@ -514,6 +518,7 @@ def test_cuda_stretch_and_post_size_match_cpu(imgsrc_path, tmp_path, interp):
     assert compare_images(golden=cpu_path, result=cuda_path) < 0.20
 
 
+@pytest.mark.fast
 def test_c1_mask_border_scan_fixture(imgsrc_path, goldendir_path, tmp_path):
     """[C1] Mask/border scan + wipes/borders, deskew disabled."""
 
@@ -547,6 +552,8 @@ def test_c1_mask_border_scan_fixture(imgsrc_path, goldendir_path, tmp_path):
     assert compare_images(golden=golden_path, result=result_path) == 0.0
 
 
+@pytest.mark.slow
+@pytest.mark.gpu
 def test_cuda_mask_border_scan_fixture_match_cpu(imgsrc_path, tmp_path):
     if not cuda_runtime_available():
         pytest.skip("CUDA runtime/device not available")
@@ -595,6 +602,7 @@ def get_golden_directory() -> pathlib.Path:
     return pathlib.Path(os.getenv("TEST_GOLDEN_DIR", "tests/golden_images/"))
 
 
+@pytest.mark.fast
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_a1(imgsrc_path, goldendir_path, tmp_path, device):
     """[A1] Single-Page Template Layout, Black+White, Full Processing."""
@@ -614,6 +622,7 @@ def test_a1(imgsrc_path, goldendir_path, tmp_path, device):
     assert compare_images(golden=golden_path, result=result_path) < tolerance
 
 
+@pytest.mark.slow
 def test_a2(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[A2] Single-Page Template Layout, Black+White, Full Processing, PPI scaling."""
     source_path = imgsrc_path / "imgsrc001.png"
@@ -629,6 +638,7 @@ def test_a2(imgsrc_path, goldendir_path, tmp_path, fast_device):
     assert compare_images(golden=golden_path, result=result_path) < tolerance
 
 
+@pytest.mark.fast
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_b1(imgsrc_path, goldendir_path, tmp_path, device):
     """[B1] Combined Color/Gray, No Processing."""
@@ -655,6 +665,7 @@ def test_b1(imgsrc_path, goldendir_path, tmp_path, device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
+@pytest.mark.slow
 def test_b2(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[B2] Combined Color/Black+White, No Processing."""
 
@@ -676,6 +687,7 @@ def test_b2(imgsrc_path, goldendir_path, tmp_path, fast_device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
+@pytest.mark.slow
 def test_b3(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[B3] Combined Gray/Black+White, No Processing."""
 
@@ -697,6 +709,7 @@ def test_b3(imgsrc_path, goldendir_path, tmp_path, fast_device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
+@pytest.mark.slow
 def test_sheet_background_black(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[C1] Black sheet background color."""
 
@@ -718,6 +731,7 @@ def test_sheet_background_black(imgsrc_path, goldendir_path, tmp_path, fast_devi
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
+@pytest.mark.slow
 def test_pre_shift_both(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[C2] Explicit shifting."""
 
@@ -739,6 +753,7 @@ def test_pre_shift_both(imgsrc_path, goldendir_path, tmp_path, fast_device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
+@pytest.mark.slow
 def test_negative_shift(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[C2] Explicit -1 size shifting."""
 
@@ -760,6 +775,7 @@ def test_negative_shift(imgsrc_path, goldendir_path, tmp_path, fast_device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
+@pytest.mark.fast
 def test_sheet_crop(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[D1] Crop to sheet size."""
     source_path = imgsrc_path / "imgsrc003.png"
@@ -778,6 +794,7 @@ def test_sheet_crop(imgsrc_path, goldendir_path, tmp_path, fast_device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
+@pytest.mark.slow
 def test_sheet_fit(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[D2] Fit to sheet size."""
     source_path = imgsrc_path / "imgsrc003.png"
@@ -796,6 +813,7 @@ def test_sheet_fit(imgsrc_path, goldendir_path, tmp_path, fast_device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
+@pytest.mark.slow
 def test_sheet_stretch(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[D3] Stretch to sheet size."""
     source_path = imgsrc_path / "imgsrc003.png"
@@ -814,6 +832,7 @@ def test_sheet_stretch(imgsrc_path, goldendir_path, tmp_path, fast_device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
+@pytest.mark.slow
 def test_e1(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[E1] Splitting 2-page layout into separate output pages (with input and output wildcard)."""
 
@@ -837,6 +856,7 @@ def test_e1(imgsrc_path, goldendir_path, tmp_path, fast_device):
         assert compare_images(golden=golden_path, result=result) < 0.05
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_e2(imgsrc_path, goldendir_path, tmp_path, device):
     """[E2] Splitting 2-page layout into separate output pages (with output wildcard only)."""
@@ -870,6 +890,7 @@ def test_e2(imgsrc_path, goldendir_path, tmp_path, device):
         assert compare_images(golden=golden_path, result=result) < 0.05
 
 
+@pytest.mark.slow
 def test_e3(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[E3] Splitting 2-page layout into separate output pages (with explicit input and output)."""
 
@@ -904,6 +925,7 @@ def test_e3(imgsrc_path, goldendir_path, tmp_path, fast_device):
     )
 
 
+@pytest.mark.slow
 def test_f1(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[F1] Merging 2-page layout into single output page (with input and output wildcard)."""
 
@@ -931,6 +953,7 @@ def test_f1(imgsrc_path, goldendir_path, tmp_path, fast_device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
+@pytest.mark.slow
 def test_f2(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[F2] Merging 2-page layout into single output page (with output wildcard only)."""
 
@@ -958,6 +981,7 @@ def test_f2(imgsrc_path, goldendir_path, tmp_path, fast_device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
+@pytest.mark.slow
 def test_f3(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[F3] Merging 2-page layout into single output page (with explicit input and output)."""
 
@@ -1048,6 +1072,8 @@ def test_skip_split_requires_pdf(imgsrc_path, tmp_path):
     assert "--skip-split" in text or "PDF" in text
 
 
+@pytest.mark.slow
+@pytest.mark.pdf
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_pdf_skip_split_page_counts(
     imgsrc_path, pdf_inputs_dir, tmp_path, device
@@ -1169,6 +1195,8 @@ def test_jpeg_input_device_comparison(imgsrc_path, tmp_path, device):
     assert result_image.width > 0 and result_image.height > 0
 
 
+@pytest.mark.slow
+@pytest.mark.gpu
 def test_jpeg_cuda_vs_cpu_similarity(imgsrc_path, tmp_path):
     """Test JPEG processing on CUDA produces similar results to CPU.
 
@@ -1294,6 +1322,60 @@ def _get_or_create_input_pdf(
     return out_pdf
 
 
+@pytest.mark.fast
+@pytest.mark.pdf
+def test_pdf_pipeline_smoke_matches_golden(
+    imgsrc_path,
+    goldendir_path,
+    pdf_inputs_dir,
+    tmp_path,
+):
+    _require_external_tools("mutool")
+    if not pdf_mode_supported():
+        pytest.skip("unpaper built without PDF support")
+
+    input_pdf = _get_or_create_input_pdf(
+        case_id="SMOKE",
+        encoding="jpeg",
+        imgsrc_path=imgsrc_path,
+        pdf_inputs_dir=pdf_inputs_dir,
+        input_images=["imgsrc001.png"],
+    )
+    output_pdf = tmp_path / "out-smoke-cpu.pdf"
+
+    proc = run_unpaper(
+        "--device",
+        "cpu",
+        "--pdf-quality",
+        "fast",
+        "--pdf-dpi",
+        "300",
+        "--jpeg-quality",
+        "95",
+        str(input_pdf),
+        str(output_pdf),
+        capture=True,
+    )
+
+    text = (proc.stdout or "") + (proc.stderr or "")
+    assert "Using CPU PDF pipeline" in text
+
+    rendered = _render_pdf_pages(
+        pdf_path=output_pdf, out_dir=tmp_path / "render-smoke", dpi=300
+    )
+    assert len(rendered) == 1
+
+    golden_path = goldendir_path / "goldenA1.pbm"
+    diff = compare_images_pdf(golden=golden_path, result=rendered[0])
+    assert diff <= _PDF_DIFF_MAX, (
+        f"[SMOKE] page 1 differs too much: similarity={(1.0 - diff):.3f}, "
+        f"expected >= {_PDF_SIMILARITY_MIN:.2f} (golden={golden_path}, "
+        f"result={rendered[0]})"
+    )
+
+
+@pytest.mark.slow
+@pytest.mark.pdf
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("encoding", ["jpeg", "png", "jbig2"])
 @pytest.mark.parametrize("case_id,input_images,extra_args,golden_images", _PDF_GOLDEN_CASES)

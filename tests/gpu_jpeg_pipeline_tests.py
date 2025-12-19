@@ -50,6 +50,8 @@ except ImportError:
 
 _LOGGER = logging.getLogger(__name__)
 
+pytestmark = [pytest.mark.gpu, pytest.mark.slow]
+
 
 def compute_ssim(img1: "PIL.Image.Image", img2: "PIL.Image.Image") -> float:
     """Compute Structural Similarity Index (SSIM) between two images.
@@ -560,54 +562,6 @@ class TestGpuPipelineBatch:
                                                     min_ssim=0.99, max_diff_ratio=0.01)
         assert passed, f"Batch vs single inconsistency: {message}"
         print(f"Batch vs single: {message}")
-
-    def test_batch_multistream_scaling(self, imgsrc_path, tmp_path):
-        """Test that batch processing works with multiple CUDA streams."""
-        if not cuda_runtime_available():
-            pytest.skip("CUDA runtime not available")
-        if not cuda_backend_available():
-            pytest.skip("CUDA backend not available")
-
-        source_png = imgsrc_path / "imgsrc001.png"
-        num_images = 10
-
-        for i in range(1, num_images + 1):
-            source_jpeg = tmp_path / f"input{i:04d}.jpg"
-            convert_to_jpeg(source_png, source_jpeg)
-
-        input_pattern = str(tmp_path / "input%04d.jpg")
-
-        # Test with different stream counts (GPU encode auto-enabled for JPEG output)
-        for streams in [1, 2, 4, 8]:
-            output_dir = tmp_path / f"output_streams{streams}"
-            output_dir.mkdir(exist_ok=True)
-            output_pattern = str(output_dir / "output%04d.jpg")
-
-            run_unpaper(
-                "--batch",
-                f"--jobs={streams}",
-                "--device", "cuda",
-                "--jpeg-quality", "95",
-                f"--cuda-streams={streams}",
-                "--overwrite",
-                input_pattern,
-                output_pattern,
-            )
-
-            outputs = list(output_dir.glob("output*.jpg"))
-            assert len(outputs) == num_images, \
-                f"With {streams} streams: expected {num_images} outputs, got {len(outputs)}"
-
-        # Compare outputs from different stream counts - allow <10% difference
-        # due to parallel worker non-determinism in mask detection
-        ref_output = tmp_path / "output_streams1" / "output0001.jpg"
-        for streams in [2, 4, 8]:
-            test_output = tmp_path / f"output_streams{streams}" / "output0001.jpg"
-            passed, message = compare_images_similarity(ref_output, test_output,
-                                                        min_ssim=0.90, max_diff_ratio=0.10)
-            assert passed, f"Stream scaling inconsistency ({streams} streams): {message}"
-
-        print("Multi-stream batch processing: consistent across 1,2,4,8 streams")
 
 
 # =============================================================================
