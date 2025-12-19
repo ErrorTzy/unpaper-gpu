@@ -49,7 +49,8 @@ nvcc = disabler()
 unpaper_c_args = []
 unpaper_cpp_args = []
 unpaper_sources = [
-    'file.c', 'parse.c', 'sheet_process.c', 'unpaper.c',
+    'file.c', 'parse.c', 'sheet_process.c',
+    'src/cli/cli_main.c', 'src/cli/cli_options.c',
     'imageprocess/blit.c',
     'imageprocess/backend.c',
     'imageprocess/cuda_mempool.c',
@@ -319,6 +320,22 @@ test(
     ],
     timeout : -1,
 )
+
+cli_options_test = executable(
+    'cli_options_test',
+    [
+        'tests/cli_options_test.c',
+        'parse.c',
+        'lib/options.c',
+        'lib/logging.c',
+        'imageprocess/primitives.c',
+    ],
+    c_args : unpaper_c_args,
+    dependencies : unpaper_deps,
+    install : false,
+)
+
+test('cli options', cli_options_test)
 
 if have_cuda
     cuda_roundtrip_test = executable(
