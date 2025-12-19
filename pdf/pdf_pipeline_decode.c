@@ -15,6 +15,7 @@
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
 #include <libavutil/pixfmt.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -64,6 +65,50 @@ static AVFrame *decode_jbig2_to_frame(const PdfImage *pdf_img) {
   return frame;
 }
 #endif
+
+static bool pdf_pipeline_size_matches(int width, int height, int expected_width,
+                                      int expected_height) {
+  const int tol = 2;
+  return (abs(width - expected_width) <= tol) &&
+         (abs(height - expected_height) <= tol);
+}
+
+bool pdf_pipeline_page_expected_size(PdfDocument *doc, int page_idx, int dpi,
+                                     int *out_width, int *out_height) {
+  if (doc == NULL || out_width == NULL || out_height == NULL || dpi <= 0 ||
+      page_idx < 0) {
+    return false;
+  }
+
+  PdfPageInfo info = {0};
+  if (!pdf_get_page_info(doc, page_idx, &info)) {
+    return false;
+  }
+
+  float width_pt = info.width;
+  float height_pt = info.height;
+
+  int rotation = info.rotation % 360;
+  if (rotation < 0)
+    rotation += 360;
+
+  if (rotation == 90 || rotation == 270) {
+    float tmp = width_pt;
+    width_pt = height_pt;
+    height_pt = tmp;
+  }
+
+  int width_px = (int)lroundf(width_pt * (float)dpi / 72.0f);
+  int height_px = (int)lroundf(height_pt * (float)dpi / 72.0f);
+
+  if (width_px <= 0 || height_px <= 0) {
+    return false;
+  }
+
+  *out_width = width_px;
+  *out_height = height_px;
+  return true;
+}
 
 static AVFrame *decode_codec_bytes(const uint8_t *data, size_t size,
                                    enum AVCodecID codec_id) {
@@ -239,6 +284,11 @@ AVFrame *pdf_pipeline_decode_page_to_frame(PdfDocument *doc, int page_idx,
   AVFrame *frame = NULL;
   int extracted_w = 0;
   int extracted_h = 0;
+  int expected_w = 0;
+  int expected_h = 0;
+  bool has_expected =
+      pdf_pipeline_page_expected_size(doc, page_idx, dpi, &expected_w,
+                                      &expected_h);
 
   PdfImage pdf_img = {0};
   if (pdf_extract_page_image(doc, page_idx, &pdf_img)) {
@@ -246,10 +296,19 @@ AVFrame *pdf_pipeline_decode_page_to_frame(PdfDocument *doc, int page_idx,
     extracted_h = pdf_img.height;
     frame = pdf_pipeline_decode_image_to_frame(&pdf_img);
     pdf_free_image(&pdf_img);
+    if (frame && has_expected &&
+        !pdf_pipeline_size_matches(frame->width, frame->height, expected_w,
+                                   expected_h)) {
+      av_frame_free(&frame);
+      frame = NULL;
+    }
   }
 
   if (!frame) {
-    if (extracted_w > 0 && extracted_h > 0) {
+    if (has_expected) {
+      frame = pdf_pipeline_render_page_to_frame_size(doc, page_idx, expected_w,
+                                                     expected_h);
+    } else if (extracted_w > 0 && extracted_h > 0) {
       frame = pdf_pipeline_render_page_to_frame_size(doc, page_idx, extracted_w,
                                                      extracted_h);
     } else {

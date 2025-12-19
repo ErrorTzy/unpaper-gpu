@@ -41,6 +41,13 @@
 #define PDF_OUTPUT_JPEG_QUALITY 85
 #define MAX_DECODE_QUEUE_DEPTH 32
 
+static bool pdf_pipeline_size_matches(int width, int height, int expected_width,
+                                      int expected_height) {
+  const int tol = 2;
+  return (abs(width - expected_width) <= tol) &&
+         (abs(height - expected_height) <= tol);
+}
+
 static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
   if (image == NULL || image->frame == NULL || out_len == NULL) {
     return NULL;
@@ -331,6 +338,11 @@ static bool pdf_decode_queue_decoder(void *user_ctx, const BatchJob *job,
     return false;
   }
 
+  int expected_w = 0;
+  int expected_h = 0;
+  bool has_expected = pdf_pipeline_page_expected_size(
+      ctx->doc, page_idx, ctx->render_dpi, &expected_w, &expected_h);
+
   if (ctx->use_gpu) {
 #ifdef UNPAPER_WITH_CUDA
     PdfImage pdf_img = {0};
@@ -339,6 +351,18 @@ static bool pdf_decode_queue_decoder(void *user_ctx, const BatchJob *job,
       verboseLog(VERBOSE_MORE, "GPU PDF pipeline: extracted %s image %dx%d\n",
                  pdf_image_format_name(pdf_img.format), pdf_img.width,
                  pdf_img.height);
+    }
+
+    if (extracted && has_expected &&
+        !pdf_pipeline_size_matches(pdf_img.width, pdf_img.height, expected_w,
+                                   expected_h)) {
+      verboseLog(VERBOSE_MORE,
+                 "GPU PDF pipeline: extracted image %dx%d does not match page "
+                 "size %dx%d at %d DPI, rendering instead\n",
+                 pdf_img.width, pdf_img.height, expected_w, expected_h,
+                 ctx->render_dpi);
+      pdf_free_image(&pdf_img);
+      extracted = false;
     }
 
     if (extracted && ctx->nvimgcodec_ok &&

@@ -23,6 +23,11 @@ struct AVFrame;
 struct AVFrame *pdf_pipeline_decode_page_to_frame(PdfDocument *doc,
                                                   int page_idx, int dpi);
 
+// Compute the expected pixel size for a page at the given DPI, accounting for
+// page rotation. Returns true on success.
+bool pdf_pipeline_page_expected_size(PdfDocument *doc, int page_idx, int dpi,
+                                     int *out_width, int *out_height);
+
 // Decode an extracted PdfImage into an AVFrame.
 // Returns an allocated AVFrame on success, NULL if format unsupported/fails.
 struct AVFrame *pdf_pipeline_decode_image_to_frame(const PdfImage *pdf_img);
@@ -35,4 +40,3 @@ struct AVFrame *pdf_pipeline_render_page_to_frame(PdfDocument *doc,
 #ifdef __cplusplus
 }
 #endif
-
