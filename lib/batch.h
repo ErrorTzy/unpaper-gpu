@@ -33,6 +33,8 @@ typedef struct {
   // Output file paths
   char *output_files[BATCH_MAX_FILES_PER_SHEET];
   int output_count;
+  int output_page_base; // Base output index for non-file pipelines (e.g., PDF)
+  int layout_override;  // -1 = use options->layout, otherwise Layout enum value
 
   BatchJobStatus status;
 } BatchJob;

@@ -61,6 +61,7 @@ BatchJob *batch_queue_add(BatchQueue *queue) {
   BatchJob *job = &queue->jobs[queue->count++];
   memset(job, 0, sizeof(*job));
   job->status = BATCH_JOB_PENDING;
+  job->layout_override = -1;
   return job;
 }
 

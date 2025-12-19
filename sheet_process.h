@@ -59,6 +59,7 @@ typedef struct {
 
   // Sheet identification
   int sheet_nr;
+  int layout_override; // -1 = use options->layout, otherwise Layout enum value
 
   // Working images (allocated per-job)
   Image sheet;

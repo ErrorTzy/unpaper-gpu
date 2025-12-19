@@ -564,14 +564,17 @@ static bool pdf_submit_image_as_page(PdfPageAccumulator *accumulator,
 static bool pdf_batch_post_process(BatchWorkerContext *worker_ctx,
                                    size_t job_index, SheetProcessState *state,
                                    void *user_ctx) {
-  (void)worker_ctx;
-
   PdfBatchWriteContext *ctx = (PdfBatchWriteContext *)user_ctx;
   if (!ctx || !ctx->accumulator || !ctx->options || !state) {
     return false;
   }
 
-  int output_pages = ctx->options->output_count;
+  BatchJob *job = batch_queue_get(worker_ctx->queue, job_index);
+  if (!job) {
+    return false;
+  }
+
+  int output_pages = job->output_count;
   if (output_pages < 1) {
     output_pages = 1;
   }
@@ -579,7 +582,7 @@ static bool pdf_batch_post_process(BatchWorkerContext *worker_ctx,
     output_pages = BATCH_MAX_FILES_PER_SHEET;
   }
 
-  int base_out_page = (int)job_index * output_pages;
+  int base_out_page = job->output_page_base;
 
   if (state->sheet.frame == NULL) {
     for (int o = 0; o < output_pages; o++) {
@@ -694,32 +697,10 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   }
 
   int sheet_count = (page_count + input_pages - 1) / input_pages;
-  int output_page_count = sheet_count * output_pages;
+  int output_page_count = 0;
 
   int dpi =
       options->pdf_render_dpi > 0 ? options->pdf_render_dpi : PDF_RENDER_DPI;
-
-  PdfMetadata meta = pdf_get_metadata(doc);
-  PdfWriter *writer = pdf_writer_create(output_path, &meta, dpi);
-  pdf_free_metadata(&meta);
-
-  if (writer == NULL) {
-    verboseLog(VERBOSE_NORMAL,
-               "PDF pipeline (CPU batch): failed to create output: %s\n",
-               pdf_writer_get_last_error());
-    pdf_close(doc);
-    return -1;
-  }
-
-  PdfPageAccumulator *accumulator =
-      pdf_page_accumulator_create(writer, output_page_count);
-  if (accumulator == NULL) {
-    verboseLog(VERBOSE_NORMAL,
-               "PDF pipeline (CPU batch): failed to create accumulator\n");
-    pdf_writer_abort(writer);
-    pdf_close(doc);
-    return -1;
-  }
 
   // Compute worker parallelism
   int workers = parallelism;
@@ -763,12 +744,35 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
     }
 
     job->sheet_nr = sheet_idx + 1;
-    job->output_count = output_pages;
 
     int first_page = sheet_idx * input_pages;
     int remaining = page_count - first_page;
     int job_inputs = remaining < input_pages ? remaining : input_pages;
     job->input_count = job_inputs;
+
+    bool skip_split = false;
+    if (options->skip_split.count != 0) {
+      for (int i = 0; i < job_inputs; i++) {
+        int page_index = first_page + i + 1;
+        if (isInMultiIndex(page_index, options->skip_split)) {
+          skip_split = true;
+          break;
+        }
+      }
+    }
+
+    int job_output_count = skip_split ? 1 : output_pages;
+    if (job_output_count < 1) {
+      job_output_count = 1;
+    }
+    if (job_output_count > BATCH_MAX_FILES_PER_SHEET) {
+      job_output_count = BATCH_MAX_FILES_PER_SHEET;
+    }
+
+    job->output_count = job_output_count;
+    job->output_page_base = output_page_count;
+    job->layout_override = skip_split ? LAYOUT_SINGLE : -1;
+    output_page_count += job_output_count;
 
     for (int i = 0; i < job_inputs; i++) {
       // Provide a stable "input" string so the generic worker requests decode.
@@ -788,8 +792,36 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
 
   if (!queue_ok || (int)batch_queue.count != sheet_count) {
     batch_queue_free(&batch_queue);
-    pdf_page_accumulator_destroy(accumulator);
+    pdf_close(doc);
+    return -1;
+  }
+
+  if (output_page_count < 1) {
+    batch_queue_free(&batch_queue);
+    pdf_close(doc);
+    return -1;
+  }
+
+  PdfMetadata meta = pdf_get_metadata(doc);
+  PdfWriter *writer = pdf_writer_create(output_path, &meta, dpi);
+  pdf_free_metadata(&meta);
+
+  if (writer == NULL) {
+    verboseLog(VERBOSE_NORMAL,
+               "PDF pipeline (CPU batch): failed to create output: %s\n",
+               pdf_writer_get_last_error());
+    batch_queue_free(&batch_queue);
+    pdf_close(doc);
+    return -1;
+  }
+
+  PdfPageAccumulator *accumulator =
+      pdf_page_accumulator_create(writer, output_page_count);
+  if (accumulator == NULL) {
+    verboseLog(VERBOSE_NORMAL,
+               "PDF pipeline (CPU batch): failed to create accumulator\n");
     pdf_writer_abort(writer);
+    batch_queue_free(&batch_queue);
     pdf_close(doc);
     return -1;
   }
@@ -957,8 +989,16 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   for (size_t i = 0; i < batch_queue.count; i++) {
     BatchJob *job = batch_queue_get(&batch_queue, i);
     if (job && job->status != BATCH_JOB_COMPLETED) {
-      for (int o = 0; o < output_pages; o++) {
-        pdf_page_accumulator_mark_failed(accumulator, (int)i * output_pages + o);
+      int job_outputs = job->output_count;
+      if (job_outputs < 1) {
+        job_outputs = 1;
+      }
+      if (job_outputs > BATCH_MAX_FILES_PER_SHEET) {
+        job_outputs = BATCH_MAX_FILES_PER_SHEET;
+      }
+      for (int o = 0; o < job_outputs; o++) {
+        pdf_page_accumulator_mark_failed(accumulator,
+                                         job->output_page_base + o);
       }
     }
   }

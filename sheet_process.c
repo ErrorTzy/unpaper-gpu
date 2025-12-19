@@ -43,6 +43,7 @@ void sheet_process_state_init(SheetProcessState *state,
   state->sheet_nr = job->sheet_nr;
   state->input_count = job->input_count;
   state->output_count = job->output_count;
+  state->layout_override = job->layout_override;
 
   for (int i = 0; i < job->input_count; i++) {
     state->input_files[i] = job->input_files[i];
@@ -144,6 +145,10 @@ void sheet_process_state_cleanup(SheetProcessState *state) {
 bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
   const Options *options = config->options;
   int nr = state->sheet_nr;
+  Layout layout = options->layout;
+  if (state->layout_override >= 0 && state->layout_override < LAYOUTS_COUNT) {
+    layout = (Layout)state->layout_override;
+  }
 
   perf_recorder_init(&state->perf, options->perf,
                      options->device == UNPAPER_DEVICE_CUDA);
@@ -325,7 +330,7 @@ bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
   }
 
   // Handle layout - set auto points and masks
-  if (options->layout == LAYOUT_SINGLE) {
+  if (layout == LAYOUT_SINGLE) {
     if (state->point_count == 0) {
       state->points[state->point_count++] = (Point){
           state->sheet.frame->width / 2, state->sheet.frame->height / 2};
@@ -340,7 +345,7 @@ bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
       state->outside_borderscan_mask[state->outside_borderscan_mask_count++] =
           full_image(state->sheet);
     }
-  } else if (options->layout == LAYOUT_DOUBLE) {
+  } else if (layout == LAYOUT_DOUBLE) {
     if (state->point_count == 0) {
       state->points[state->point_count++] = (Point){
           state->sheet.frame->width / 4, state->sheet.frame->height / 2};
@@ -392,16 +397,15 @@ bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
 
   // Create local copy of blackfilter params
   BlackfilterParameters bf_params = options->blackfilter_parameters;
-  if (config->blackfilter_exclude_count == 0 &&
-      options->layout != LAYOUT_NONE) {
+  if (config->blackfilter_exclude_count == 0 && layout != LAYOUT_NONE) {
     // Auto-generate exclusion zones
     RectangleSize sheetSize = size_of_image(state->sheet);
-    if (options->layout == LAYOUT_SINGLE) {
+    if (layout == LAYOUT_SINGLE) {
       bf_params.exclusions[bf_params.exclusions_count++] = rectangle_from_size(
           (Point){sheetSize.width / 4, sheetSize.height / 4},
           (RectangleSize){.width = sheetSize.width / 2,
                           .height = sheetSize.height / 2});
-    } else if (options->layout == LAYOUT_DOUBLE) {
+    } else if (layout == LAYOUT_DOUBLE) {
       RectangleSize filterSize = {.width = sheetSize.width / 4,
                                   .height = sheetSize.height / 2};
       Point firstFilterOrigin = {sheetSize.width / 8, sheetSize.height / 4};
@@ -507,7 +511,7 @@ bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
                   options->ignore_multi_index)) {
     Wipes wipes = options->wipes;
     // Add middle wipe for double layout
-    if (options->layout == LAYOUT_DOUBLE &&
+    if (layout == LAYOUT_DOUBLE &&
         (config->middle_wipe[0] > 0 || config->middle_wipe[1] > 0)) {
       wipes.areas[wipes.count++] = (Rectangle){{
           {state->sheet.frame->width / 2 - config->middle_wipe[0], 0},

@@ -1048,6 +1048,44 @@ def test_skip_split_requires_pdf(imgsrc_path, tmp_path):
     assert "--skip-split" in text or "PDF" in text
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_pdf_skip_split_page_counts(
+    imgsrc_path, pdf_inputs_dir, tmp_path, device
+):
+    _require_external_tools("mutool")
+    if not pdf_mode_supported():
+        pytest.skip("unpaper built without PDF support")
+    if device == "cuda" and not cuda_runtime_available():
+        pytest.skip("CUDA runtime/device not available")
+
+    input_pdf = _get_or_create_input_pdf(
+        case_id="S2",
+        encoding="jpeg",
+        imgsrc_path=imgsrc_path,
+        pdf_inputs_dir=pdf_inputs_dir,
+        input_images=["imgsrc001.png", "imgsrc002.png", "imgsrc003.png"],
+    )
+    output_pdf = tmp_path / f"out-s2-skip-split-{device}.pdf"
+
+    proc = run_unpaper(
+        "--device",
+        device,
+        "--split",
+        "--skip-split",
+        "2",
+        str(input_pdf),
+        str(output_pdf),
+        capture=True,
+    )
+    assert proc.returncode == 0
+
+    rendered = _render_pdf_pages(
+        pdf_path=output_pdf, out_dir=tmp_path / f"render-{device}", dpi=300
+    )
+    # 3 input pages: split => 2 + 2 + 2, skip page 2 => 2 + 1 + 2 = 5
+    assert len(rendered) == 5
+
+
 def test_valid_range_multi_index(imgsrc_path, tmp_path):
     source_path = imgsrc_path / "imgsrc%03.png"
     result_path = tmp_path / "result%03.pbm"
