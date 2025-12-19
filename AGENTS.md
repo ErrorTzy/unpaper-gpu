@@ -145,6 +145,7 @@ src/infra/*            # logging + threading utils
   - `cli_main` only selects pipeline.
 - Acceptance:
   - No behavior changes; reduces `unpaper.c` complexity.
+- Status: complete.
 
 **PR A9: Test redundancy cleanup**
 - Scope:

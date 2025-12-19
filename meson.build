@@ -51,6 +51,7 @@ unpaper_cpp_args = []
 unpaper_sources = [
     'file.c', 'parse.c', 'sheet_process.c',
     'src/cli/cli_main.c', 'src/cli/cli_options.c',
+    'src/pipeline/image_pipeline.c',
     'src/core/sheet_pipeline.c',
     'src/core/sheet_stages.c',
     'imageprocess/blit.c',
@@ -91,6 +92,7 @@ if have_pdf
         'pdf/pdf_pipeline_decode.c',
         'pdf/pdf_page_accumulator.c',
         'pdf/pdf_pipeline_batch.c',
+        'src/pipeline/pdf_pipeline.c',
     ]
 endif
 
