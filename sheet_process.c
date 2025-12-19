@@ -36,7 +36,8 @@ void sheet_process_state_init(SheetProcessState *state,
   state->layout_override = job->layout_override;
 
   for (int i = 0; i < job->input_count; i++) {
-    state->input_files[i] = job->input_files[i];
+    const BatchInput *input = batch_job_input(job, i);
+    state->input_files[i] = batch_input_path(input);
   }
   for (int i = 0; i < job->output_count; i++) {
     state->output_files[i] = job->output_files[i];

@@ -12,6 +12,20 @@
 // Maximum input/output files per sheet (matches existing code)
 #define BATCH_MAX_FILES_PER_SHEET 2
 
+// Batch input types
+typedef enum {
+  BATCH_INPUT_NONE = 0,
+  BATCH_INPUT_FILE,
+  BATCH_INPUT_PDF_PAGE,
+} BatchInputType;
+
+// Batch input descriptor
+typedef struct {
+  BatchInputType type;
+  char *path;        // Owned if type == BATCH_INPUT_FILE
+  int pdf_page_index; // 0-based if type == BATCH_INPUT_PDF_PAGE
+} BatchInput;
+
 // Job status
 typedef enum {
   BATCH_JOB_PENDING = 0,
@@ -26,8 +40,8 @@ typedef struct {
   int input_nr;  // Input file counter start
   int output_nr; // Output file counter start
 
-  // Input file paths (NULL for blank pages)
-  char *input_files[BATCH_MAX_FILES_PER_SHEET];
+  // Input descriptors (NONE for blank pages)
+  BatchInput inputs[BATCH_MAX_FILES_PER_SHEET];
   int input_count;
 
   // Output file paths
@@ -38,6 +52,41 @@ typedef struct {
 
   BatchJobStatus status;
 } BatchJob;
+
+static inline const BatchInput *batch_job_input(const BatchJob *job,
+                                                int index) {
+  if (!job || index < 0 || index >= job->input_count) {
+    return NULL;
+  }
+  return &job->inputs[index];
+}
+
+static inline BatchInput *batch_job_input_mut(BatchJob *job, int index) {
+  if (!job || index < 0 || index >= job->input_count) {
+    return NULL;
+  }
+  return &job->inputs[index];
+}
+
+static inline bool batch_input_is_present(const BatchInput *input) {
+  return input && input->type != BATCH_INPUT_NONE;
+}
+
+static inline bool batch_input_is_file(const BatchInput *input) {
+  return input && input->type == BATCH_INPUT_FILE && input->path != NULL;
+}
+
+static inline const char *batch_input_path(const BatchInput *input) {
+  return batch_input_is_file(input) ? input->path : NULL;
+}
+
+static inline bool batch_input_is_pdf_page(const BatchInput *input) {
+  return input && input->type == BATCH_INPUT_PDF_PAGE;
+}
+
+static inline int batch_input_pdf_page(const BatchInput *input) {
+  return batch_input_is_pdf_page(input) ? input->pdf_page_index : -1;
+}
 
 // Job queue for batch processing
 typedef struct {

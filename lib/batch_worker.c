@@ -111,7 +111,8 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
 
   if (provider.get != NULL) {
     for (int i = 0; i < job->input_count; i++) {
-      if (job->input_files[i] == NULL) {
+      const BatchInput *input = batch_job_input(job, i);
+      if (!batch_input_is_present(input)) {
         continue;
       }
       if (!decoded_image_provider_get(&provider, (int)job_index, i,
@@ -207,8 +208,11 @@ static void batch_worker_fn(void *arg, int thread_id) {
     if (job) {
       fprintf(stderr, "ERROR: Job %zu (sheet %d) failed", job_ctx->job_index,
               job->sheet_nr);
-      if (job->input_files[0]) {
-        fprintf(stderr, " - input: %s", job->input_files[0]);
+      const BatchInput *input = batch_job_input(job, 0);
+      if (batch_input_is_file(input)) {
+        fprintf(stderr, " - input: %s", input->path);
+      } else if (batch_input_is_pdf_page(input)) {
+        fprintf(stderr, " - input: PDF page %d", input->pdf_page_index + 1);
       }
       if (job->output_files[0]) {
         fprintf(stderr, " - output: %s", job->output_files[0]);

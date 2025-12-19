@@ -441,9 +441,13 @@ static void *producer_thread_fn(void *arg) {
         break;
       }
 
-      const char *filename = job->input_files[input_idx];
-      if (!filename) {
+      const BatchInput *input = batch_job_input(job, input_idx);
+      if (!batch_input_is_present(input)) {
         continue; // Skip blank pages
+      }
+      const char *filename = batch_input_path(input);
+      if (queue->custom_decoder == NULL && filename == NULL) {
+        continue;
       }
 
       // Wait for an empty slot

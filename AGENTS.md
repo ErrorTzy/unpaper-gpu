@@ -128,6 +128,7 @@ src/infra/*            # logging + threading utils
   - PDF pipeline uses real page descriptors; no fake filenames.
 - Tests:
   - Existing PDF tests pass unchanged.
+- Status: complete.
 
 **PR A7: Logging unification + job context**
 - Scope:

@@ -305,7 +305,8 @@ static size_t count_total_inputs(BatchQueue *batch) {
   for (size_t i = 0; i < batch->count; i++) {
     BatchJob *job = batch_queue_get(batch, i);
     for (int j = 0; j < job->input_count; j++) {
-      if (job->input_files[j] != NULL) {
+      const BatchInput *input = batch_job_input(job, j);
+      if (batch_input_is_file(input)) {
         total++;
       }
     }
@@ -320,11 +321,12 @@ static bool get_work_item(BatchQueue *batch, size_t linear_idx,
   for (size_t i = 0; i < batch->count; i++) {
     BatchJob *job = batch_queue_get(batch, i);
     for (int j = 0; j < job->input_count; j++) {
-      if (job->input_files[j] != NULL) {
+      const BatchInput *input = batch_job_input(job, j);
+      if (batch_input_is_file(input)) {
         if (current == linear_idx) {
           out->job_index = (int)i;
           out->input_index = j;
-          out->path = job->input_files[j];
+          out->path = input->path;
           return true;
         }
         current++;

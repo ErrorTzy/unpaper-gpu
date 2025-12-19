@@ -267,27 +267,40 @@ int main(int argc, char *argv[]) {
       for (int i = 0; i < options.input_count; i++) {
         bool ins = isInMultiIndex(enum_input_nr, options.insert_blank);
         bool repl = isInMultiIndex(enum_input_nr, options.replace_blank);
+        BatchInput *input = batch_job_input_mut(job, i);
 
         if (repl) {
-          job->input_files[i] = NULL;
+          if (input) {
+            input->type = BATCH_INPUT_NONE;
+            input->path = NULL;
+            input->pdf_page_index = -1;
+          }
           enum_input_nr++;
         } else if (ins) {
-          job->input_files[i] = NULL;
+          if (input) {
+            input->type = BATCH_INPUT_NONE;
+            input->path = NULL;
+            input->pdf_page_index = -1;
+          }
         } else if (inputWildcard) {
           char buf[PATH_MAX];
           sprintf(buf, argv[enum_optind], enum_input_nr++);
-          job->input_files[i] = strdup(buf);
+          if (input) {
+            input->type = BATCH_INPUT_FILE;
+            input->path = strdup(buf);
+            input->pdf_page_index = -1;
+          }
 
           // Check if file exists
           struct stat statBuf;
-          if (stat(job->input_files[i], &statBuf) != 0) {
+          if (!input || stat(input->path, &statBuf) != 0) {
             if (options.end_sheet == -1) {
               // End of files - remove this job and stop
               batch_job_free(job);
               batch_queue.count--;
               goto batch_enum_done;
             } else {
-              errOutput("unable to open file %s.", job->input_files[i]);
+              errOutput("unable to open file %s.", input ? input->path : "");
             }
           }
         } else if (enum_optind >= argc) {
@@ -299,7 +312,11 @@ int main(int argc, char *argv[]) {
             errOutput("not enough input files given.");
           }
         } else {
-          job->input_files[i] = strdup(argv[enum_optind++]);
+          if (input) {
+            input->type = BATCH_INPUT_FILE;
+            input->path = strdup(argv[enum_optind++]);
+            input->pdf_page_index = -1;
+          }
         }
       }
       if (inputWildcard)

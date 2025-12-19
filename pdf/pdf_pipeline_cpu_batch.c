@@ -325,8 +325,6 @@ static bool pdf_decode_jbig2_to_gpu(const PdfImage *pdf_img, DecodedImage *out) 
 static bool pdf_decode_queue_decoder(void *user_ctx, const BatchJob *job,
                                      int job_index, int input_index,
                                      DecodedImage *out) {
-  (void)job;
-
   PdfDecodeQueueContext *ctx = (PdfDecodeQueueContext *)user_ctx;
   if (!ctx || !ctx->doc || !out) {
     return false;
@@ -336,7 +334,16 @@ static bool pdf_decode_queue_decoder(void *user_ctx, const BatchJob *job,
     return false;
   }
 
-  int page_idx = job_index * ctx->input_pages_per_sheet + input_index;
+  int page_idx = -1;
+  if (job != NULL) {
+    const BatchInput *input = batch_job_input(job, input_index);
+    if (batch_input_is_pdf_page(input)) {
+      page_idx = input->pdf_page_index;
+    }
+  }
+  if (page_idx < 0) {
+    page_idx = job_index * ctx->input_pages_per_sheet + input_index;
+  }
   if (page_idx < 0 || page_idx >= ctx->total_pages) {
     return false;
   }
@@ -778,15 +785,14 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
     output_page_count += job_output_count;
 
     for (int i = 0; i < job_inputs; i++) {
-      // Provide a stable "input" string so the generic worker requests decode.
-      // (The actual decode comes from the custom decode_queue decoder.)
-      char buf[128];
-      snprintf(buf, sizeof(buf), "PDF page %d", first_page + i + 1);
-      job->input_files[i] = strdup(buf);
-      if (job->input_files[i] == NULL) {
+      BatchInput *input = batch_job_input_mut(job, i);
+      if (!input) {
         queue_ok = false;
         break;
       }
+      input->type = BATCH_INPUT_PDF_PAGE;
+      input->path = NULL;
+      input->pdf_page_index = first_page + i;
     }
     if (!queue_ok) {
       break;

@@ -45,7 +45,9 @@ static void init_job(BatchJob *job) {
   job->input_count = 1;
   job->output_count = 1;
   job->layout_override = -1;
-  job->input_files[0] = NULL;
+  job->inputs[0].type = BATCH_INPUT_NONE;
+  job->inputs[0].path = NULL;
+  job->inputs[0].pdf_page_index = -1;
   job->output_files[0] = NULL;
 }
 

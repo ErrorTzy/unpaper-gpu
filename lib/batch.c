@@ -24,8 +24,12 @@ void batch_queue_init(BatchQueue *queue) {
 
 void batch_job_free(BatchJob *job) {
   for (int i = 0; i < job->input_count; i++) {
-    free(job->input_files[i]);
-    job->input_files[i] = NULL;
+    if (job->inputs[i].type == BATCH_INPUT_FILE) {
+      free(job->inputs[i].path);
+    }
+    job->inputs[i].path = NULL;
+    job->inputs[i].type = BATCH_INPUT_NONE;
+    job->inputs[i].pdf_page_index = -1;
   }
   for (int i = 0; i < job->output_count; i++) {
     free(job->output_files[i]);
@@ -154,8 +158,11 @@ void batch_progress_update(BatchQueue *queue, int job_index,
   fprintf(stderr, "[%zu/%zu] %s sheet %d", done, queue->count, status_str,
           job->sheet_nr);
 
-  if (job->input_files[0]) {
-    fprintf(stderr, " (%s)", job->input_files[0]);
+  const BatchInput *input = batch_job_input(job, 0);
+  if (batch_input_is_file(input)) {
+    fprintf(stderr, " (%s)", input->path);
+  } else if (batch_input_is_pdf_page(input)) {
+    fprintf(stderr, " (PDF page %d)", input->pdf_page_index + 1);
   }
   fprintf(stderr, "\n");
 }

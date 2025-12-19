@@ -42,7 +42,7 @@ struct AVFrame;
 // Per-job state - each worker gets its own instance
 typedef struct {
   // Input/output file paths (borrowed from BatchJob)
-  char *input_files[BATCH_MAX_FILES_PER_SHEET];
+  const char *input_files[BATCH_MAX_FILES_PER_SHEET];
   int input_count;
   char *output_files[BATCH_MAX_FILES_PER_SHEET];
   int output_count;
