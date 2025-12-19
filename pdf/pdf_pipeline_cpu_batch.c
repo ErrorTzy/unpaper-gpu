@@ -20,6 +20,7 @@
 #include "imageprocess/cuda_runtime.h"
 #include "imageprocess/cuda_stream_pool.h"
 #include "imageprocess/nvimgcodec.h"
+#include "lib/gpu_monitor.h"
 #include <cuda_runtime.h>
 #endif
 
@@ -804,6 +805,10 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
                                       .nvimgcodec_ok = false};
 
 #ifdef UNPAPER_WITH_CUDA
+  bool stream_pool_active = false;
+  bool gpu_monitor_active = false;
+  bool nvimgcodec_initialized = false;
+
   if (use_gpu) {
     int nvimgcodec_streams =
         (options->cuda_streams > 0) ? options->cuda_streams : num_decode_threads;
@@ -813,6 +818,7 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
     if (nvimgcodec_init(nvimgcodec_streams)) {
       nvimgcodec_ok = true;
       decode_ctx.nvimgcodec_ok = true;
+      nvimgcodec_initialized = true;
       verboseLog(VERBOSE_NORMAL,
                  "nvImageCodec GPU decode: enabled (%d streams)\n",
                  nvimgcodec_streams);
@@ -828,11 +834,17 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
       stream_count = 1;
     }
     if (cuda_stream_pool_global_init(stream_count)) {
+      stream_pool_active = true;
       verboseLog(VERBOSE_NORMAL, "GPU stream pool: %zu streams\n",
                  stream_count);
     } else {
       verboseLog(VERBOSE_NORMAL,
                  "GPU stream pool initialization failed, using default stream\n");
+    }
+
+    if (options->perf && gpu_monitor_global_init()) {
+      gpu_monitor_active = true;
+      gpu_monitor_global_batch_start();
     }
   }
 #endif
@@ -846,6 +858,19 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
     pdf_page_accumulator_destroy(accumulator);
     pdf_writer_abort(writer);
     pdf_close(doc);
+#ifdef UNPAPER_WITH_CUDA
+    if (use_gpu) {
+      if (gpu_monitor_active) {
+        gpu_monitor_global_cleanup();
+      }
+      if (stream_pool_active) {
+        cuda_stream_pool_global_cleanup();
+      }
+      if (nvimgcodec_initialized) {
+        nvimgcodec_cleanup();
+      }
+    }
+#endif
     return -1;
   }
 
@@ -869,12 +894,28 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   ThreadPool *pool = threadpool_create(workers);
   if (pool == NULL) {
     decode_queue_stop_producer(decode_queue);
+    if (options->perf) {
+      decode_queue_print_stats(decode_queue);
+    }
     decode_queue_destroy(decode_queue);
     batch_worker_cleanup(&worker_ctx);
     batch_queue_free(&batch_queue);
     pdf_page_accumulator_destroy(accumulator);
     pdf_writer_abort(writer);
     pdf_close(doc);
+#ifdef UNPAPER_WITH_CUDA
+    if (use_gpu) {
+      if (gpu_monitor_active) {
+        gpu_monitor_global_cleanup();
+      }
+      if (stream_pool_active) {
+        cuda_stream_pool_global_cleanup();
+      }
+      if (nvimgcodec_initialized) {
+        nvimgcodec_cleanup();
+      }
+    }
+#endif
     return -1;
   }
 
@@ -883,6 +924,9 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   threadpool_destroy(pool);
 
   decode_queue_stop_producer(decode_queue);
+  if (options->perf) {
+    decode_queue_print_stats(decode_queue);
+  }
   decode_queue_destroy(decode_queue);
 
   // Mark any failed pages so the accumulator doesn't wait forever.
@@ -919,6 +963,32 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   // failed_jobs should match pages_failed, but pages_failed is the authoritative
   // "couldn't be written" count.
   (void)failed_jobs;
+
+#ifdef UNPAPER_WITH_CUDA
+  if (use_gpu) {
+    if (options->perf) {
+      nvimgcodec_print_stats();
+      if (stream_pool_active) {
+        cuda_stream_pool_global_print_stats();
+      }
+      if (gpu_monitor_active) {
+        gpu_monitor_global_batch_end();
+        gpu_monitor_global_print_stats();
+      }
+      unpaper_cuda_print_async_stats();
+    }
+
+    if (gpu_monitor_active) {
+      gpu_monitor_global_cleanup();
+    }
+    if (stream_pool_active) {
+      cuda_stream_pool_global_cleanup();
+    }
+    if (nvimgcodec_initialized) {
+      nvimgcodec_cleanup();
+    }
+  }
+#endif
 
   return pages_failed;
 }
