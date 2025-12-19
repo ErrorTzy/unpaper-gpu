@@ -23,6 +23,7 @@
 #include "imageprocess/backend.h"
 #include "imageprocess/blit.h"
 #include "imageprocess/cuda_mempool.h"
+#include "imageprocess/cuda_runtime.h"
 #include "imageprocess/cuda_stream_pool.h"
 #include "imageprocess/deskew.h"
 #include "imageprocess/filters.h"
@@ -64,7 +65,7 @@
   WELCOME "\n"                                                                 \
           "Usage: unpaper [options] <input-file(s)> <output-file(s)>\n"        \
           "\n"                                                                 \
-          "Options: --device=cpu|cuda (default: cpu)\n"                        \
+          "Options: --device=cpu|cuda (default: auto; cuda if available)\n"   \
           "         --perf (print per-stage timings)\n"                        \
           "         --batch, -B (enable batch processing mode)\n"              \
           "         --jobs=N, -j N (parallel workers, 0=auto, default: 0)\n"   \
@@ -229,6 +230,7 @@ enum LONG_OPTION_VALUES {
 int main(int argc, char *argv[]) {
   // --- local variables ---
   Options options;
+  bool device_explicit = false;
 
   // The variables in the following block need to stay allocated becuse the
   size_t pointCount = 0;
@@ -1032,6 +1034,7 @@ int main(int argc, char *argv[]) {
         break;
 
       case OPT_DEVICE:
+        device_explicit = true;
         if (strcmp(optarg, "cpu") == 0) {
           options.device = UNPAPER_DEVICE_CPU;
         } else if (strcmp(optarg, "cuda") == 0) {
@@ -1166,6 +1169,14 @@ int main(int argc, char *argv[]) {
 
     if (!options.multiple_sheets && options.end_sheet == -1)
       options.end_sheet = options.start_sheet;
+  }
+
+  if (!device_explicit) {
+#if defined(UNPAPER_WITH_CUDA) && (UNPAPER_WITH_CUDA)
+    if (unpaper_cuda_try_init() == UNPAPER_CUDA_INIT_OK) {
+      options.device = UNPAPER_DEVICE_CUDA;
+    }
+#endif
   }
 
   /* make sure we have at least two arguments after the options, as

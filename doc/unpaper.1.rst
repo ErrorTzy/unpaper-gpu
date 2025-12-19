@@ -106,14 +106,17 @@ Options
 
 .. option:: --device { cpu | cuda }
 
-   Select the processing backend. The default is ``cpu``.
+   Select the processing backend. The default is auto: CUDA is used when
+   available, otherwise CPU.
 
+   Use ``--device=cpu`` to force CPU and ``--device=cuda`` to force GPU.
    ``cuda`` requires unpaper to be built with CUDA support
    (``-Dcuda=enabled``). Building with CUDA support also requires
    OpenCV 4.x with CUDA modules (cudaarithm, cudaimgproc). If CUDA
    support is not compiled in, selecting ``--device=cuda`` is a fatal
-   error (no silent fallback). Even in CUDA-capable builds, unpaper
-   will fail if no compatible CUDA runtime/device is available.
+   error (no silent fallback). Even in CUDA-capable builds, explicitly
+   selecting ``--device=cuda`` will fail if no compatible CUDA
+   runtime/device is available.
 
    The CUDA backend uses OpenCV for GPU-accelerated operations including
    connected component labeling for the noisefilter.

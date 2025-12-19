@@ -48,7 +48,8 @@ file input and output.
 
 ### CUDA Backend Dependencies
 
-For GPU-accelerated processing (`--device=cuda`), the following are required:
+For GPU-accelerated processing (auto-detected or `--device=cuda`), the following
+are required:
 
 - **CUDA Toolkit**: Tested with CUDA 12.x and 13.x. The `nvcc` compiler
   and CUDA runtime library (`cudart`) must be available.
@@ -90,7 +91,8 @@ The CUDA backend requires:
 - NVIDIA CUDA Toolkit (nvcc compiler and cudart library)
 - OpenCV 4.x with CUDA support (cudaarithm and cudaimgproc modules)
 
-Use `--device=cuda` at runtime to select GPU processing.
+By default, unpaper will use CUDA when it is available. Use `--device=cpu` to
+force CPU processing, or `--device=cuda` to force GPU processing.
 
 To check which backends are active at runtime, use `--perf`:
 
