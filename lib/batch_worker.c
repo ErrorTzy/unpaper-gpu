@@ -78,7 +78,7 @@ void batch_worker_set_post_process_callback(BatchWorkerContext *ctx,
 
 bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
   if (!ctx->config) {
-    fprintf(stderr, "Batch worker config not set\n");
+    logOutput("Batch worker config not set\n");
     return false;
   }
 
@@ -174,6 +174,19 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
 static void batch_worker_fn(void *arg, int thread_id) {
   BatchJobContext *job_ctx = (BatchJobContext *)arg;
   BatchWorkerContext *ctx = job_ctx->ctx;
+  BatchJob *job = batch_queue_get(ctx->queue, job_ctx->job_index);
+
+  LogContext log_ctx = {
+      .has_job = job != NULL,
+      .job_index = job_ctx->job_index,
+      .sheet_nr = job ? job->sheet_nr : 0,
+      .device = NULL,
+  };
+  if (ctx->options) {
+    log_ctx.device =
+        (ctx->options->device == UNPAPER_DEVICE_CUDA) ? "cuda" : "cpu";
+  }
+  log_context_set(&log_ctx);
 
 #ifdef UNPAPER_WITH_CUDA
   UnpaperCudaStream *stream = NULL;
@@ -204,20 +217,19 @@ static void batch_worker_fn(void *arg, int thread_id) {
 
   // Log error details if job failed
   if (!success) {
-    BatchJob *job = batch_queue_get(ctx->queue, job_ctx->job_index);
     if (job) {
-      fprintf(stderr, "ERROR: Job %zu (sheet %d) failed", job_ctx->job_index,
-              job->sheet_nr);
+      logOutput("ERROR: Job %zu (sheet %d) failed", job_ctx->job_index,
+                job->sheet_nr);
       const BatchInput *input = batch_job_input(job, 0);
       if (batch_input_is_file(input)) {
-        fprintf(stderr, " - input: %s", input->path);
+        logOutput(" - input: %s", input->path);
       } else if (batch_input_is_pdf_page(input)) {
-        fprintf(stderr, " - input: PDF page %d", input->pdf_page_index + 1);
+        logOutput(" - input: PDF page %d", input->pdf_page_index + 1);
       }
       if (job->output_files[0]) {
-        fprintf(stderr, " - output: %s", job->output_files[0]);
+        logOutput(" - output: %s", job->output_files[0]);
       }
-      fprintf(stderr, "\n");
+      logOutput("\n");
     }
   }
 
@@ -250,6 +262,8 @@ static void batch_worker_fn(void *arg, int thread_id) {
                         success ? BATCH_JOB_COMPLETED : BATCH_JOB_FAILED);
   pthread_mutex_unlock(&ctx->progress_mutex);
 
+  log_context_clear();
+
   // Free the job context
   free(job_ctx);
 
@@ -263,14 +277,14 @@ int batch_process_parallel(BatchWorkerContext *ctx, ThreadPool *pool) {
   for (size_t i = 0; i < job_count; i++) {
     BatchJobContext *job_ctx = malloc(sizeof(BatchJobContext));
     if (!job_ctx) {
-      fprintf(stderr, "Failed to allocate job context\n");
+      logOutput("Failed to allocate job context\n");
       continue;
     }
     job_ctx->ctx = ctx;
     job_ctx->job_index = i;
 
     if (!threadpool_submit(pool, batch_worker_fn, job_ctx)) {
-      fprintf(stderr, "Failed to submit job %zu to thread pool\n", i);
+      logOutput("Failed to submit job %zu to thread pool\n", i);
       free(job_ctx);
     }
   }

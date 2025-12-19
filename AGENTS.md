@@ -136,6 +136,7 @@ src/infra/*            # logging + threading utils
   - Replace ad‑hoc `fprintf` in batch worker & pipelines.
 - Acceptance:
   - Log output unchanged in content but consistently formatted.
+- Status: complete.
 
 **PR A8: Pipeline split (image vs PDF)**
 - Scope:

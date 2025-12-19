@@ -112,9 +112,9 @@ void batch_progress_start(BatchQueue *queue) {
   if (!queue->progress)
     return;
 
-  fprintf(stderr, "Batch processing: %zu jobs queued\n", queue->count);
+  logOutput("Batch processing: %zu jobs queued\n", queue->count);
   if (queue->parallelism > 0) {
-    fprintf(stderr, "Parallelism: %d workers\n", queue->parallelism);
+    logOutput("Parallelism: %d workers\n", queue->parallelism);
   }
 }
 
@@ -155,22 +155,22 @@ void batch_progress_update(BatchQueue *queue, int job_index,
   }
 
   // Format: [42/100] processing sheet 42...
-  fprintf(stderr, "[%zu/%zu] %s sheet %d", done, queue->count, status_str,
-          job->sheet_nr);
+  logOutput("[%zu/%zu] %s sheet %d", done, queue->count, status_str,
+            job->sheet_nr);
 
   const BatchInput *input = batch_job_input(job, 0);
   if (batch_input_is_file(input)) {
-    fprintf(stderr, " (%s)", input->path);
+    logOutput(" (%s)", input->path);
   } else if (batch_input_is_pdf_page(input)) {
-    fprintf(stderr, " (PDF page %d)", input->pdf_page_index + 1);
+    logOutput(" (PDF page %d)", input->pdf_page_index + 1);
   }
-  fprintf(stderr, "\n");
+  logOutput("\n");
 }
 
 void batch_progress_finish(BatchQueue *queue) {
   if (!queue->progress)
     return;
 
-  fprintf(stderr, "\nBatch complete: %zu succeeded, %zu failed\n",
-          queue->completed, queue->failed);
+  logOutput("\nBatch complete: %zu succeeded, %zu failed\n", queue->completed,
+            queue->failed);
 }
