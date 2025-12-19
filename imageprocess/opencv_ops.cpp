@@ -4,6 +4,7 @@
 
 #include "imageprocess/opencv_ops.h"
 #include "imageprocess/cuda_kernels_format.h"
+#include "lib/logging.h"
 
 #include <cstring>
 #include <exception>
@@ -461,7 +462,7 @@ bool unpaper_opencv_resize(uint64_t src_device, int src_width, int src_height,
 
     return true;
   } catch (const std::exception &e) {
-    fprintf(stderr, "OpenCV resize failed: %s\n", e.what());
+    verboseLog(VERBOSE_DEBUG, "OpenCV resize failed: %s\n", e.what());
     return false;
   }
 #else

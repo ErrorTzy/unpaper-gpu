@@ -4,6 +4,10 @@
 
 #pragma once
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef enum {
   VERBOSE_QUIET = -1,
   VERBOSE_NONE = 0,
@@ -20,3 +24,7 @@ void verboseLog(VerboseLevel level, const char *fmt, ...)
     __attribute__((format(printf, 2, 3)));
 void errOutput(const char *fmt, ...) __attribute__((format(printf, 1, 2)))
 __attribute__((noreturn));
+
+#ifdef __cplusplus
+}
+#endif

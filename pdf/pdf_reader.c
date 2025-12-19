@@ -6,10 +6,12 @@
 
 #include <mupdf/fitz.h>
 #include <mupdf/pdf.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 // Thread-local error message buffer
 static __thread char last_error[512] = {0};
@@ -70,6 +72,11 @@ bool pdf_is_pdf_file(const char *filename) {
 PdfDocument *pdf_open(const char *path) {
   if (path == NULL) {
     set_error("NULL path");
+    return NULL;
+  }
+
+  if (access(path, R_OK) != 0) {
+    set_error("Cannot open '%s': %s", path, strerror(errno));
     return NULL;
   }
 
