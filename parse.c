@@ -7,6 +7,7 @@
 /* --- tool functions for parameter parsing and verbose output ------------ */
 
 #include <math.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -77,12 +78,16 @@ void parseMultiIndex(const char *optarg, struct MultiIndex *multiIndex) {
       }
 
       multiIndex->indexes[(multiIndex->count)++] = index;
+      if (components == 1 || (components == 2 && c != '-')) {
+        break; // no more tokens
+      }
       if (c == '-') { // range is specified: get range end
         if (components < 3) {
           errOutput("Invalid multi-index string \"%s\".", optarg);
         }
 
         strcpy(s1, s2); // s2 -> s1
+        bool has_remainder = strchr(s1, ',') != NULL;
         sscanf(s1, "%d,%s", &index, s2);
         size_t count = index - multiIndex->indexes[(multiIndex->count) - 1];
 
@@ -93,6 +98,11 @@ void parseMultiIndex(const char *optarg, struct MultiIndex *multiIndex) {
         for (int j = multiIndex->indexes[(multiIndex->count) - 1] + 1;
              j <= index; j++) {
           multiIndex->indexes[(multiIndex->count)++] = j;
+        }
+        if (!has_remainder) {
+          free(s2);
+          s2 = NULL;
+          s1[0] = '\0';
         }
       }
     } else {
