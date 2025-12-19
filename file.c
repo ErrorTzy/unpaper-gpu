@@ -163,10 +163,7 @@ static bool saveImageDirect(const char *filename, Image output) {
     for (int y = 0; y < height; y++) {
       const uint8_t *src =
           output.frame->data[0] + y * output.frame->linesize[0];
-      for (int x = 0; x < row_bytes; x++) {
-        uint8_t inverted = src[x] ^ 0xFF;
-        fputc(inverted, f);
-      }
+      fwrite(src, 1, row_bytes, f);
     }
     break;
   }
@@ -222,7 +219,7 @@ void saveImage(char *filename, Image input, int outputPixFmt) {
           int bit_index = x % 8;
           if (bit_index == 0)
             dst[x / 8] = 0;
-          if (gray > 127)
+          if (gray < input.abs_black_threshold)
             dst[x / 8] |= (0x80 >> bit_index);
         }
       }
@@ -237,7 +234,7 @@ void saveImage(char *filename, Image input, int outputPixFmt) {
           int bit_index = x % 8;
           if (bit_index == 0)
             dst[x / 8] = 0;
-          if (src[x] > 127)
+          if (src[x] < input.abs_black_threshold)
             dst[x / 8] |= (0x80 >> bit_index);
         }
       }
