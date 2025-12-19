@@ -117,11 +117,10 @@ def run_batch(binary: Path, input_pattern: str, output_pattern: str,
 
 def bench_configuration(binary: Path, input_pattern: str, output_pattern: str,
                         count: int, warmup: int, iterations: int,
-                        jpeg_quality: int = 85) -> tuple[float, float]:
+                        jpeg_quality: int = 85, jobs: int = 8,
+                        streams: int = 8) -> tuple[float, float]:
     """Benchmark a specific configuration and return mean/stdev."""
     samples = []
-    jobs = 8
-    streams = 8
 
     for i in range(warmup + iterations):
         try:
@@ -200,6 +199,18 @@ def main() -> int:
         help="JPEG quality for GPU pipeline output (1-100, default: 85)",
     )
     parser.add_argument(
+        "--jobs",
+        default=8,
+        type=int,
+        help="Number of batch jobs/threads (default: 8)",
+    )
+    parser.add_argument(
+        "--streams",
+        default=8,
+        type=int,
+        help="Number of CUDA streams (default: 8)",
+    )
+    parser.add_argument(
         "--verify-speedup",
         action="store_true",
         help="Verify GPU pipeline achieves performance improvement",
@@ -250,7 +261,8 @@ def main() -> int:
         print("Standard CUDA batch (JPEG -> GPU -> D2H -> PBM)...", end=" ", flush=True)
         std_mean, std_stdev = bench_configuration(
             binary, input_pattern, output_pattern_pbm,
-            args.images, args.warmup, args.iterations
+            args.images, args.warmup, args.iterations,
+            jobs=args.jobs, streams=args.streams,
         )
         print(f"{std_mean:.0f}ms (stdev={std_stdev:.0f}ms)")
 
@@ -264,7 +276,8 @@ def main() -> int:
         gpu_mean, gpu_stdev = bench_configuration(
             binary, input_pattern, output_pattern_jpg,
             args.images, args.warmup, args.iterations,
-            jpeg_quality=args.jpeg_quality
+            jpeg_quality=args.jpeg_quality,
+            jobs=args.jobs, streams=args.streams,
         )
         print(f"{gpu_mean:.0f}ms (stdev={gpu_stdev:.0f}ms)")
 

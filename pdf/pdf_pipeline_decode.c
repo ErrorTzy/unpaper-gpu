@@ -11,7 +11,6 @@
 #endif
 
 #include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
 #include <libavutil/frame.h>
 #include <libavutil/imgutils.h>
@@ -50,8 +49,10 @@ static AVFrame *decode_jbig2_to_frame(const PdfImage *pdf_img) {
     return NULL;
   }
 
+  // JBIG2 bitmaps are 1=black, 0=white. unpaper expects grayscale where
+  // black=0 and white=255, so do not invert here.
   if (!jbig2_expand_to_gray8(&jbig2_img, frame->data[0],
-                             (size_t)frame->linesize[0], true)) {
+                             (size_t)frame->linesize[0], false)) {
     verboseLog(VERBOSE_MORE, "JBIG2 expand failed: %s\n",
                jbig2_get_last_error());
     av_frame_free(&frame);
@@ -64,115 +65,80 @@ static AVFrame *decode_jbig2_to_frame(const PdfImage *pdf_img) {
 }
 #endif
 
+static AVFrame *decode_codec_bytes(const uint8_t *data, size_t size,
+                                   enum AVCodecID codec_id) {
+  if (data == NULL || size == 0) {
+    return NULL;
+  }
+
+  const AVCodec *codec = avcodec_find_decoder(codec_id);
+  if (codec == NULL) {
+    return NULL;
+  }
+
+  AVCodecContext *codec_ctx = avcodec_alloc_context3(codec);
+  if (codec_ctx == NULL) {
+    return NULL;
+  }
+
+  if (avcodec_open2(codec_ctx, codec, NULL) < 0) {
+    avcodec_free_context(&codec_ctx);
+    return NULL;
+  }
+
+  AVPacket *pkt = av_packet_alloc();
+  if (pkt == NULL) {
+    avcodec_free_context(&codec_ctx);
+    return NULL;
+  }
+
+  int ret = av_new_packet(pkt, (int)size);
+  if (ret < 0) {
+    av_packet_free(&pkt);
+    avcodec_free_context(&codec_ctx);
+    return NULL;
+  }
+  memcpy(pkt->data, data, size);
+
+  ret = avcodec_send_packet(codec_ctx, pkt);
+  av_packet_free(&pkt);
+  if (ret < 0) {
+    avcodec_free_context(&codec_ctx);
+    return NULL;
+  }
+
+  AVFrame *frame = av_frame_alloc();
+  if (frame == NULL) {
+    avcodec_free_context(&codec_ctx);
+    return NULL;
+  }
+
+  ret = avcodec_receive_frame(codec_ctx, frame);
+  avcodec_free_context(&codec_ctx);
+  if (ret < 0) {
+    av_frame_free(&frame);
+    return NULL;
+  }
+
+  return frame;
+}
+
 static AVFrame *decode_image_bytes(const uint8_t *data, size_t size,
                                    PdfImageFormat format) {
   if (data == NULL || size == 0) {
     return NULL;
   }
 
-  if (format != PDF_IMAGE_JPEG && format != PDF_IMAGE_PNG &&
-      format != PDF_IMAGE_FLATE) {
-    return NULL;
+  if (format == PDF_IMAGE_JPEG) {
+    return decode_codec_bytes(data, size, AV_CODEC_ID_MJPEG);
+  }
+  if (format == PDF_IMAGE_PNG) {
+    return decode_codec_bytes(data, size, AV_CODEC_ID_PNG);
   }
 
-  AVFormatContext *fmt_ctx = NULL;
-  AVCodecContext *codec_ctx = NULL;
-  const AVCodec *codec = NULL;
-  AVFrame *frame = NULL;
-  AVPacket *pkt = NULL;
-  int ret;
-
-  uint8_t *avio_ctx_buffer = av_malloc(size);
-  if (!avio_ctx_buffer) {
-    return NULL;
-  }
-  memcpy(avio_ctx_buffer, data, size);
-
-  AVIOContext *avio_ctx =
-      avio_alloc_context(avio_ctx_buffer, (int)size, 0, NULL, NULL, NULL, NULL);
-  if (!avio_ctx) {
-    av_free(avio_ctx_buffer);
-    return NULL;
-  }
-
-  fmt_ctx = avformat_alloc_context();
-  if (!fmt_ctx) {
-    avio_context_free(&avio_ctx);
-    return NULL;
-  }
-  fmt_ctx->pb = avio_ctx;
-
-  ret = avformat_open_input(&fmt_ctx, NULL, NULL, NULL);
-  if (ret < 0) {
-    goto cleanup;
-  }
-
-  ret = avformat_find_stream_info(fmt_ctx, NULL);
-  if (ret < 0 || fmt_ctx->nb_streams < 1) {
-    goto cleanup;
-  }
-
-  codec = avcodec_find_decoder(fmt_ctx->streams[0]->codecpar->codec_id);
-  if (!codec) {
-    goto cleanup;
-  }
-
-  codec_ctx = avcodec_alloc_context3(codec);
-  if (!codec_ctx) {
-    goto cleanup;
-  }
-
-  ret = avcodec_parameters_to_context(codec_ctx, fmt_ctx->streams[0]->codecpar);
-  if (ret < 0) {
-    goto cleanup;
-  }
-
-  ret = avcodec_open2(codec_ctx, codec, NULL);
-  if (ret < 0) {
-    goto cleanup;
-  }
-
-  pkt = av_packet_alloc();
-  if (!pkt) {
-    goto cleanup;
-  }
-
-  ret = av_read_frame(fmt_ctx, pkt);
-  if (ret < 0) {
-    goto cleanup;
-  }
-
-  ret = avcodec_send_packet(codec_ctx, pkt);
-  if (ret < 0) {
-    goto cleanup;
-  }
-
-  frame = av_frame_alloc();
-  if (!frame) {
-    goto cleanup;
-  }
-
-  ret = avcodec_receive_frame(codec_ctx, frame);
-  if (ret < 0) {
-    av_frame_free(&frame);
-    frame = NULL;
-  }
-
-cleanup:
-  if (pkt) {
-    av_packet_free(&pkt);
-  }
-  if (codec_ctx) {
-    avcodec_free_context(&codec_ctx);
-  }
-  if (fmt_ctx) {
-    avformat_close_input(&fmt_ctx);
-  }
-  if (avio_ctx) {
-    avio_context_free(&avio_ctx);
-  }
-
-  return frame;
+  // Flate-compressed PDF image streams are not necessarily standalone PNGs;
+  // fall back to MuPDF rendering when we can't decode directly.
+  return NULL;
 }
 
 AVFrame *pdf_pipeline_render_page_to_frame(PdfDocument *doc, int page_idx,
@@ -208,6 +174,43 @@ AVFrame *pdf_pipeline_render_page_to_frame(PdfDocument *doc, int page_idx,
   return frame;
 }
 
+static AVFrame *pdf_pipeline_render_page_to_frame_size(PdfDocument *doc,
+                                                       int page_idx,
+                                                       int target_width,
+                                                       int target_height) {
+  int width = 0, height = 0, stride = 0;
+  uint8_t *pixels = pdf_render_page_to_size(doc, page_idx, target_width,
+                                            target_height, &width, &height,
+                                            &stride);
+  if (!pixels) {
+    return NULL;
+  }
+
+  AVFrame *frame = av_frame_alloc();
+  if (!frame) {
+    free(pixels);
+    return NULL;
+  }
+
+  frame->width = width;
+  frame->height = height;
+  frame->format = AV_PIX_FMT_RGB24;
+
+  if (av_frame_get_buffer(frame, 0) < 0) {
+    av_frame_free(&frame);
+    free(pixels);
+    return NULL;
+  }
+
+  for (int y = 0; y < height; y++) {
+    memcpy(frame->data[0] + y * frame->linesize[0],
+           pixels + (size_t)y * (size_t)stride, (size_t)width * 3);
+  }
+
+  free(pixels);
+  return frame;
+}
+
 AVFrame *pdf_pipeline_decode_image_to_frame(const PdfImage *pdf_img) {
   if (pdf_img == NULL) {
     return NULL;
@@ -234,17 +237,25 @@ AVFrame *pdf_pipeline_decode_page_to_frame(PdfDocument *doc, int page_idx,
   }
 
   AVFrame *frame = NULL;
+  int extracted_w = 0;
+  int extracted_h = 0;
 
   PdfImage pdf_img = {0};
   if (pdf_extract_page_image(doc, page_idx, &pdf_img)) {
+    extracted_w = pdf_img.width;
+    extracted_h = pdf_img.height;
     frame = pdf_pipeline_decode_image_to_frame(&pdf_img);
     pdf_free_image(&pdf_img);
   }
 
   if (!frame) {
-    frame = pdf_pipeline_render_page_to_frame(doc, page_idx, dpi);
+    if (extracted_w > 0 && extracted_h > 0) {
+      frame = pdf_pipeline_render_page_to_frame_size(doc, page_idx, extracted_w,
+                                                     extracted_h);
+    } else {
+      frame = pdf_pipeline_render_page_to_frame(doc, page_idx, dpi);
+    }
   }
 
   return frame;
 }
-

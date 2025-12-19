@@ -147,21 +147,31 @@ static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
 typedef struct {
   PdfDocument *doc;
   int render_dpi;
+  int input_pages_per_sheet;
+  int total_pages;
 } PdfDecodeQueueContext;
 
 static bool pdf_decode_queue_decoder(void *user_ctx, const BatchJob *job,
                                      int job_index, int input_index,
                                      DecodedImage *out) {
   (void)job;
-  (void)input_index;
 
   PdfDecodeQueueContext *ctx = (PdfDecodeQueueContext *)user_ctx;
   if (!ctx || !ctx->doc || !out) {
     return false;
   }
 
+  if (ctx->input_pages_per_sheet < 1) {
+    return false;
+  }
+
+  int page_idx = job_index * ctx->input_pages_per_sheet + input_index;
+  if (page_idx < 0 || page_idx >= ctx->total_pages) {
+    return false;
+  }
+
   AVFrame *frame =
-      pdf_pipeline_decode_page_to_frame(ctx->doc, job_index, ctx->render_dpi);
+      pdf_pipeline_decode_page_to_frame(ctx->doc, page_idx, ctx->render_dpi);
   out->frame = frame;
   out->valid = (frame != NULL);
   out->uses_pinned_memory = false;
@@ -177,6 +187,77 @@ typedef struct {
   const Options *options;
 } PdfBatchWriteContext;
 
+static bool pdf_submit_image_as_page(PdfPageAccumulator *accumulator,
+                                     const Options *options, Image *image,
+                                     int page_index) {
+  if (accumulator == NULL || options == NULL || image == NULL ||
+      image->frame == NULL || page_index < 0) {
+    return false;
+  }
+
+  image_ensure_cpu(image);
+
+  int out_width = image->frame->width;
+  int out_height = image->frame->height;
+  int stride = image->frame->linesize[0];
+  int dpi =
+      options->pdf_render_dpi > 0 ? options->pdf_render_dpi : PDF_RENDER_DPI;
+
+  int quality = (options->jpeg_quality > 0) ? options->jpeg_quality
+                                            : PDF_OUTPUT_JPEG_QUALITY;
+
+  size_t jpeg_len = 0;
+  uint8_t *jpeg_data = encode_image_jpeg(image, quality, &jpeg_len);
+
+  if (jpeg_data && jpeg_len > 0) {
+    PdfEncodedPage page = {0};
+    page.page_index = page_index;
+    page.type = PDF_PAGE_DATA_JPEG;
+    page.data = jpeg_data; // Ownership transfers to accumulator
+    page.data_size = jpeg_len;
+    page.width = out_width;
+    page.height = out_height;
+    page.dpi = dpi;
+
+    if (!pdf_page_accumulator_submit(accumulator, &page)) {
+      free(jpeg_data);
+      return false;
+    }
+
+    return true;
+  }
+
+  // Fallback to raw pixels
+  PdfPixelFormat fmt =
+      (image->frame->format == AV_PIX_FMT_GRAY8) ? PDF_PIXEL_GRAY8
+                                                 : PDF_PIXEL_RGB24;
+
+  size_t pixel_size = (size_t)stride * (size_t)out_height;
+  uint8_t *pixels = malloc(pixel_size);
+  if (!pixels) {
+    return false;
+  }
+  memcpy(pixels, image->frame->data[0], pixel_size);
+
+  PdfEncodedPage page = {0};
+  page.page_index = page_index;
+  page.type = PDF_PAGE_DATA_PIXELS;
+  page.data = pixels; // Ownership transfers to accumulator
+  page.data_size = pixel_size;
+  page.width = out_width;
+  page.height = out_height;
+  page.stride = stride;
+  page.pixel_format = fmt;
+  page.dpi = dpi;
+
+  if (!pdf_page_accumulator_submit(accumulator, &page)) {
+    free(pixels);
+    return false;
+  }
+
+  return true;
+}
+
 static bool pdf_batch_post_process(BatchWorkerContext *worker_ctx,
                                    size_t job_index, SheetProcessState *state,
                                    void *user_ctx) {
@@ -187,75 +268,58 @@ static bool pdf_batch_post_process(BatchWorkerContext *worker_ctx,
     return false;
   }
 
+  int output_pages = ctx->options->output_count;
+  if (output_pages < 1) {
+    output_pages = 1;
+  }
+  if (output_pages > BATCH_MAX_FILES_PER_SHEET) {
+    output_pages = BATCH_MAX_FILES_PER_SHEET;
+  }
+
+  int base_out_page = (int)job_index * output_pages;
+
   if (state->sheet.frame == NULL) {
-    pdf_page_accumulator_mark_failed(ctx->accumulator, (int)job_index);
+    for (int o = 0; o < output_pages; o++) {
+      pdf_page_accumulator_mark_failed(ctx->accumulator, base_out_page + o);
+    }
     return false;
   }
 
-  image_ensure_cpu(&state->sheet);
+  bool ok = true;
 
-  int out_width = state->sheet.frame->width;
-  int out_height = state->sheet.frame->height;
-  int stride = state->sheet.frame->linesize[0];
-  int dpi = ctx->options->pdf_render_dpi > 0 ? ctx->options->pdf_render_dpi
-                                             : PDF_RENDER_DPI;
+  if (output_pages == 1) {
+    if (!pdf_submit_image_as_page(ctx->accumulator, ctx->options, &state->sheet,
+                                  base_out_page)) {
+      pdf_page_accumulator_mark_failed(ctx->accumulator, base_out_page);
+      ok = false;
+    }
+    return ok;
+  }
 
-  int quality = (ctx->options->jpeg_quality > 0) ? ctx->options->jpeg_quality
-                                                 : PDF_OUTPUT_JPEG_QUALITY;
+  int sheet_width = state->sheet.frame->width;
+  int sheet_height = state->sheet.frame->height;
+  int page_width = sheet_width / output_pages;
 
-  size_t jpeg_len = 0;
-  uint8_t *jpeg_data = encode_image_jpeg(&state->sheet, quality, &jpeg_len);
+  for (int o = 0; o < output_pages; o++) {
+    Image page_img = create_compatible_image(
+        state->sheet, (RectangleSize){.width = page_width, .height = sheet_height},
+        false);
 
-  if (jpeg_data && jpeg_len > 0) {
-    PdfEncodedPage page = {0};
-    page.page_index = (int)job_index;
-    page.type = PDF_PAGE_DATA_JPEG;
-    page.data = jpeg_data; // Ownership transfers to accumulator
-    page.data_size = jpeg_len;
-    page.width = out_width;
-    page.height = out_height;
-    page.dpi = dpi;
+    copy_rectangle(state->sheet, page_img,
+                   (Rectangle){{{page_width * o, 0},
+                                {page_width * o + page_width, sheet_height}}},
+                   POINT_ORIGIN);
 
-    if (!pdf_page_accumulator_submit(ctx->accumulator, &page)) {
-      free(jpeg_data);
-      pdf_page_accumulator_mark_failed(ctx->accumulator, (int)job_index);
-      return false;
+    if (!pdf_submit_image_as_page(ctx->accumulator, ctx->options, &page_img,
+                                  base_out_page + o)) {
+      pdf_page_accumulator_mark_failed(ctx->accumulator, base_out_page + o);
+      ok = false;
     }
 
-    return true;
+    free_image(&page_img);
   }
 
-  // Fallback to raw pixels
-  PdfPixelFormat fmt = (state->sheet.frame->format == AV_PIX_FMT_GRAY8)
-                           ? PDF_PIXEL_GRAY8
-                           : PDF_PIXEL_RGB24;
-
-  size_t pixel_size = (size_t)stride * (size_t)out_height;
-  uint8_t *pixels = malloc(pixel_size);
-  if (!pixels) {
-    pdf_page_accumulator_mark_failed(ctx->accumulator, (int)job_index);
-    return false;
-  }
-  memcpy(pixels, state->sheet.frame->data[0], pixel_size);
-
-  PdfEncodedPage page = {0};
-  page.page_index = (int)job_index;
-  page.type = PDF_PAGE_DATA_PIXELS;
-  page.data = pixels; // Ownership transfers to accumulator
-  page.data_size = pixel_size;
-  page.width = out_width;
-  page.height = out_height;
-  page.stride = stride;
-  page.pixel_format = fmt;
-  page.dpi = dpi;
-
-  if (!pdf_page_accumulator_submit(ctx->accumulator, &page)) {
-    free(pixels);
-    pdf_page_accumulator_mark_failed(ctx->accumulator, (int)job_index);
-    return false;
-  }
-
-  return true;
+  return ok;
 }
 
 int pdf_pipeline_cpu_process_batch(const char *input_path,
@@ -290,7 +354,29 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
     return -1;
   }
 
-  int dpi = options->pdf_render_dpi > 0 ? options->pdf_render_dpi : PDF_RENDER_DPI;
+  int input_pages = options->input_count;
+  if (input_pages < 1) {
+    input_pages = 1;
+  }
+  int output_pages = options->output_count;
+  if (output_pages < 1) {
+    output_pages = 1;
+  }
+  if (input_pages > BATCH_MAX_FILES_PER_SHEET ||
+      output_pages > BATCH_MAX_FILES_PER_SHEET) {
+    verboseLog(VERBOSE_NORMAL,
+               "PDF pipeline (CPU batch): --input-pages/--output-pages > %d "
+               "not supported\n",
+               BATCH_MAX_FILES_PER_SHEET);
+    pdf_close(doc);
+    return -1;
+  }
+
+  int sheet_count = (page_count + input_pages - 1) / input_pages;
+  int output_page_count = sheet_count * output_pages;
+
+  int dpi =
+      options->pdf_render_dpi > 0 ? options->pdf_render_dpi : PDF_RENDER_DPI;
 
   PdfMetadata meta = pdf_get_metadata(doc);
   PdfWriter *writer = pdf_writer_create(output_path, &meta, dpi);
@@ -305,7 +391,7 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   }
 
   PdfPageAccumulator *accumulator =
-      pdf_page_accumulator_create(writer, page_count);
+      pdf_page_accumulator_create(writer, output_page_count);
   if (accumulator == NULL) {
     verboseLog(VERBOSE_NORMAL,
                "PDF pipeline (CPU batch): failed to create accumulator\n");
@@ -319,8 +405,8 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   if (workers <= 0) {
     workers = batch_detect_parallelism();
   }
-  if (workers > page_count) {
-    workers = page_count;
+  if (workers > sheet_count) {
+    workers = sheet_count;
   }
   if (workers < 1) {
     workers = 1;
@@ -348,27 +434,38 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   batch_queue.progress = progress;
 
   bool queue_ok = true;
-  for (int i = 0; i < page_count; i++) {
+  for (int sheet_idx = 0; sheet_idx < sheet_count; sheet_idx++) {
     BatchJob *job = batch_queue_add(&batch_queue);
     if (!job) {
       queue_ok = false;
       break;
     }
-    job->sheet_nr = i + 1;
-    job->input_count = 1;
-    job->output_count = 0;
-    // Provide a stable "input" string so the generic worker requests decode.
-    // (The actual decode comes from the custom decode_queue decoder.)
-    char buf[128];
-    snprintf(buf, sizeof(buf), "PDF page %d", i + 1);
-    job->input_files[0] = strdup(buf);
-    if (job->input_files[0] == NULL) {
-      queue_ok = false;
+
+    job->sheet_nr = sheet_idx + 1;
+    job->output_count = output_pages;
+
+    int first_page = sheet_idx * input_pages;
+    int remaining = page_count - first_page;
+    int job_inputs = remaining < input_pages ? remaining : input_pages;
+    job->input_count = job_inputs;
+
+    for (int i = 0; i < job_inputs; i++) {
+      // Provide a stable "input" string so the generic worker requests decode.
+      // (The actual decode comes from the custom decode_queue decoder.)
+      char buf[128];
+      snprintf(buf, sizeof(buf), "PDF page %d", first_page + i + 1);
+      job->input_files[i] = strdup(buf);
+      if (job->input_files[i] == NULL) {
+        queue_ok = false;
+        break;
+      }
+    }
+    if (!queue_ok) {
       break;
     }
   }
 
-  if (!queue_ok || (int)batch_queue.count != page_count) {
+  if (!queue_ok || (int)batch_queue.count != sheet_count) {
     batch_queue_free(&batch_queue);
     pdf_page_accumulator_destroy(accumulator);
     pdf_writer_abort(writer);
@@ -398,7 +495,10 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
     return -1;
   }
 
-  PdfDecodeQueueContext decode_ctx = {.doc = doc, .render_dpi = dpi};
+  PdfDecodeQueueContext decode_ctx = {.doc = doc,
+                                      .render_dpi = dpi,
+                                      .input_pages_per_sheet = input_pages,
+                                      .total_pages = page_count};
   decode_queue_set_custom_decoder(decode_queue, pdf_decode_queue_decoder,
                                   &decode_ctx);
 
@@ -445,7 +545,9 @@ int pdf_pipeline_cpu_process_batch(const char *input_path,
   for (size_t i = 0; i < batch_queue.count; i++) {
     BatchJob *job = batch_queue_get(&batch_queue, i);
     if (job && job->status != BATCH_JOB_COMPLETED) {
-      pdf_page_accumulator_mark_failed(accumulator, (int)i);
+      for (int o = 0; o < output_pages; o++) {
+        pdf_page_accumulator_mark_failed(accumulator, (int)i * output_pages + o);
+      }
     }
   }
 

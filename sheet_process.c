@@ -14,6 +14,7 @@
 #include "unpaper.h"
 
 #include <libavutil/pixfmt.h>
+#include <libswscale/swscale.h>
 #include <string.h>
 
 // isExcluded is already defined in parse.h (included via options.h)
@@ -182,7 +183,9 @@ bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
                                      false, options->sheet_background,
                                      options->abs_black_threshold);
           av_frame_free(&state->page.frame);
-          state->page.frame = av_frame_clone(decoded);
+          // Transfer ownership of the decoded frame into the Image.
+          state->page.frame = decoded;
+          state->decoded_frames[j] = NULL;
           break;
         case AV_PIX_FMT_PAL8: {
           state->page = create_image(size_of_rectangle(area), AV_PIX_FMT_RGB24,
@@ -195,13 +198,34 @@ bool process_sheet(SheetProcessState *state, const SheetProcessConfig *config) {
             set_pixel(state->page, (Point){x, y},
                       pixel_from_value(palette[palette_index]));
           }
+          av_frame_free(&decoded);
+          state->decoded_frames[j] = NULL;
         } break;
-        default:
-          state->page = EMPTY_IMAGE;
-          break;
+        default: {
+          // FFmpeg decoders may output YUV and other formats. Convert to RGB24
+          // so the rest of the pipeline can operate on it.
+          state->page = create_image(size_of_rectangle(area), AV_PIX_FMT_RGB24,
+                                     false, options->sheet_background,
+                                     options->abs_black_threshold);
+
+          struct SwsContext *sws_ctx = sws_getContext(
+              decoded->width, decoded->height, (enum AVPixelFormat)decoded->format,
+              decoded->width, decoded->height, AV_PIX_FMT_RGB24, SWS_BILINEAR,
+              NULL, NULL, NULL);
+          if (sws_ctx == NULL) {
+            free_image(&state->page);
+            state->page = EMPTY_IMAGE;
+          } else {
+            sws_scale(sws_ctx, (const uint8_t *const *)decoded->data,
+                      decoded->linesize, 0, decoded->height, state->page.frame->data,
+                      state->page.frame->linesize);
+            sws_freeContext(sws_ctx);
+          }
+
+          av_frame_free(&decoded);
+          state->decoded_frames[j] = NULL;
+        } break;
         }
-        // Clear the decoded frame pointer (ownership moved)
-        state->decoded_frames[j] = NULL;
       } else {
         // Load from file
         loadImage(state->input_files[j], &state->page,

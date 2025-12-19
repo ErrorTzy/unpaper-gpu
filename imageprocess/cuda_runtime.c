@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "lib/logging.h"
 
@@ -46,6 +47,14 @@ static DriverApiSymbols driver_syms;
 static bool driver_syms_loaded = false;
 static bool cuda_initialized = false;
 static cudaStream_t cuda_stream = NULL;
+static char cuda_init_detail[512] = {0};
+
+static void set_cuda_init_detail(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(cuda_init_detail, sizeof(cuda_init_detail), fmt, ap);
+  va_end(ap);
+}
 
 typedef struct UnpaperCudaStream {
   cudaStream_t stream;
@@ -95,6 +104,9 @@ static bool load_driver_api_symbols(void) {
     driver_syms.lib = dlopen("libcuda.so", RTLD_LAZY);
   }
   if (driver_syms.lib == NULL) {
+    const char *err = dlerror();
+    set_cuda_init_detail("dlopen(libcuda.so.1/libcuda.so) failed: %s",
+                         err ? err : "(unknown)");
     return false;
   }
 
@@ -109,6 +121,14 @@ static bool load_driver_api_symbols(void) {
   driver_syms.cuGetErrorString =
       (cuGetErrorString_fn)load_driver_sym("cuGetErrorString");
 
+  if (driver_syms.cuModuleLoadData == NULL) {
+    set_cuda_init_detail("missing Driver API symbol: cuModuleLoadData");
+  } else if (driver_syms.cuModuleGetFunction == NULL) {
+    set_cuda_init_detail("missing Driver API symbol: cuModuleGetFunction");
+  } else if (driver_syms.cuLaunchKernel == NULL) {
+    set_cuda_init_detail("missing Driver API symbol: cuLaunchKernel");
+  }
+
   return driver_syms.cuModuleLoadData != NULL &&
          driver_syms.cuModuleGetFunction != NULL &&
          driver_syms.cuLaunchKernel != NULL;
@@ -119,25 +139,59 @@ UnpaperCudaInitStatus unpaper_cuda_try_init(void) {
     return UNPAPER_CUDA_INIT_OK;
   }
 
+  cuda_init_detail[0] = '\0';
+
   // Check device count using Runtime API
   int device_count = 0;
   cudaError_t err = cudaGetDeviceCount(&device_count);
   if (err != cudaSuccess) {
+    int driver_ver = 0;
+    int runtime_ver = 0;
+    (void)cudaDriverGetVersion(&driver_ver);
+    (void)cudaRuntimeGetVersion(&runtime_ver);
+    const char *visible = getenv("CUDA_VISIBLE_DEVICES");
+
+    // Distinguish common failure modes to help users diagnose environment vs
+    // build issues.
+    if (err == cudaErrorNoDevice) {
+      set_cuda_init_detail(
+          "cudaGetDeviceCount: %s (CUDA_VISIBLE_DEVICES=%s)",
+          cudaGetErrorString(err), visible ? visible : "(unset)");
+      return UNPAPER_CUDA_INIT_NO_DEVICE;
+    }
+    if (err == cudaErrorInsufficientDriver) {
+      set_cuda_init_detail(
+          "cudaGetDeviceCount: %s (driver=%d, runtime=%d, "
+          "CUDA_VISIBLE_DEVICES=%s)",
+          cudaGetErrorString(err), driver_ver, runtime_ver,
+          visible ? visible : "(unset)");
+      return UNPAPER_CUDA_INIT_NO_RUNTIME;
+    }
+
+    set_cuda_init_detail(
+        "cudaGetDeviceCount: %s (driver=%d, runtime=%d, CUDA_VISIBLE_DEVICES=%s)",
+        cudaGetErrorString(err), driver_ver, runtime_ver,
+        visible ? visible : "(unset)");
     return UNPAPER_CUDA_INIT_ERROR;
   }
   if (device_count <= 0) {
+    const char *visible = getenv("CUDA_VISIBLE_DEVICES");
+    set_cuda_init_detail("cudaGetDeviceCount returned %d (CUDA_VISIBLE_DEVICES=%s)",
+                         device_count, visible ? visible : "(unset)");
     return UNPAPER_CUDA_INIT_NO_DEVICE;
   }
 
   // Initialize via Runtime API (sets up primary context)
   err = cudaSetDevice(0);
   if (err != cudaSuccess) {
+    set_cuda_init_detail("cudaSetDevice(0): %s", cudaGetErrorString(err));
     return UNPAPER_CUDA_INIT_ERROR;
   }
 
   // Create a stream
   err = cudaStreamCreate(&cuda_stream);
   if (err != cudaSuccess) {
+    set_cuda_init_detail("cudaStreamCreate: %s", cudaGetErrorString(err));
     return UNPAPER_CUDA_INIT_ERROR;
   }
 
@@ -150,6 +204,9 @@ UnpaperCudaInitStatus unpaper_cuda_try_init(void) {
     // This is an error since we need it for our kernels
     cudaStreamDestroy(cuda_stream);
     cuda_stream = NULL;
+    if (cuda_init_detail[0] == '\0') {
+      set_cuda_init_detail("Driver API symbols unavailable");
+    }
     return UNPAPER_CUDA_INIT_ERROR;
   }
 
@@ -162,12 +219,33 @@ const char *unpaper_cuda_init_status_string(UnpaperCudaInitStatus st) {
   case UNPAPER_CUDA_INIT_OK:
     return "CUDA is available.";
   case UNPAPER_CUDA_INIT_NO_RUNTIME:
-    return "CUDA support is compiled in, but the CUDA driver library is not "
+    if (cuda_init_detail[0] != '\0') {
+      static char buf[640];
+      snprintf(buf, sizeof(buf),
+               "CUDA support is compiled in, but the CUDA runtime/driver is not "
+               "available: %s",
+               cuda_init_detail);
+      return buf;
+    }
+    return "CUDA support is compiled in, but the CUDA runtime/driver is not "
            "available.";
   case UNPAPER_CUDA_INIT_NO_DEVICE:
-    return "CUDA support is compiled in, but no CUDA-capable devices were "
-           "found.";
+    if (cuda_init_detail[0] != '\0') {
+      static char buf[640];
+      snprintf(buf, sizeof(buf),
+               "CUDA support is compiled in, but no CUDA-capable devices were "
+               "found: %s",
+               cuda_init_detail);
+      return buf;
+    }
+    return "CUDA support is compiled in, but no CUDA-capable devices were found.";
   case UNPAPER_CUDA_INIT_ERROR:
+    if (cuda_init_detail[0] != '\0') {
+      static char buf[640];
+      snprintf(buf, sizeof(buf), "CUDA initialization failed: %s",
+               cuda_init_detail);
+      return buf;
+    }
     return "CUDA initialization failed.";
   }
   return "CUDA initialization failed.";

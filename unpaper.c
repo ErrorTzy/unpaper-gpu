@@ -1174,17 +1174,30 @@ int main(int argc, char *argv[]) {
   // PDF processing uses a separate pipeline that handles multi-page documents
   {
     // Get input and output file paths
-    // For PDF, we only support single input -> single output mode
+    // For PDF, we always take exactly one input filename and one output
+    // filename, regardless of --input-pages/--output-pages (which operate on
+    // pages-per-sheet, not on the number of filenames).
     const char *input_file = argv[optind];
-    int output_idx = optind + options.input_count;
-    const char *output_file = (output_idx < argc) ? argv[output_idx] : NULL;
+    const char *output_file = (optind + 1 < argc) ? argv[optind + 1] : NULL;
 
     if (input_file && output_file && pdf_pipeline_is_pdf(input_file) &&
         pdf_pipeline_is_pdf(output_file)) {
-      // Check for unsupported options with PDF mode
-      if (options.input_count != 1 || options.output_count != 1) {
-        errOutput("PDF mode only supports single input/output. "
-                  "Use --input-pages=1 --output-pages=1");
+      // PDF mode supports only one input PDF and one output PDF filename.
+      // Additional positional args would be ambiguous with the image-mode
+      // "N input files / M output files" convention.
+      if (argc != optind + 2) {
+        errOutput("PDF mode requires exactly one input PDF and one output PDF.");
+      }
+
+      // Enforce limits implied by the batch worker structures.
+      if (options.input_count < 1)
+        options.input_count = 1;
+      if (options.output_count < 1)
+        options.output_count = 1;
+      if (options.input_count > BATCH_MAX_FILES_PER_SHEET ||
+          options.output_count > BATCH_MAX_FILES_PER_SHEET) {
+        errOutput("PDF mode supports --input-pages/--output-pages up to %d.",
+                  BATCH_MAX_FILES_PER_SHEET);
       }
 
       // Check if input file exists

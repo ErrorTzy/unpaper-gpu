@@ -150,6 +150,18 @@ uint8_t *pdf_render_page(PdfDocument *doc, int page, int dpi, int *width,
 uint8_t *pdf_render_page_gray(PdfDocument *doc, int page, int dpi, int *width,
                               int *height, int *stride);
 
+// Render a page to RGB pixels, targeting a specific pixel size.
+// This is useful when page box rounding would otherwise cause small size drift
+// from the embedded raster image dimensions.
+uint8_t *pdf_render_page_to_size(PdfDocument *doc, int page, int target_width,
+                                 int target_height, int *width, int *height,
+                                 int *stride);
+
+// Render a page to grayscale pixels, targeting a specific pixel size.
+uint8_t *pdf_render_page_gray_to_size(PdfDocument *doc, int page,
+                                      int target_width, int target_height,
+                                      int *width, int *height, int *stride);
+
 // ============================================================================
 // Metadata
 // ============================================================================

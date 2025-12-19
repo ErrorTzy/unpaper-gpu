@@ -710,8 +710,8 @@ unpaper_expand_1bit_to_8bit(const uint8_t *src, int src_stride, uint8_t *dst,
   // Read one byte of packed 1-bit data
   const uint8_t packed = src[(size_t)y * (size_t)src_stride + (size_t)byte_x];
 
-  // Output pixel values based on invert flag
-  // JBIG2 typically: 1=black, 0=white (so invert=true gives expected grayscale)
+  // Output pixel values based on invert flag.
+  // JBIG2 typically: 1=black, 0=white, so invert=false gives black=0, white=255.
   const uint8_t val_bit_set = invert ? 255u : 0u;
   const uint8_t val_bit_clr = invert ? 0u : 255u;
 

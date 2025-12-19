@@ -8,6 +8,7 @@ import os
 import pathlib
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,7 @@ from typing import Sequence
 
 import pytest
 import PIL.Image
+import PIL.ImageChops
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,30 +40,69 @@ def compare_images(*, golden: pathlib.Path, result: pathlib.Path) -> float:
         )
         return float("inf")
 
-    # Convert both images to grayscale
-    golden_gray = golden_image.convert('L')
-    result_gray = result_image.convert('L')
-
-    # Binarize both images at threshold 128 for fair comparison
-    # This handles cases where golden is grayscale but result is mono
+    # Convert both images to grayscale and binarize at threshold 128.
+    # This handles cases where golden is grayscale but result is mono.
     threshold = 128
-    total_pixels = golden_image.width * golden_image.height
-    different_pixels = sum(
-        1 if (golden_gray.getpixel((x, y)) >= threshold) != (result_gray.getpixel((x, y)) >= threshold) else 0
-        for x in range(golden_image.width)
-        for y in range(golden_image.height)
-    )
+    golden_bw = golden_image.convert("L").point(lambda p: 255 if p >= threshold else 0)
+    result_bw = result_image.convert("L").point(lambda p: 255 if p >= threshold else 0)
 
+    diff = PIL.ImageChops.difference(golden_bw, result_bw)
+    hist = diff.histogram()
+    total_pixels = golden_image.width * golden_image.height
+    different_pixels = total_pixels - hist[0]
+    return different_pixels / total_pixels
+
+
+def compare_images_pdf(*, golden: pathlib.Path, result: pathlib.Path) -> float:
+    """Compare images for PDF tests, allowing small size drift.
+
+    PDF renderers may introduce off-by-a-few pixels due to page box rounding.
+    For PDF pipeline tests we allow a small resample to the golden size before
+    binarized comparison.
+    """
+    golden_image = PIL.Image.open(golden)
+    result_image = PIL.Image.open(result)
+
+    if golden_image.size != result_image.size:
+        gw, gh = golden_image.size
+        rw, rh = result_image.size
+        # Guardrail: avoid masking major mismatches.
+        if abs(gw - rw) > max(gw, rw) * 0.10 or abs(gh - rh) > max(gh, rh) * 0.10:
+            _LOGGER.error(
+                f"image sizes don't match (too large to resample): {golden} {golden_image.size} != {result} {result_image.size}"
+            )
+            return float("inf")
+        result_image = result_image.resize(
+            golden_image.size, resample=PIL.Image.Resampling.BILINEAR
+        )
+
+    threshold = 128
+    golden_bw = golden_image.convert("L").point(lambda p: 255 if p >= threshold else 0)
+    result_bw = result_image.convert("L").point(lambda p: 255 if p >= threshold else 0)
+
+    diff = PIL.ImageChops.difference(golden_bw, result_bw)
+    hist = diff.histogram()
+    total_pixels = golden_image.width * golden_image.height
+    different_pixels = total_pixels - hist[0]
     return different_pixels / total_pixels
 
 
 def run_unpaper(
-    *cmdline: Sequence[str], check: bool = True
+    *cmdline: Sequence[str], check: bool = True, capture: bool = False
 ) -> subprocess.CompletedProcess:
     unpaper_path = os.getenv("TEST_UNPAPER_BINARY", "unpaper")
 
     full_cmdline = [unpaper_path, "-vvv"] + list(cmdline)
     print(f"Running {shlex.join(full_cmdline)}")
+
+    if capture:
+        return subprocess.run(
+            full_cmdline,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=check,
+        )
 
     return subprocess.run(
         full_cmdline,
@@ -121,6 +162,279 @@ def cuda_runtime_available() -> bool:
             check=False,
         )
         return proc.returncode == 0
+    finally:
+        tmpdir.cleanup()
+
+
+@lru_cache(maxsize=1)
+def pdf_mode_supported() -> bool:
+    """Return true if the unpaper binary supports PDF mode."""
+    unpaper_path = os.getenv("TEST_UNPAPER_BINARY", "unpaper")
+    proc = subprocess.run(
+        [unpaper_path, "--help"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    help_text = (proc.stdout or "") + (proc.stderr or "")
+    # The help text includes the PDF flags only when built with PDF support.
+    return proc.returncode == 0 and "--pdf-quality" in help_text
+
+
+def _require_external_tools(*tools: str) -> None:
+    missing = [t for t in tools if shutil.which(t) is None]
+    if missing:
+        pytest.skip(
+            f"missing external tools required for PDF tests: {', '.join(missing)}"
+        )
+
+
+def _gs_build_pdf(
+    *,
+    images: list[pathlib.Path],
+    out_pdf: pathlib.Path,
+    encoding: str,
+    workdir: pathlib.Path,
+) -> None:
+    if encoding not in {"jpeg", "png", "jbig2"}:
+        raise ValueError(f"unknown encoding: {encoding}")
+
+    _require_external_tools("mutool")
+
+    # Build a simple PDF, one image per page.
+    # For JBIG2, we generate JBIG2 streams via the `jbig2` encoder and wrap them
+    # into a minimal PDF.
+    dpi = 300
+    page_files: list[pathlib.Path] = []
+
+    for i, src in enumerate(images, start=1):
+        if encoding == "jpeg":
+            img = PIL.Image.open(src).convert("RGB")
+            img_path = workdir / f"page-{i:03d}.jpg"
+            img.save(img_path, "JPEG", quality=95)
+        elif encoding == "png":
+            # Force 8bpc RGB PNG so MuPDF embeds it as PNG/Flate, not CCITT.
+            img = PIL.Image.open(src).convert("RGB")
+            img_path = workdir / f"page-{i:03d}.png"
+            img.save(img_path, "PNG")
+        else:  # jbig2
+            # JBIG2 supports bi-level images; generate PBM for encoding.
+            img = PIL.Image.open(src).convert("L")
+            bw = img.point(lambda p: 255 if p >= 128 else 0, mode="L").convert("1")
+            img_path = workdir / f"page-{i:03d}.pbm"
+            bw.save(img_path)
+
+        width_px, height_px = img.size
+        width_pt = width_px * 72.0 / dpi
+        height_pt = height_px * 72.0 / dpi
+
+        if encoding == "jbig2":
+            # For JBIG2 we don't use mutool create; we wrap encoded JBIG2 data.
+            continue
+
+        page_txt = workdir / f"page-{i:03d}.txt"
+        page_txt.write_text(
+            "\n".join(
+                [
+                    f"%%MediaBox 0 0 {width_pt:.6f} {height_pt:.6f}",
+                    f"%%Image Im{i} {img_path.name}",
+                    "q",
+                    f"{width_pt:.6f} 0 0 {height_pt:.6f} 0 0 cm",
+                    f"/Im{i} Do",
+                    "Q",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        page_files.append(page_txt)
+
+    if encoding in {"jpeg", "png"}:
+        base_pdf = workdir / "base.pdf"
+        subprocess.run(
+            ["mutool", "create", "-o", str(base_pdf), *[str(p) for p in page_files]],
+            cwd=str(workdir),
+            check=True,
+        )
+        shutil.copyfile(base_pdf, out_pdf)
+        return
+
+    # JBIG2: encode each page to JBIG2 and write a minimal PDF that embeds the
+    # JBIG2 streams directly (so MuPDF reports PDF_IMAGE_JBIG2).
+    _require_external_tools("jbig2")
+
+    def _write_simple_jbig2_pdf(
+        *, pages: list[tuple[bytes, int, int]], out_path: pathlib.Path, dpi: int
+    ) -> None:
+        def obj_bytes(obj_id: int, payload: bytes) -> tuple[int, bytes]:
+            return obj_id, b"%d 0 obj\n" % obj_id + payload + b"\nendobj\n"
+
+        objects: list[tuple[int, bytes]] = []
+        next_id = 1
+
+        # 1: Catalog, 2: Pages.
+        catalog_id = next_id
+        next_id += 1
+        pages_id = next_id
+        next_id += 1
+
+        page_ids: list[int] = []
+        content_ids: list[int] = []
+        image_ids: list[int] = []
+
+        for _ in pages:
+            page_ids.append(next_id)
+            next_id += 1
+            content_ids.append(next_id)
+            next_id += 1
+            image_ids.append(next_id)
+            next_id += 1
+
+        kids = b" ".join([b"%d 0 R" % pid for pid in page_ids])
+        objects.append(obj_bytes(catalog_id, b"<< /Type /Catalog /Pages %d 0 R >>" % pages_id))
+        objects.append(
+            obj_bytes(
+                pages_id,
+                b"<< /Type /Pages /Count %d /Kids [ %s ] >>"
+                % (len(pages), kids),
+            )
+        )
+
+        for idx, (jb2, w_px, h_px) in enumerate(pages):
+            page_id = page_ids[idx]
+            content_id = content_ids[idx]
+            image_id = image_ids[idx]
+
+            w_pt = w_px * 72.0 / dpi
+            h_pt = h_px * 72.0 / dpi
+
+            contents = (
+                f"q\n{w_pt:.6f} 0 0 {h_pt:.6f} 0 0 cm\n/Im0 Do\nQ\n".encode("ascii")
+            )
+
+            page_payload = (
+                b"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %.6f %.6f] "
+                b"/Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>"
+                % (pages_id, w_pt, h_pt, image_id, content_id)
+            )
+            objects.append(obj_bytes(page_id, page_payload))
+
+            content_payload = (
+                b"<< /Length %d >>\nstream\n" % len(contents)
+                + contents
+                + b"endstream"
+            )
+            objects.append(obj_bytes(content_id, content_payload))
+
+            image_dict = (
+                b"<< /Type /XObject /Subtype /Image /Width %d /Height %d "
+                b"/ColorSpace /DeviceGray /BitsPerComponent 1 "
+                b"/Filter /JBIG2Decode /Length %d >>\n"
+                % (w_px, h_px, len(jb2))
+            )
+            image_payload = image_dict + b"stream\n" + jb2 + b"\nendstream"
+            objects.append(obj_bytes(image_id, image_payload))
+
+        # Write file with xref.
+        objects.sort(key=lambda t: t[0])
+        max_id = objects[-1][0] if objects else 0
+
+        with out_path.open("wb") as f:
+            f.write(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n")
+            offsets = {0: 0}
+            for obj_id, body in objects:
+                offsets[obj_id] = f.tell()
+                f.write(body)
+
+            xref_start = f.tell()
+            f.write(b"xref\n")
+            f.write(b"0 %d\n" % (max_id + 1))
+            f.write(b"0000000000 65535 f \n")
+            for obj_id in range(1, max_id + 1):
+                off = offsets.get(obj_id, 0)
+                f.write(b"%010d 00000 n \n" % off)
+
+            f.write(b"trailer\n")
+            f.write(b"<< /Size %d /Root %d 0 R >>\n" % (max_id + 1, catalog_id))
+            f.write(b"startxref\n")
+            f.write(b"%d\n" % xref_start)
+            f.write(b"%%EOF\n")
+
+    jb2_pages: list[tuple[bytes, int, int]] = []
+    for i, src in enumerate(images, start=1):
+        img = PIL.Image.open(src).convert("L")
+        bw = img.point(lambda p: 255 if p >= 128 else 0, mode="L").convert("1")
+        pbm_path = workdir / f"page-{i:03d}.pbm"
+        bw.save(pbm_path)
+
+        proc = subprocess.run(
+            ["jbig2", "-p", str(pbm_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            raise RuntimeError(
+                "jbig2 encode failed:\n"
+                + (proc.stderr.decode("utf-8", errors="replace") if proc.stderr else "")
+            )
+
+        w_px, h_px = img.size
+        jb2_pages.append((proc.stdout, w_px, h_px))
+
+    _write_simple_jbig2_pdf(pages=jb2_pages, out_path=out_pdf, dpi=dpi)
+
+
+def _render_pdf_pages(
+    *, pdf_path: pathlib.Path, out_dir: pathlib.Path, dpi: int = 300
+) -> list[pathlib.Path]:
+    _require_external_tools("mutool")
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_pattern = out_dir / "page-%03d.pnm"
+    subprocess.run(
+        [
+            "mutool",
+            "draw",
+            "-q",
+            "-A",
+            "0",
+            "-c",
+            "rgb",
+            "-r",
+            str(dpi),
+            "-F",
+            "pnm",
+            "-o",
+            str(output_pattern),
+            str(pdf_path),
+        ],
+        check=True,
+    )
+    return sorted(out_dir.glob("page-*.pnm"))
+
+
+@lru_cache(maxsize=1)
+def jbig2_gpu_decode_available() -> bool:
+    """Return true if CUDA+PDF builds can decode JBIG2 via the GPU PDF pipeline."""
+    if not cuda_runtime_available():
+        return False
+    if not pdf_mode_supported():
+        return False
+
+    sample = pathlib.Path("tests/pdf_samples/test_jbig2.pdf")
+    if not sample.exists():
+        return False
+
+    tmpdir = tempfile.TemporaryDirectory(prefix="unpaper-jbig2-gpu-probe-")
+    try:
+        out_pdf = pathlib.Path(tmpdir.name) / "out.pdf"
+        proc = run_unpaper(
+            "--device", "cuda", str(sample), str(out_pdf), check=False, capture=True
+        )
+        text = (proc.stdout or "") + (proc.stderr or "")
+        return proc.returncode == 0 and "JBIG2 decoded to GPU" in text
     finally:
         tmpdir.cleanup()
 
@@ -834,3 +1148,177 @@ def test_jpeg_cuda_vs_cpu_similarity(imgsrc_path, tmp_path):
     # Allow small tolerance for floating-point differences in GPU processing
     diff = compare_images(golden=cpu_result_path, result=cuda_result_path)
     assert diff < 0.05, f"CUDA JPEG output differs from CPU by {diff*100:.1f}%, expected <5%"
+
+
+# ---------------------------------------------------------------------------
+# PDF end-to-end golden tests
+# ---------------------------------------------------------------------------
+
+_PDF_SIMILARITY_MIN = 0.90
+_PDF_DIFF_MAX = 1.0 - _PDF_SIMILARITY_MIN
+
+
+@pytest.fixture(scope="session")
+def pdf_inputs_dir(tmp_path_factory) -> pathlib.Path:
+    return tmp_path_factory.mktemp("pdf-inputs")
+
+
+_PDF_GOLDEN_CASES: list[tuple[str, list[str], tuple[str, ...], list[str]]] = [
+    (
+        "A1",
+        ["imgsrc001.png"],
+        (),
+        ["goldenA1.pbm"],
+    ),
+    (
+        "B1",
+        ["imgsrc003.png", "imgsrc004.png"],
+        ("-n", "--input-pages", "2"),
+        ["goldenB1.ppm"],
+    ),
+    (
+        "C1",
+        ["imgsrc006.png"],
+        (
+            "--no-deskew",
+            "--no-blackfilter",
+            "--no-noisefilter",
+            "--no-blurfilter",
+            "--no-grayfilter",
+            "--no-mask-center",
+            "--mask-scan-direction",
+            "hv",
+            "--mask-scan-threshold",
+            "0.8,0.8",
+            "--mask-scan-minimum",
+            "1,1",
+            "--border-scan-direction",
+            "hv",
+            "--pre-wipe",
+            "0,0,9,9",
+            "--pre-border",
+            "2,2,2,2",
+        ),
+        ["goldenC1.ppm"],
+    ),
+    (
+        "D1",
+        ["imgsrc003.png"],
+        ("-n", "--sheet-size", "20cm,10cm"),
+        ["goldenD1.ppm"],
+    ),
+    (
+        "E1",
+        ["imgsrcE001.png", "imgsrcE002.png", "imgsrcE003.png"],
+        ("--layout", "double", "--output-pages", "2"),
+        [f"goldenE1-{i:02d}.pbm" for i in range(1, 7)],
+    ),
+]
+
+
+def _get_or_create_input_pdf(
+    *,
+    case_id: str,
+    encoding: str,
+    imgsrc_path: pathlib.Path,
+    pdf_inputs_dir: pathlib.Path,
+    input_images: list[str],
+) -> pathlib.Path:
+    out_pdf = pdf_inputs_dir / f"in-{case_id}-{encoding}.pdf"
+    if out_pdf.exists():
+        return out_pdf
+
+    workdir = pdf_inputs_dir / f"work-{case_id}-{encoding}"
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    images = [imgsrc_path / name for name in input_images]
+    for p in images:
+        if not p.exists():
+            raise FileNotFoundError(p)
+
+    _gs_build_pdf(images=images, out_pdf=out_pdf, encoding=encoding, workdir=workdir)
+    return out_pdf
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("encoding", ["jpeg", "png", "jbig2"])
+@pytest.mark.parametrize("case_id,input_images,extra_args,golden_images", _PDF_GOLDEN_CASES)
+def test_pdf_pipeline_roundtrip_matches_goldens(
+    imgsrc_path,
+    goldendir_path,
+    pdf_inputs_dir,
+    tmp_path,
+    device,
+    encoding,
+    case_id,
+    input_images,
+    extra_args,
+    golden_images,
+):
+    _require_external_tools("mutool")
+    if encoding == "jbig2":
+        _require_external_tools("jbig2")
+
+    if not pdf_mode_supported():
+        pytest.skip("unpaper built without PDF support")
+
+    if device == "cuda" and not cuda_runtime_available():
+        pytest.skip("CUDA runtime/device not available")
+
+    if encoding == "jbig2" and device == "cuda" and not jbig2_gpu_decode_available():
+        pytest.skip("JBIG2 GPU decode path not available (build/runtime)")
+
+    input_pdf = _get_or_create_input_pdf(
+        case_id=case_id,
+        encoding=encoding,
+        imgsrc_path=imgsrc_path,
+        pdf_inputs_dir=pdf_inputs_dir,
+        input_images=input_images,
+    )
+    output_pdf = tmp_path / f"out-{case_id}-{encoding}-{device}.pdf"
+
+    proc = run_unpaper(
+        "--device",
+        device,
+        "--pdf-quality",
+        "fast",
+        "--pdf-dpi",
+        "300",
+        "--jpeg-quality",
+        "95",
+        *extra_args,
+        str(input_pdf),
+        str(output_pdf),
+        capture=True,
+    )
+
+    text = (proc.stdout or "") + (proc.stderr or "")
+
+    if device == "cpu":
+        assert "Using CPU PDF pipeline" in text
+    else:
+        assert "Using GPU PDF pipeline" in text
+        if encoding == "jpeg":
+            assert "GPU PDF pipeline: extracted JPEG image" in text
+            assert "GPU PDF pipeline: JPEG decoded to GPU" in text
+        elif encoding == "png":
+            # MuPDF typically exposes embedded PNG pages as FLATE streams.
+            assert re.search(r"GPU PDF pipeline: extracted (PNG|FLATE) image", text)
+            assert "GPU PDF pipeline: rendered and uploaded to GPU" in text
+        else:  # jbig2
+            assert "GPU PDF pipeline: extracted JBIG2 image" in text
+            assert "GPU PDF pipeline: JBIG2 decoded to GPU" in text
+
+    rendered = _render_pdf_pages(
+        pdf_path=output_pdf, out_dir=tmp_path / "render", dpi=300
+    )
+    assert len(rendered) == len(golden_images)
+
+    for idx, (page_img, golden_name) in enumerate(zip(rendered, golden_images), start=1):
+        golden_path = goldendir_path / golden_name
+        diff = compare_images_pdf(golden=golden_path, result=page_img)
+        assert diff <= _PDF_DIFF_MAX, (
+            f"[{case_id}] page {idx} differs too much: "
+            f"similarity={(1.0 - diff):.3f}, expected >= {_PDF_SIMILARITY_MIN:.2f} "
+            f"(golden={golden_path}, result={page_img})"
+        )

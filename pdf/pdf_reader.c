@@ -584,6 +584,187 @@ uint8_t *pdf_render_page_gray(PdfDocument *doc, int page, int dpi, int *width,
   return result;
 }
 
+static void compute_ctm_bbox_for_target(fz_context *ctx, fz_page *fzpage,
+                                        int target_width, int target_height,
+                                        fz_matrix *ctm_out, fz_irect *bbox_out) {
+  fz_rect bounds = fz_bound_page(ctx, fzpage);
+  float bw = bounds.x1 - bounds.x0;
+  float bh = bounds.y1 - bounds.y0;
+
+  // Guard against degenerate pages.
+  if (bw <= 0.0f)
+    bw = 1.0f;
+  if (bh <= 0.0f)
+    bh = 1.0f;
+
+  float sx = (float)target_width / bw;
+  float sy = (float)target_height / bh;
+
+  fz_matrix ctm = fz_scale(sx, sy);
+  fz_irect bbox = fz_round_rect(fz_transform_rect(bounds, ctm));
+
+  // One adjustment pass to compensate for rounding.
+  int w = bbox.x1 - bbox.x0;
+  int h = bbox.y1 - bbox.y0;
+  if (w > 0 && w != target_width) {
+    sx *= (float)target_width / (float)w;
+  }
+  if (h > 0 && h != target_height) {
+    sy *= (float)target_height / (float)h;
+  }
+
+  ctm = fz_scale(sx, sy);
+  bbox = fz_round_rect(fz_transform_rect(bounds, ctm));
+
+  *ctm_out = ctm;
+  *bbox_out = bbox;
+}
+
+uint8_t *pdf_render_page_to_size(PdfDocument *doc, int page, int target_width,
+                                 int target_height, int *width, int *height,
+                                 int *stride) {
+  if (doc == NULL || page < 0 || page >= doc->page_count || target_width <= 0 ||
+      target_height <= 0) {
+    set_error("Invalid arguments");
+    return NULL;
+  }
+
+  fz_context *ctx = doc->ctx;
+  fz_page *fzpage = NULL;
+  fz_pixmap *pix = NULL;
+  uint8_t *result = NULL;
+
+  fz_var(fzpage);
+  fz_var(pix);
+
+  fz_try(ctx) {
+    fzpage = fz_load_page(ctx, doc->doc, page);
+
+    fz_matrix ctm;
+    fz_irect bbox;
+    compute_ctm_bbox_for_target(ctx, fzpage, target_width, target_height, &ctm,
+                                &bbox);
+
+    fz_colorspace *cs = fz_device_rgb(ctx);
+    pix = fz_new_pixmap_with_bbox(ctx, cs, bbox, NULL, 0);
+    fz_clear_pixmap_with_value(ctx, pix, 255);
+
+    fz_device *dev = fz_new_draw_device(ctx, ctm, pix);
+    fz_run_page(ctx, fzpage, dev, fz_identity, NULL);
+    fz_close_device(ctx, dev);
+    fz_drop_device(ctx, dev);
+
+    int w = fz_pixmap_width(ctx, pix);
+    int h = fz_pixmap_height(ctx, pix);
+    int s = fz_pixmap_stride(ctx, pix);
+    int n = fz_pixmap_components(ctx, pix);
+
+    size_t out_stride = (size_t)w * 3;
+    result = malloc(out_stride * (size_t)h);
+    if (result == NULL) {
+      fz_throw(ctx, FZ_ERROR_GENERIC, "Out of memory");
+    }
+
+    unsigned char *src = fz_pixmap_samples(ctx, pix);
+    for (int y = 0; y < h; y++) {
+      unsigned char *src_row = src + (size_t)y * s;
+      unsigned char *dst_row = result + (size_t)y * out_stride;
+      for (int x = 0; x < w; x++) {
+        dst_row[x * 3 + 0] = src_row[x * n + 0];
+        dst_row[x * 3 + 1] = src_row[x * n + 1];
+        dst_row[x * 3 + 2] = src_row[x * n + 2];
+      }
+    }
+
+    if (width)
+      *width = w;
+    if (height)
+      *height = h;
+    if (stride)
+      *stride = (int)out_stride;
+  }
+  fz_always(ctx) {
+    fz_drop_pixmap(ctx, pix);
+    fz_drop_page(ctx, fzpage);
+  }
+  fz_catch(ctx) {
+    set_error("Failed to render page: %s", fz_caught_message(ctx));
+    free(result);
+    return NULL;
+  }
+
+  return result;
+}
+
+uint8_t *pdf_render_page_gray_to_size(PdfDocument *doc, int page,
+                                      int target_width, int target_height,
+                                      int *width, int *height, int *stride) {
+  if (doc == NULL || page < 0 || page >= doc->page_count || target_width <= 0 ||
+      target_height <= 0) {
+    set_error("Invalid arguments");
+    return NULL;
+  }
+
+  fz_context *ctx = doc->ctx;
+  fz_page *fzpage = NULL;
+  fz_pixmap *pix = NULL;
+  uint8_t *result = NULL;
+
+  fz_var(fzpage);
+  fz_var(pix);
+
+  fz_try(ctx) {
+    fzpage = fz_load_page(ctx, doc->doc, page);
+
+    fz_matrix ctm;
+    fz_irect bbox;
+    compute_ctm_bbox_for_target(ctx, fzpage, target_width, target_height, &ctm,
+                                &bbox);
+
+    fz_colorspace *cs = fz_device_gray(ctx);
+    pix = fz_new_pixmap_with_bbox(ctx, cs, bbox, NULL, 0);
+    fz_clear_pixmap_with_value(ctx, pix, 255);
+
+    fz_device *dev = fz_new_draw_device(ctx, ctm, pix);
+    fz_run_page(ctx, fzpage, dev, fz_identity, NULL);
+    fz_close_device(ctx, dev);
+    fz_drop_device(ctx, dev);
+
+    int w = fz_pixmap_width(ctx, pix);
+    int h = fz_pixmap_height(ctx, pix);
+    int s = fz_pixmap_stride(ctx, pix);
+
+    result = malloc((size_t)w * (size_t)h);
+    if (result == NULL) {
+      fz_throw(ctx, FZ_ERROR_GENERIC, "Out of memory");
+    }
+
+    unsigned char *src = fz_pixmap_samples(ctx, pix);
+    for (int y = 0; y < h; y++) {
+      memcpy(result + (size_t)y * (size_t)w, src + (size_t)y * (size_t)s,
+             (size_t)w);
+    }
+
+    if (width)
+      *width = w;
+    if (height)
+      *height = h;
+    if (stride)
+      *stride = w;
+  }
+  fz_always(ctx) {
+    fz_drop_pixmap(ctx, pix);
+    fz_drop_page(ctx, fzpage);
+  }
+  fz_catch(ctx) {
+    set_error("Failed to render page: %s", fz_caught_message(ctx));
+    free(result);
+    return NULL;
+  }
+
+  return result;
+}
+
 // Helper to extract a string from PDF info dict
 static char *extract_info_string(fz_context *ctx, pdf_obj *info,
                                  const char *key) {
