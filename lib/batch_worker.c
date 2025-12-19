@@ -4,6 +4,7 @@
 
 #include "lib/batch_worker.h"
 #include "lib/batch_decode_queue.h"
+#include "lib/decoded_image_provider.h"
 #include "lib/decode_queue.h"
 #include "lib/encode_queue.h"
 #include "lib/gpu_monitor.h"
@@ -97,88 +98,50 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
 
   // Get pre-decoded images from queue if available
   // Batch decode queue (PR36B) takes precedence over per-image decode queue
-  DecodedImage *decoded_images[BATCH_MAX_FILES_PER_SHEET] = {NULL};
-  BatchDecodedImage *batch_decoded_images[BATCH_MAX_FILES_PER_SHEET] = {NULL};
+  DecodedImageProvider provider;
+  DecodedImageHandle decoded_images[BATCH_MAX_FILES_PER_SHEET] = {0};
 
+  decoded_image_provider_reset(&provider);
   if (ctx->batch_decode_queue != NULL) {
-    // Use new batch decode queue (PR36B) - optimized for GPU batch decode
-    for (int i = 0; i < job->input_count; i++) {
-      if (job->input_files[i] != NULL) {
-        BatchDecodedImage *decoded =
-            batch_decode_queue_get(ctx->batch_decode_queue, (int)job_index, i);
-        if (decoded != NULL && decoded->valid) {
-          batch_decoded_images[i] = decoded;
-
-#ifdef UNPAPER_WITH_CUDA
-          // Check if image was decoded directly to GPU
-          if (decoded->on_gpu && decoded->gpu_ptr != NULL) {
-            // Create Image from GPU memory
-            // NOTE: owns_memory=false because batch decode uses pool-managed
-            // buffers from nvjpegDecodeBatched that should not be freed by
-            // individual Images - the pool manages their lifetime.
-            Image gpu_image = create_image_from_gpu(
-                decoded->gpu_ptr, decoded->gpu_pitch, decoded->gpu_width,
-                decoded->gpu_height, decoded->gpu_format,
-                ctx->options->sheet_background,
-                ctx->options->abs_black_threshold, false);
-
-            if (gpu_image.frame != NULL) {
-              // Don't clear gpu_ptr - we don't own this memory
-              sheet_process_state_set_gpu_decoded_image(&state, gpu_image, i);
-            }
-          } else
-#endif
-              if (decoded->frame != NULL) {
-            // CPU-decoded frame - clone and transfer
-            AVFrame *frame_copy = av_frame_clone(decoded->frame);
-            if (frame_copy) {
-              sheet_process_state_set_decoded(&state, frame_copy, i);
-            }
-          }
-        }
-      }
-    }
+    decoded_image_provider_init_batch_decode_queue(&provider,
+                                                   ctx->batch_decode_queue);
   } else if (ctx->decode_queue != NULL) {
-    // Use legacy per-image decode queue
+    decoded_image_provider_init_decode_queue(&provider, ctx->decode_queue);
+  }
+
+  if (provider.get != NULL) {
     for (int i = 0; i < job->input_count; i++) {
-      if (job->input_files[i] != NULL) {
-        DecodedImage *decoded =
-            decode_queue_get(ctx->decode_queue, (int)job_index, i);
-        if (decoded != NULL && decoded->valid) {
-          decoded_images[i] = decoded;
+      if (job->input_files[i] == NULL) {
+        continue;
+      }
+      if (!decoded_image_provider_get(&provider, (int)job_index, i,
+                                      &decoded_images[i])) {
+        continue;
+      }
 
 #ifdef UNPAPER_WITH_CUDA
-          // Check if image was decoded directly to GPU
-          if (decoded->on_gpu && decoded->gpu_ptr != NULL) {
-            // Wait for async decode to complete before accessing GPU data.
-            // This enables parallel decode across multiple producer threads.
-            decoded_image_wait_gpu_complete(decoded);
+      if (decoded_images[i].view.on_gpu &&
+          decoded_images[i].view.gpu_ptr != NULL) {
+        Image gpu_image = create_image_from_gpu(
+            decoded_images[i].view.gpu_ptr, decoded_images[i].view.gpu_pitch,
+            decoded_images[i].view.gpu_width, decoded_images[i].view.gpu_height,
+            decoded_images[i].view.gpu_format, ctx->options->sheet_background,
+            ctx->options->abs_black_threshold,
+            decoded_images[i].view.gpu_owns_memory);
 
-            // Create Image from GPU memory (ownership transfers to Image)
-            // NOTE: owns_memory=true because per-image decode uses
-            // cudaMallocAsync which allocates individual buffers.
-            Image gpu_image = create_image_from_gpu(
-                decoded->gpu_ptr, decoded->gpu_pitch, decoded->gpu_width,
-                decoded->gpu_height, decoded->gpu_format,
-                ctx->options->sheet_background,
-                ctx->options->abs_black_threshold, true);
-
-            if (gpu_image.frame != NULL) {
-              // Transfer GPU pointer ownership - don't free in
-              // decode_queue_release
-              decoded->gpu_ptr = NULL;
-              decoded->on_gpu = false;
-              sheet_process_state_set_gpu_decoded_image(&state, gpu_image, i);
-            }
-          } else
-#endif
-              if (decoded->frame != NULL) {
-            // CPU-decoded frame - clone and transfer
-            AVFrame *frame_copy = av_frame_clone(decoded->frame);
-            if (frame_copy) {
-              sheet_process_state_set_decoded(&state, frame_copy, i);
-            }
+        if (gpu_image.frame != NULL) {
+          if (decoded_images[i].view.gpu_owns_memory) {
+            decoded_image_handle_detach_gpu(&decoded_images[i]);
           }
+          sheet_process_state_set_gpu_decoded_image(&state, gpu_image, i);
+        }
+      } else
+#endif
+          if (decoded_images[i].view.frame != NULL) {
+        // CPU-decoded frame - clone and transfer
+        AVFrame *frame_copy = av_frame_clone(decoded_images[i].view.frame);
+        if (frame_copy) {
+          sheet_process_state_set_decoded(&state, frame_copy, i);
         }
       }
     }
@@ -193,17 +156,10 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
   }
 
   // Release decoded images back to queue
-  if (ctx->batch_decode_queue != NULL) {
+  if (provider.release != NULL) {
     for (int i = 0; i < BATCH_MAX_FILES_PER_SHEET; i++) {
-      if (batch_decoded_images[i] != NULL) {
-        batch_decode_queue_release(ctx->batch_decode_queue,
-                                   batch_decoded_images[i]);
-      }
-    }
-  } else if (ctx->decode_queue != NULL) {
-    for (int i = 0; i < BATCH_MAX_FILES_PER_SHEET; i++) {
-      if (decoded_images[i] != NULL) {
-        decode_queue_release(ctx->decode_queue, decoded_images[i]);
+      if (decoded_images[i].image != NULL) {
+        decoded_image_provider_release(&provider, &decoded_images[i]);
       }
     }
   }

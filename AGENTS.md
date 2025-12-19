@@ -120,6 +120,7 @@ src/infra/*            # logging + threading utils
   - Remove duplicated decode handling in `lib/batch_worker.c`.
 - Acceptance:
   - Batch/per-image decode queues are interchangeable.
+- Status: complete.
 
 **PR A6: First-class batch inputs (PDF pages)**
 - Scope:
