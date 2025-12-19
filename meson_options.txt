@@ -5,14 +5,14 @@
 option(
   'cuda',
   type: 'feature',
-  value: 'disabled',
+  value: 'auto',
   description: 'Enable CUDA backend support (requires OpenCV with CUDA modules and nvImageCodec)',
 )
 
 option(
   'pdf',
   type: 'feature',
-  value: 'disabled',
+  value: 'auto',
   description: 'Enable PDF support (requires MuPDF library)',
 )
 
