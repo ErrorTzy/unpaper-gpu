@@ -242,6 +242,18 @@ void saveImage(char *filename, Image input, int outputPixFmt) {
         }
       }
       fast_path = true;
+    } else if (input.frame->format == AV_PIX_FMT_MONOBLACK &&
+               outputPixFmt == AV_PIX_FMT_MONOWHITE) {
+      int row_bytes = (width + 7) / 8;
+      for (int y = 0; y < height; y++) {
+        const uint8_t *src =
+            input.frame->data[0] + y * input.frame->linesize[0];
+        uint8_t *dst = output.frame->data[0] + y * output.frame->linesize[0];
+        for (int x = 0; x < row_bytes; x++) {
+          dst[x] = src[x] ^ 0xFF;
+        }
+      }
+      fast_path = true;
     }
 
     if (!fast_path) {

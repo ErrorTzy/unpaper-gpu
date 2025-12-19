@@ -68,7 +68,7 @@ static AVFrame *decode_jbig2_to_frame(const PdfImage *pdf_img) {
 
 static bool pdf_pipeline_size_matches(int width, int height, int expected_width,
                                       int expected_height) {
-  const int tol = 2;
+  const int tol = 4;
   return (abs(width - expected_width) <= tol) &&
          (abs(height - expected_height) <= tol);
 }
