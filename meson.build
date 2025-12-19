@@ -52,6 +52,7 @@ unpaper_sources = [
     'file.c', 'parse.c', 'sheet_process.c',
     'src/cli/cli_main.c', 'src/cli/cli_options.c',
     'src/core/sheet_pipeline.c',
+    'src/core/sheet_stages.c',
     'imageprocess/blit.c',
     'imageprocess/backend.c',
     'imageprocess/cuda_mempool.c',
@@ -337,6 +338,60 @@ cli_options_test = executable(
 )
 
 test('cli options', cli_options_test)
+
+sheet_stages_test_sources = [
+    'tests/sheet_stages_test.c',
+    'file.c',
+    'parse.c',
+    'sheet_process.c',
+    'src/core/sheet_stages.c',
+    'imageprocess/backend.c',
+    'imageprocess/blit.c',
+    'imageprocess/deskew.c',
+    'imageprocess/fill.c',
+    'imageprocess/filters.c',
+    'imageprocess/interpolate.c',
+    'imageprocess/image.c',
+    'imageprocess/image_cuda.c',
+    'imageprocess/masks.c',
+    'imageprocess/pixel.c',
+    'imageprocess/primitives.c',
+    'lib/encode_queue.c',
+    'lib/logging.c',
+    'lib/options.c',
+    'lib/perf.c',
+]
+
+if have_cuda
+    sheet_stages_test_sources += [
+        'imageprocess/backend_cuda.c',
+        'imageprocess/backend_cuda_blit.c',
+        'imageprocess/backend_cuda_masks.c',
+        'imageprocess/backend_cuda_filters.c',
+        'imageprocess/backend_cuda_deskew.c',
+        'imageprocess/cuda_mempool.c',
+        'imageprocess/cuda_runtime.c',
+        'imageprocess/npp_wrapper.c',
+        'imageprocess/npp_integral.c',
+        'imageprocess/nvimgcodec.c',
+        'imageprocess/opencv_bridge.cpp',
+        'imageprocess/opencv_ops.cpp',
+        cuda_kernels_ptx_c,
+    ]
+else
+    sheet_stages_test_sources += ['imageprocess/backend_cuda_stub.c']
+endif
+
+sheet_stages_test = executable(
+    'sheet_stages_test',
+    sheet_stages_test_sources,
+    c_args : unpaper_c_args,
+    cpp_args : cpp_enabled ? unpaper_cpp_args : [],
+    dependencies : unpaper_all_deps,
+    install : false,
+)
+
+test('sheet stages', sheet_stages_test, is_parallel: false)
 
 if have_cuda
     cuda_roundtrip_test = executable(

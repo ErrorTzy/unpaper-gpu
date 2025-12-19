@@ -112,6 +112,7 @@ src/infra/*            # logging + threading utils
   - Add focused unit tests for 1–2 stages (mask detection, layout).
 - Acceptance:
   - Bit‑for‑bit output identical for all existing goldens.
+- Status: complete.
 
 **PR A5: Decode provider abstraction**
 - Scope:
