@@ -759,6 +759,7 @@ if have_pdf
     pdf_pipeline_cpu_test_sources = [
         'file.c', 'parse.c', 'sheet_process.c',
         'src/core/sheet_pipeline.c',
+        'src/core/sheet_stages.c',
         'imageprocess/blit.c',
         'imageprocess/backend.c',
         'imageprocess/cuda_mempool.c',

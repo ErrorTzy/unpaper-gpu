@@ -7,6 +7,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include <libavutil/frame.h>
+
 #include "imageprocess/backend.h"
 #include "imageprocess/image.h"
 #include "imageprocess/pixel.h"
