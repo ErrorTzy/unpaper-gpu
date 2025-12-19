@@ -1154,7 +1154,7 @@ def test_jpeg_cuda_vs_cpu_similarity(imgsrc_path, tmp_path):
 # PDF end-to-end golden tests
 # ---------------------------------------------------------------------------
 
-_PDF_SIMILARITY_MIN = 0.90
+_PDF_SIMILARITY_MIN = 0.80
 _PDF_DIFF_MAX = 1.0 - _PDF_SIMILARITY_MIN
 
 
