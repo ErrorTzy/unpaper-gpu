@@ -555,6 +555,17 @@ Options
    splitting the sheet, ``--post-rotation`` is optionally applied
    individually to both output images as the very last processing step.
 
+.. option:: --split
+
+   Shortcut for splitting a double-page landscape scan into single-page
+   portrait output. Equivalent to:
+
+   ``--layout double --output-pages 2 --post-size a3-landscape``
+
+   This scales the processed sheet to A3 landscape so that each half becomes
+   A4 portrait. You can override the size by passing ``--post-size`` after
+   ``--split``.
+
 .. option:: -S { width, height \| size-name }; --sheet-size { width, height \| size-name }
 
    Force a fix sheet size. (default: as in input file)

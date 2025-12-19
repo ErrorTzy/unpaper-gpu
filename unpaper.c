@@ -73,6 +73,7 @@
           "         --pdf-quality=fast|high (PDF: fast=JPEG, high=JP2)\n"      \
           "         --pdf-dpi=N (PDF render DPI, 72-1200, default: 300)\n"     \
           "         --progress (show batch progress)\n"                        \
+          "         --split (shortcut: double-page -> single-page A4)\n"      \
           "\n"                                                                 \
           "Filenames may contain a formatting placeholder starting with '%%' " \
           "to insert a\n"                                                      \
@@ -201,6 +202,7 @@ enum LONG_OPTION_VALUES {
   OPT_REPLACE_BLANK,
   OPT_NO_MULTI_PAGES,
   OPT_PPI,
+  OPT_SPLIT,
   OPT_OVERWRITE,
   OPT_VERBOSE_MORE,
   OPT_DEBUG,
@@ -340,6 +342,7 @@ int main(int argc, char *argv[]) {
           {"post-wipe", required_argument, NULL, OPT_POST_WIPE},
           {"middle-wipe", required_argument, NULL, OPT_MIDDLE_WIPE},
           {"mw", required_argument, NULL, OPT_MIDDLE_WIPE},
+          {"split", no_argument, NULL, OPT_SPLIT},
           {"border", required_argument, NULL, 'B'},
           {"pre-border", required_argument, NULL, OPT_PRE_BORDER},
           {"post-border", required_argument, NULL, OPT_POST_BORDER},
@@ -977,6 +980,14 @@ int main(int argc, char *argv[]) {
 
       case OPT_PPI:
         sscanf(optarg, "%hd", &ppi);
+        break;
+
+      case OPT_SPLIT:
+        options.layout = LAYOUT_DOUBLE;
+        options.output_count = 2;
+        if (!parse_physical_size("a3-landscape", &postSizePhysical)) {
+          errOutput("unable to apply --split shortcut (invalid size)");
+        }
         break;
 
       case 't':
