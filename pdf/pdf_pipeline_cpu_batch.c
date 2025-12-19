@@ -68,7 +68,8 @@ static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
   ctx->width = image->frame->width;
   ctx->height = image->frame->height;
   ctx->time_base = (AVRational){1, 25};
-  ctx->pix_fmt = AV_PIX_FMT_YUVJ420P;
+  ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+  ctx->color_range = AVCOL_RANGE_JPEG;
 
   ctx->qmin = 1;
   ctx->qmax = 31;
@@ -88,7 +89,7 @@ static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
   AVFrame *yuv_frame = NULL;
   struct SwsContext *sws_ctx = NULL;
 
-  if (image->frame->format != AV_PIX_FMT_YUVJ420P) {
+  if (image->frame->format != AV_PIX_FMT_YUV420P) {
     yuv_frame = av_frame_alloc();
     if (!yuv_frame) {
       avcodec_free_context(&ctx);
@@ -96,7 +97,8 @@ static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
     }
     yuv_frame->width = ctx->width;
     yuv_frame->height = ctx->height;
-    yuv_frame->format = AV_PIX_FMT_YUVJ420P;
+    yuv_frame->format = AV_PIX_FMT_YUV420P;
+    yuv_frame->color_range = AVCOL_RANGE_JPEG;
 
     if (av_frame_get_buffer(yuv_frame, 0) < 0) {
       av_frame_free(&yuv_frame);
@@ -106,7 +108,7 @@ static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
 
     sws_ctx = sws_getContext(image->frame->width, image->frame->height,
                              image->frame->format, ctx->width, ctx->height,
-                             AV_PIX_FMT_YUVJ420P, SWS_BILINEAR, NULL, NULL, NULL);
+                             AV_PIX_FMT_YUV420P, SWS_BILINEAR, NULL, NULL, NULL);
 
     if (!sws_ctx) {
       av_frame_free(&yuv_frame);
@@ -122,6 +124,7 @@ static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
   }
 
   AVFrame *enc_frame = yuv_frame ? yuv_frame : image->frame;
+  enc_frame->color_range = AVCOL_RANGE_JPEG;
 
   AVPacket *pkt = av_packet_alloc();
   if (!pkt) {
