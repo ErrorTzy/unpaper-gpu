@@ -1,5 +1,4 @@
- SPDX-FileCopyrightText: 2005 The unpaper Authors
-..
+.. SPDX-FileCopyrightText: 2005 The unpaper Authors
 .. SPDX-License-Identifier: GPL-2.0-only
 
 :orphan:
@@ -742,6 +741,7 @@ Options
 
 
 .. _Physical Dimensions And Paper Sizes:
+
 Physical Dimensions And Paper Sizes
 -----------------------------------
 

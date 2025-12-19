@@ -215,13 +215,13 @@ unsigned long long cuda_rect_count_brightness_range(Image image,
       unpaper_cuda_malloc_async(stream, sizeof(unsigned long long));
   unpaper_cuda_memset_async(stream, out_dptr, 0, sizeof(unsigned long long));
 
-  const int src_fmt = (int)fmt;
-  const int src_w = image.frame->width;
-  const int src_h = image.frame->height;
-  const int x0 = area.vertex[0].x;
-  const int y0 = area.vertex[0].y;
-  const int x1 = area.vertex[1].x;
-  const int y1 = area.vertex[1].y;
+  int src_fmt = (int)fmt;
+  int src_w = image.frame->width;
+  int src_h = image.frame->height;
+  int x0 = area.vertex[0].x;
+  int y0 = area.vertex[0].y;
+  int x1 = area.vertex[1].x;
+  int y1 = area.vertex[1].y;
 
   const unsigned long long total =
       (unsigned long long)rect_w * (unsigned long long)rect_h;
@@ -300,13 +300,13 @@ unsigned long long cuda_rect_sum_lightness(Image image, Rectangle input_area) {
       unpaper_cuda_malloc_async(stream, sizeof(unsigned long long));
   unpaper_cuda_memset_async(stream, out_dptr, 0, sizeof(unsigned long long));
 
-  const int src_fmt = (int)fmt;
-  const int src_w = image.frame->width;
-  const int src_h = image.frame->height;
-  const int x0 = area.vertex[0].x;
-  const int y0 = area.vertex[0].y;
-  const int x1 = area.vertex[1].x;
-  const int y1 = area.vertex[1].y;
+  int src_fmt = (int)fmt;
+  int src_w = image.frame->width;
+  int src_h = image.frame->height;
+  int x0 = area.vertex[0].x;
+  int y0 = area.vertex[0].y;
+  int x1 = area.vertex[1].x;
+  int y1 = area.vertex[1].y;
 
   const unsigned long long total =
       (unsigned long long)rect_w * (unsigned long long)rect_h;
@@ -376,13 +376,13 @@ unsigned long long cuda_rect_sum_darkness_inverse(Image image,
       unpaper_cuda_malloc_async(stream, sizeof(unsigned long long));
   unpaper_cuda_memset_async(stream, out_dptr, 0, sizeof(unsigned long long));
 
-  const int src_fmt = (int)fmt;
-  const int src_w = image.frame->width;
-  const int src_h = image.frame->height;
-  const int x0 = area.vertex[0].x;
-  const int y0 = area.vertex[0].y;
-  const int x1 = area.vertex[1].x;
-  const int y1 = area.vertex[1].y;
+  int src_fmt = (int)fmt;
+  int src_w = image.frame->width;
+  int src_h = image.frame->height;
+  int x0 = area.vertex[0].x;
+  int y0 = area.vertex[0].y;
+  int x1 = area.vertex[1].x;
+  int y1 = area.vertex[1].y;
 
   const unsigned long long total =
       (unsigned long long)rect_w * (unsigned long long)rect_h;
@@ -514,22 +514,22 @@ uint32_t detect_edge_cuda(Image image, Point origin, Delta step,
     errOutput("CUDA image state missing for detect_edge_cuda.");
   }
 
-  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+  UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
   UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
 
   // Allocate GPU buffers for sums and counts
-  const size_t buffer_size = (size_t)max_positions * sizeof(unsigned long long);
+  size_t buffer_size = (size_t)max_positions * sizeof(unsigned long long);
   uint64_t sums_dptr = unpaper_cuda_malloc_async(stream, buffer_size);
   uint64_t counts_dptr = unpaper_cuda_malloc_async(stream, buffer_size);
 
   // Launch batched kernel - one block per scan position
-  const int src_fmt = (int)fmt;
-  const int src_w = image.frame->width;
-  const int src_h = image.frame->height;
-  const int base_x0 = scan_area.vertex[0].x;
-  const int base_y0 = scan_area.vertex[0].y;
-  const int step_x = step.horizontal;
-  const int step_y = step.vertical;
+  int src_fmt = (int)fmt;
+  int src_w = image.frame->width;
+  int src_h = image.frame->height;
+  int base_x0 = scan_area.vertex[0].x;
+  int base_y0 = scan_area.vertex[0].y;
+  int step_x = step.horizontal;
+  int step_y = step.vertical;
 
   void *params[] = {
       &st->dptr, &st->linesize,  &src_fmt,   &src_w,       &src_h,

@@ -33,8 +33,15 @@ static void init_test_paths(void) {
       *last_slash = '\0';
     }
 
-    snprintf(test_jbig2_pdf_path, sizeof(test_jbig2_pdf_path),
-             "%s/pdf_samples/test_jbig2.pdf", base_dir);
+    const char *suffix = "/pdf_samples/test_jbig2.pdf";
+    size_t suffix_len = strlen(suffix);
+    size_t max_base = sizeof(test_jbig2_pdf_path) - suffix_len - 1;
+    if (max_base > 0) {
+      snprintf(test_jbig2_pdf_path, sizeof(test_jbig2_pdf_path), "%.*s%s",
+               (int)max_base, base_dir, suffix);
+    } else {
+      test_jbig2_pdf_path[0] = '\0';
+    }
   } else {
     snprintf(test_jbig2_pdf_path, sizeof(test_jbig2_pdf_path),
              "tests/pdf_samples/test_jbig2.pdf");

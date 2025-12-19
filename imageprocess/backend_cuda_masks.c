@@ -124,8 +124,8 @@ static uint32_t detect_border_edge_cuda_internal(Image image,
   }
 
   // Compute actual rectangle dimensions from modified area
-  const int rect_w = area.vertex[1].x - area.vertex[0].x + 1;
-  const int rect_h = area.vertex[1].y - area.vertex[0].y + 1;
+  int rect_w = area.vertex[1].x - area.vertex[0].x + 1;
+  int rect_h = area.vertex[1].y - area.vertex[0].y + 1;
 
   // Compute step magnitude and number of positions
   int32_t step_magnitude = step.horizontal + step.vertical;
@@ -151,23 +151,23 @@ static uint32_t detect_border_edge_cuda_internal(Image image,
     errOutput("CUDA image state missing for detect_border_edge_cuda.");
   }
 
-  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+  UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
   UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
 
   // Allocate GPU buffer for counts
-  const size_t buffer_size = (size_t)max_positions * sizeof(unsigned long long);
+  size_t buffer_size = (size_t)max_positions * sizeof(unsigned long long);
   uint64_t counts_dptr = unpaper_cuda_malloc_async(stream, buffer_size);
 
   // Launch batched kernel - one block per scan position
-  const int src_fmt = (int)fmt;
-  const int src_w = image.frame->width;
-  const int src_h = image.frame->height;
-  const int base_x0 = area.vertex[0].x;
-  const int base_y0 = area.vertex[0].y;
-  const int step_x = step.horizontal;
-  const int step_y = step.vertical;
-  const uint8_t min_brightness = 0;
-  const uint8_t max_brightness = image.abs_black_threshold;
+  int src_fmt = (int)fmt;
+  int src_w = image.frame->width;
+  int src_h = image.frame->height;
+  int base_x0 = area.vertex[0].x;
+  int base_y0 = area.vertex[0].y;
+  int step_x = step.horizontal;
+  int step_y = step.vertical;
+  uint8_t min_brightness = 0;
+  uint8_t max_brightness = image.abs_black_threshold;
 
   void *params[] = {
       &st->dptr, &st->linesize,  &src_fmt,        &src_w,          &src_h,
@@ -224,7 +224,7 @@ void apply_masks_cuda(Image image, const Rectangle masks[], size_t masks_count,
     errOutput("CUDA apply_masks: unsupported pixel format.");
   }
 
-  const int rect_count = (int)masks_count;
+  int rect_count = (int)masks_count;
   const size_t rect_bytes = (size_t)rect_count * 4u * sizeof(int32_t);
   int32_t *rects = av_malloc_array((size_t)rect_count * 4u, sizeof(int32_t));
   if (rects == NULL) {
@@ -243,19 +243,19 @@ void apply_masks_cuda(Image image, const Rectangle masks[], size_t masks_count,
   unpaper_cuda_memcpy_h2d_async(stream, rects_dptr, rects, rect_bytes);
   av_free(rects);
 
-  const int img_fmt = (int)fmt;
-  const int img_w = image.frame->width;
-  const int img_h = image.frame->height;
-  const uint8_t r = color.r;
-  const uint8_t g = color.g;
-  const uint8_t b = color.b;
+  int img_fmt = (int)fmt;
+  int img_w = image.frame->width;
+  int img_h = image.frame->height;
+  uint8_t r = color.r;
+  uint8_t g = color.g;
+  uint8_t b = color.b;
 
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
-    const uint8_t gray = pixel_grayscale(color);
-    const bool pixel_black = gray < image.abs_black_threshold;
-    const uint8_t bit_value = (fmt == UNPAPER_CUDA_FMT_MONOWHITE)
-                                  ? (pixel_black ? 1u : 0u)
-                                  : (pixel_black ? 0u : 1u);
+    uint8_t gray = pixel_grayscale(color);
+    bool pixel_black = gray < image.abs_black_threshold;
+    uint8_t bit_value = (fmt == UNPAPER_CUDA_FMT_MONOWHITE)
+                            ? (pixel_black ? 1u : 0u)
+                            : (pixel_black ? 0u : 1u);
 
     void *params[] = {
         &st->dptr, &st->linesize, &img_fmt,    &img_w,

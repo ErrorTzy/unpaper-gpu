@@ -364,6 +364,10 @@ bool nvimgcodec_init(int num_streams) {
     return true;
   }
 
+  if (num_streams < 1) {
+    num_streams = 1;
+  }
+
   // Ensure CUDA is initialized
   UnpaperCudaInitStatus cuda_status = unpaper_cuda_try_init();
   if (cuda_status != UNPAPER_CUDA_INIT_OK) {

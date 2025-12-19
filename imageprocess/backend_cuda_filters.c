@@ -59,15 +59,15 @@ static void blackfilter_scan_cuda(Image image, BlackfilterParameters params,
 
           const Rectangle clipped = clip_rectangle(image, area);
           if (!rect_empty(clipped)) {
-            const int x0 = clipped.vertex[0].x;
-            const int y0 = clipped.vertex[0].y;
-            const int x1 = clipped.vertex[1].x;
-            const int y1 = clipped.vertex[1].y;
-            const int img_fmt = (int)fmt;
-            const int w = image.frame->width;
-            const int h = image.frame->height;
-            const uint8_t mask_max = image.abs_black_threshold;
-            const unsigned long long intensity =
+            int x0 = clipped.vertex[0].x;
+            int y0 = clipped.vertex[0].y;
+            int x1 = clipped.vertex[1].x;
+            int y1 = clipped.vertex[1].y;
+            int img_fmt = (int)fmt;
+            int w = image.frame->width;
+            int h = image.frame->height;
+            uint8_t mask_max = image.abs_black_threshold;
+            unsigned long long intensity =
                 params.intensity < 0 ? 0ull
                                      : (unsigned long long)params.intensity;
 
@@ -102,14 +102,17 @@ static void blackfilter_scan_cuda(Image image, BlackfilterParameters params,
 // Note: This approach wipes ALL dark pixels in detected regions, not just
 // connected ones like the original flood-fill. For document scanning cleanup,
 // this produces equivalent results and is much faster.
+#if defined(__GNUC__)
+__attribute__((unused))
+#endif
 static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
                                       UnpaperCudaStream *stream) {
   if (image.frame == NULL) {
     return false;
   }
 
-  const int w = image.frame->width;
-  const int h = image.frame->height;
+  int w = image.frame->width;
+  int h = image.frame->height;
   if (w <= 0 || h <= 0) {
     return true; // Nothing to do
   }
@@ -130,7 +133,7 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
     return false;
   }
 
-  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+  UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
   if (fmt == UNPAPER_CUDA_FMT_INVALID || fmt == UNPAPER_CUDA_FMT_MONOWHITE ||
       fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
     // Mono formats need special handling, fall back to sequential
@@ -189,16 +192,15 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
 
   // Allocate output buffers for scan results
   // Maximum possible rectangles: one per scan position
-  const int max_h_positions = params.scan_direction.horizontal
-                                  ? ((w / params.scan_step.horizontal + 1) *
-                                     (h / (int)params.scan_depth.vertical + 1))
-                                  : 0;
-  const int max_v_positions =
-      params.scan_direction.vertical
-          ? ((h / params.scan_step.vertical + 1) *
-             (w / (int)params.scan_depth.horizontal + 1))
-          : 0;
-  const int max_rects = max_h_positions + max_v_positions + 1024;
+  int max_h_positions = params.scan_direction.horizontal
+                            ? ((w / params.scan_step.horizontal + 1) *
+                               (h / (int)params.scan_depth.vertical + 1))
+                            : 0;
+  int max_v_positions = params.scan_direction.vertical
+                            ? ((h / params.scan_step.vertical + 1) *
+                               (w / (int)params.scan_depth.horizontal + 1))
+                            : 0;
+  int max_rects = max_h_positions + max_v_positions + 1024;
 
   // Allocate GPU buffers for rectangle output
   // Use stream-ordered allocation to avoid blocking other streams
@@ -217,25 +219,25 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
   // Initialize count to 0 (use async to avoid blocking)
   unpaper_cuda_memset_async(stream, count_device, 0, sizeof(int));
 
-  const int integral_step = (int)integral.step_bytes;
-  const int intensity = params.intensity < 0 ? 0 : params.intensity;
+  int integral_step = (int)integral.step_bytes;
+  int intensity = params.intensity < 0 ? 0 : params.intensity;
 
   // Horizontal scan (stripes are vertical bands)
   if (params.scan_direction.horizontal) {
-    const int stripe_h = (int)params.scan_depth.vertical;
-    const int scan_w = params.scan_size.width;
-    const int scan_h = stripe_h;
-    const int step_x = params.scan_step.horizontal;
-    const int step_y = 0;
+    int stripe_h = (int)params.scan_depth.vertical;
+    int scan_w = params.scan_size.width;
+    int scan_h = stripe_h;
+    int step_x = params.scan_step.horizontal;
+    int step_y = 0;
 
     for (int stripe_y = 0; stripe_y < h; stripe_y += stripe_h) {
-      const int stripe_size =
+      int stripe_size =
           (stripe_y + stripe_h > h) ? (h - stripe_y) : stripe_h;
       if (stripe_size < scan_h)
         continue;
 
       // Calculate number of scan positions in this stripe
-      const int num_positions = (w - scan_w) / step_x + 1;
+      int num_positions = (w - scan_w) / step_x + 1;
       if (num_positions <= 0)
         continue;
 
@@ -268,19 +270,19 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
 
   // Vertical scan (stripes are horizontal bands)
   if (params.scan_direction.vertical) {
-    const int stripe_w = (int)params.scan_depth.horizontal;
-    const int scan_w = stripe_w;
-    const int scan_h = params.scan_size.height;
-    const int step_x = 0;
-    const int step_y = params.scan_step.vertical;
+    int stripe_w = (int)params.scan_depth.horizontal;
+    int scan_w = stripe_w;
+    int scan_h = params.scan_size.height;
+    int step_x = 0;
+    int step_y = params.scan_step.vertical;
 
     for (int stripe_x = 0; stripe_x < w; stripe_x += stripe_w) {
-      const int stripe_size =
+      int stripe_size =
           (stripe_x + stripe_w > w) ? (w - stripe_x) : stripe_w;
       if (stripe_size < scan_w)
         continue;
 
-      const int num_positions = (h - scan_h) / step_y + 1;
+      int num_positions = (h - scan_h) / step_y + 1;
       if (num_positions <= 0)
         continue;
 
@@ -367,8 +369,8 @@ static bool blackfilter_cuda_parallel(Image image, BlackfilterParameters params,
 
     if (rect_count > 0) {
       // Launch parallel wipe kernel
-      const int img_fmt = (int)fmt;
-      const uint8_t black_threshold = image.abs_black_threshold;
+      int img_fmt = (int)fmt;
+      uint8_t black_threshold = image.abs_black_threshold;
 
       const uint32_t block2d = 16;
       const uint32_t grid_x = (uint32_t)((w + block2d - 1) / block2d);
@@ -409,8 +411,8 @@ static void blackfilter_cuda_sequential(Image image,
     errOutput("CUDA image state missing for blackfilter.");
   }
 
-  const int w = image.frame->width;
-  const int h = image.frame->height;
+  int w = image.frame->width;
+  int h = image.frame->height;
   if (w <= 0 || h <= 0) {
     return;
   }
@@ -613,11 +615,11 @@ static void noisefilter_cuda_custom(Image image, uint64_t intensity,
     errOutput("CUDA image state missing for noisefilter.");
   }
 
-  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
-  const int img_fmt = (int)fmt;
-  const int w = image.frame->width;
-  const int h = image.frame->height;
-  const size_t num_pixels = (size_t)w * (size_t)h;
+  UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+  int img_fmt = (int)fmt;
+  int w = image.frame->width;
+  int h = image.frame->height;
+  size_t num_pixels = (size_t)w * (size_t)h;
 
   UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
   const uint32_t block2d_x = 16u;
@@ -637,10 +639,10 @@ static void noisefilter_cuda_custom(Image image, uint64_t intensity,
     errOutput("CUDA noisefilter: unable to reserve scratch buffer.");
   }
 
-  const uint64_t labels_a = scratch;
-  const uint64_t labels_b = labels_a + labels_bytes;
-  const uint64_t counts = labels_b + labels_bytes;
-  const uint64_t changed = counts + counts_bytes;
+  uint64_t labels_a = scratch;
+  uint64_t labels_b = labels_a + labels_bytes;
+  uint64_t counts = labels_b + labels_bytes;
+  uint64_t changed = counts + counts_bytes;
 
   void *params_build[] = {&st->dptr, &st->linesize,    &img_fmt, &w,
                           &h,        &min_white_level, &labels_a};
@@ -658,7 +660,7 @@ static void noisefilter_cuda_custom(Image image, uint64_t intensity,
 
   uint64_t labels_in = labels_a;
   uint64_t labels_out = labels_b;
-  const int max_iters = (w + h > 0) ? (w + h) : 1;
+  int max_iters = (w + h > 0) ? (w + h) : 1;
 
   for (int iter = 0; iter < max_iters; iter++) {
     unpaper_cuda_memset_d8(changed, 0, sizeof(int));
@@ -685,12 +687,12 @@ static void noisefilter_cuda_custom(Image image, uint64_t intensity,
     labels_out = tmp;
   }
 
-  const uint64_t final_labels = labels_in;
+  uint64_t final_labels = labels_in;
 
   unpaper_cuda_memset_d8(counts, 0, counts_bytes);
-  const uint32_t block1d = 256u;
-  const uint32_t grid1d = (uint32_t)(((num_pixels + block1d - 1) / block1d));
-  const int num_pixels_i = (int)num_pixels;
+  uint32_t block1d = 256u;
+  uint32_t grid1d = (uint32_t)(((num_pixels + block1d - 1) / block1d));
+  int num_pixels_i = (int)num_pixels;
   void *params_count[] = {&final_labels, &num_pixels_i, &counts};
   unpaper_cuda_launch_kernel_on_stream(stream, k_noisefilter_count, grid1d, 1,
                                        1, block1d, 1, 1, params_count);
@@ -726,8 +728,8 @@ static bool noisefilter_cuda_opencv(Image image, uint64_t intensity,
     return false;
   }
 
-  const int w = image.frame->width;
-  const int h = image.frame->height;
+  int w = image.frame->width;
+  int h = image.frame->height;
 
   UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
 
@@ -753,8 +755,8 @@ static bool noisefilter_cuda_opencv(Image image, uint64_t intensity,
   // Apply mask on GPU: where mask is 0 and pixel is dark, set to white
   ensure_kernels_loaded();
 
-  const int img_fmt = (int)fmt;
-  const int mask_linesize = (int)mask.pitch_bytes;
+  int img_fmt = (int)fmt;
+  int mask_linesize = (int)mask.pitch_bytes;
   void *params[] = {
       &st->dptr, &st->linesize,    &img_fmt,       &w,
       &h,        &mask.device_ptr, &mask_linesize, &min_white_level,

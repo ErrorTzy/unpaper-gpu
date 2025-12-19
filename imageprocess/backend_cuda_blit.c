@@ -34,10 +34,10 @@ void wipe_rectangle_cuda(Image image, Rectangle input_area, Pixel color) {
     errOutput("CUDA wipe_rectangle: unsupported pixel format.");
   }
 
-  const int x0 = area.vertex[0].x;
-  const int y0 = area.vertex[0].y;
-  const int x1 = area.vertex[1].x;
-  const int y1 = area.vertex[1].y;
+  int x0 = area.vertex[0].x;
+  int y0 = area.vertex[0].y;
+  int x1 = area.vertex[1].x;
+  int y1 = area.vertex[1].y;
 
   // Try OpenCV path first (for non-mono formats)
   if (unpaper_opencv_wipe_rect(st->dptr, st->width, st->height, st->linesize,
@@ -52,11 +52,11 @@ void wipe_rectangle_cuda(Image image, Rectangle input_area, Pixel color) {
   ensure_kernels_loaded();
 
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
-    const uint8_t gray = pixel_grayscale(color);
-    const bool pixel_black = gray < image.abs_black_threshold;
-    const uint8_t bit_set = (fmt == UNPAPER_CUDA_FMT_MONOWHITE)
-                                ? (pixel_black ? 1u : 0u)
-                                : (pixel_black ? 0u : 1u);
+    uint8_t gray = pixel_grayscale(color);
+    bool pixel_black = gray < image.abs_black_threshold;
+    uint8_t bit_set = (fmt == UNPAPER_CUDA_FMT_MONOWHITE)
+                          ? (pixel_black ? 1u : 0u)
+                          : (pixel_black ? 0u : 1u);
 
     void *params[] = {
         &st->dptr, &st->linesize, &x0, &y0, &x1, &y1, &bit_set,
@@ -157,8 +157,8 @@ void copy_rectangle_cuda(Image source, Image target, Rectangle source_area,
     errOutput("CUDA image state missing for copy_rectangle.");
   }
 
-  const UnpaperCudaFormat src_fmt = cuda_format_from_av(source.frame->format);
-  const UnpaperCudaFormat dst_fmt = cuda_format_from_av(target.frame->format);
+  UnpaperCudaFormat src_fmt = cuda_format_from_av(source.frame->format);
+  UnpaperCudaFormat dst_fmt = cuda_format_from_av(target.frame->format);
   if (src_fmt == UNPAPER_CUDA_FMT_INVALID ||
       dst_fmt == UNPAPER_CUDA_FMT_INVALID) {
     errOutput("CUDA copy_rectangle: unsupported pixel format.");
@@ -180,7 +180,7 @@ void copy_rectangle_cuda(Image source, Image target, Rectangle source_area,
 
   if (dst_fmt == UNPAPER_CUDA_FMT_MONOWHITE ||
       dst_fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
-    const uint8_t threshold = target.abs_black_threshold;
+    uint8_t threshold = target.abs_black_threshold;
     void *params[] = {
         &src_st->dptr,     &src_st->linesize, &src_fmt, &dst_st->dptr,
         &dst_st->linesize, &dst_fmt,          &src_x0,  &src_y0,
@@ -268,7 +268,7 @@ void flip_rotate_90_cuda(Image *pImage, RotationDirection direction) {
     errOutput("CUDA image state missing for flip_rotate_90 output.");
   }
 
-  const UnpaperCudaFormat fmt = cuda_format_from_av(pImage->frame->format);
+  UnpaperCudaFormat fmt = cuda_format_from_av(pImage->frame->format);
   if (fmt == UNPAPER_CUDA_FMT_INVALID) {
     errOutput("CUDA flip_rotate_90: unsupported pixel format.");
   }
@@ -289,7 +289,7 @@ void flip_rotate_90_cuda(Image *pImage, RotationDirection direction) {
   ensure_kernels_loaded();
 
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
-    const int dir = (int)direction;
+    int dir = (int)direction;
     void *params[] = {
         &src_st->dptr,   &src_st->linesize, &dst_st->dptr, &dst_st->linesize,
         &src_size.width, &src_size.height,  &dir,
@@ -305,7 +305,7 @@ void flip_rotate_90_cuda(Image *pImage, RotationDirection direction) {
                                block_y, 1, params);
   } else {
     // Use custom kernel for RGB24 and Y400A (OpenCV transpose doesn't support)
-    const int dir = (int)direction;
+    int dir = (int)direction;
     void *params[] = {
         &src_st->dptr, &src_st->linesize, &dst_st->dptr,    &dst_st->linesize,
         &fmt,          &src_size.width,   &src_size.height, &dir,
@@ -335,14 +335,14 @@ void mirror_cuda(Image image, Direction direction) {
     errOutput("CUDA image state missing for mirror.");
   }
 
-  const UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
+  UnpaperCudaFormat fmt = cuda_format_from_av(image.frame->format);
   if (fmt == UNPAPER_CUDA_FMT_INVALID) {
     errOutput("CUDA mirror: unsupported pixel format.");
   }
 
   // Use stream-ordered allocation to avoid blocking other streams
   UnpaperCudaStream *stream = unpaper_cuda_get_current_stream();
-  const uint64_t new_dptr = unpaper_cuda_malloc_async(stream, st->bytes);
+  uint64_t new_dptr = unpaper_cuda_malloc_async(stream, st->bytes);
 
   // Try OpenCV path first (for non-mono formats)
   if (unpaper_opencv_mirror(st->dptr, new_dptr, st->width, st->height,
@@ -360,8 +360,8 @@ void mirror_cuda(Image image, Direction direction) {
   unpaper_cuda_memcpy_d2d_async(stream, new_dptr, st->dptr, st->bytes);
 
   if (fmt == UNPAPER_CUDA_FMT_MONOWHITE || fmt == UNPAPER_CUDA_FMT_MONOBLACK) {
-    const int do_h = direction.horizontal ? 1 : 0;
-    const int do_v = direction.vertical ? 1 : 0;
+    int do_h = direction.horizontal ? 1 : 0;
+    int do_v = direction.vertical ? 1 : 0;
     void *params[] = {
         &st->dptr,  &st->linesize, &new_dptr, &st->linesize,
         &st->width, &st->height,   &do_h,     &do_v,
@@ -405,7 +405,7 @@ void stretch_and_replace_cuda(Image *pImage, RectangleSize size,
     return;
   }
 
-  const UnpaperCudaFormat fmt = cuda_format_from_av(pImage->frame->format);
+  UnpaperCudaFormat fmt = cuda_format_from_av(pImage->frame->format);
   if (fmt == UNPAPER_CUDA_FMT_INVALID) {
     errOutput("CUDA stretch requested, but pixel format is unsupported.");
   }
@@ -423,7 +423,7 @@ void stretch_and_replace_cuda(Image *pImage, RectangleSize size,
     errOutput("CUDA image state missing for stretch_and_replace (target).");
   }
 
-  const int interp = (int)interpolate_type;
+  int interp = (int)interpolate_type;
 
   // Try OpenCV path first (supports GRAY8 and RGB24)
 #ifdef UNPAPER_WITH_OPENCV

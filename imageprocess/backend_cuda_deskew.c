@@ -46,7 +46,7 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
     return 0.0f;
   }
 
-  const int max_depth =
+  int max_depth =
       (shift.vertical == 0) ? (mask_size.width / 2) : (mask_size.height / 2);
   if (max_depth <= 0) {
     return 0.0f;
@@ -103,14 +103,14 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
     }
   }
 
-  const int src_w = image.frame->width;
-  const int src_h = image.frame->height;
-  const int shift_x = shift.horizontal;
-  const int shift_y = shift.vertical;
-  const int mask_x0 = nmask.vertex[0].x;
-  const int mask_y0 = nmask.vertex[0].y;
-  const int mask_x1 = nmask.vertex[1].x;
-  const int mask_y1 = nmask.vertex[1].y;
+  int src_w = image.frame->width;
+  int src_h = image.frame->height;
+  int shift_x = shift.horizontal;
+  int shift_y = shift.vertical;
+  int mask_x0 = nmask.vertex[0].x;
+  int mask_y0 = nmask.vertex[0].y;
+  int mask_x1 = nmask.vertex[1].x;
+  int mask_y1 = nmask.vertex[1].y;
 
   int *peaks_h = av_malloc_array((size_t)rotations_count, sizeof(int));
   if (peaks_h == NULL) {
@@ -150,7 +150,7 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
   ensure_kernels_loaded();
 
   // Use stream-ordered allocation to avoid blocking other streams
-  const size_t coord_bytes = coord_count * sizeof(int);
+  size_t coord_bytes = coord_count * sizeof(int);
   uint64_t base_x_d = unpaper_cuda_malloc_async(stream, coord_bytes);
   uint64_t base_y_d = unpaper_cuda_malloc_async(stream, coord_bytes);
   uint64_t peaks_d =
@@ -159,8 +159,8 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
   unpaper_cuda_memcpy_h2d_async(stream, base_x_d, base_x_h, coord_bytes);
   unpaper_cuda_memcpy_h2d_async(stream, base_y_d, base_y_h, coord_bytes);
 
-  const int src_fmt = (int)fmt;
-  const int scan_size = deskew_scan_size;
+  int src_fmt = (int)fmt;
+  int scan_size = deskew_scan_size;
 
   void *params_k[] = {
       &st->dptr,          &st->linesize, &src_fmt,   &src_w,     &src_h,
@@ -184,7 +184,7 @@ static float detect_edge_rotation_cuda(Image image, ImageCudaState *st,
   int max_peak = 0;
   float detected_rotation = 0.0f;
   for (int i = 0; i < rotations_count; i++) {
-    const int peak = peaks_h[i];
+    int peak = peaks_h[i];
     if (peak > max_peak) {
       max_peak = peak;
       detected_rotation = rotations[i];
@@ -329,29 +329,29 @@ void deskew_cuda(Image source, Rectangle mask, float radians,
     errOutput("CUDA image state missing for deskew target.");
   }
 
-  const UnpaperCudaFormat fmt = cuda_format_from_av(source.frame->format);
+  UnpaperCudaFormat fmt = cuda_format_from_av(source.frame->format);
   if (fmt == UNPAPER_CUDA_FMT_INVALID) {
     errOutput("CUDA deskew: unsupported pixel format.");
   }
 
-  const Rectangle target_area = full_image(rotated);
-  const FloatPoint source_center = center_of_rectangle(nmask);
-  const FloatPoint target_center = center_of_rectangle(target_area);
+  Rectangle target_area = full_image(rotated);
+  FloatPoint source_center = center_of_rectangle(nmask);
+  FloatPoint target_center = center_of_rectangle(target_area);
 
-  const float use_radians = -radians;
-  const float sinval = sinf(use_radians);
-  const float cosval = cosf(use_radians);
+  float use_radians = -radians;
+  float sinval = sinf(use_radians);
+  float cosval = cosf(use_radians);
 
-  const int src_w = source.frame->width;
-  const int src_h = source.frame->height;
-  const int dst_w = rotated.frame->width;
-  const int dst_h = rotated.frame->height;
-  const int interp = (int)interpolate_type;
+  int src_w = source.frame->width;
+  int src_h = source.frame->height;
+  int dst_w = rotated.frame->width;
+  int dst_h = rotated.frame->height;
+  int interp = (int)interpolate_type;
 
-  const float src_center_x = source_center.x;
-  const float src_center_y = source_center.y;
-  const float dst_center_x = target_center.x;
-  const float dst_center_y = target_center.y;
+  float src_center_x = source_center.x;
+  float src_center_y = source_center.y;
+  float dst_center_x = target_center.x;
+  float dst_center_y = target_center.y;
 
   // Try OpenCV path first (supports GRAY8 and RGB24)
 #ifdef UNPAPER_WITH_OPENCV
@@ -373,7 +373,7 @@ void deskew_cuda(Image source, Rectangle mask, float radians,
 
   const int bytespp = bytes_per_pixel_from_av(source.frame->format);
   if (bytespp != 0) {
-    const int img_fmt = (int)fmt;
+    int img_fmt = (int)fmt;
     void *params_k[] = {
         &src_st->dptr, &src_st->linesize,
         &dst_st->dptr, &dst_st->linesize,
@@ -394,9 +394,9 @@ void deskew_cuda(Image source, Rectangle mask, float radians,
     unpaper_cuda_launch_kernel(k_rotate_bytes, grid_x, grid_y, 1, block_x,
                                block_y, 1, params_k);
   } else {
-    const int src_fmt = (int)fmt;
-    const int dst_fmt = (int)fmt;
-    const uint8_t abs_black_threshold = source.abs_black_threshold;
+    int src_fmt = (int)fmt;
+    int dst_fmt = (int)fmt;
+    uint8_t abs_black_threshold = source.abs_black_threshold;
 
     void *params_k[] = {
         &src_st->dptr,
