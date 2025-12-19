@@ -57,6 +57,7 @@ void options_init(Options *o) {
       .ignore_multi_index = multi_index_empty(),
       .insert_blank = multi_index_empty(),
       .replace_blank = multi_index_empty(),
+      .skip_split = multi_index_empty(),
 
       .perf = false,
 

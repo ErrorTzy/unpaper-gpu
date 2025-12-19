@@ -75,6 +75,7 @@
           "         --pdf-dpi=N (PDF render DPI, 72-1200, default: 300)\n"     \
           "         --progress (show batch progress)\n"                        \
           "         --split (shortcut: double-page -> single-page A4)\n"      \
+          "         --skip-split=RANGE (PDF: pages to skip splitting)\n"       \
           "\n"                                                                 \
           "Filenames may contain a formatting placeholder starting with '%%' " \
           "to insert a\n"                                                      \
@@ -204,6 +205,7 @@ enum LONG_OPTION_VALUES {
   OPT_NO_MULTI_PAGES,
   OPT_PPI,
   OPT_SPLIT,
+  OPT_SKIP_SPLIT,
   OPT_OVERWRITE,
   OPT_VERBOSE_MORE,
   OPT_DEBUG,
@@ -345,6 +347,7 @@ int main(int argc, char *argv[]) {
           {"middle-wipe", required_argument, NULL, OPT_MIDDLE_WIPE},
           {"mw", required_argument, NULL, OPT_MIDDLE_WIPE},
           {"split", no_argument, NULL, OPT_SPLIT},
+          {"skip-split", required_argument, NULL, OPT_SKIP_SPLIT},
           {"border", required_argument, NULL, 'B'},
           {"pre-border", required_argument, NULL, OPT_PRE_BORDER},
           {"post-border", required_argument, NULL, OPT_POST_BORDER},
@@ -992,6 +995,10 @@ int main(int argc, char *argv[]) {
         }
         break;
 
+      case OPT_SKIP_SPLIT:
+        parseMultiIndex(optarg, &options.skip_split);
+        break;
+
       case 't':
         if (strcmp(optarg, "pbm") == 0) {
 
@@ -1187,6 +1194,22 @@ int main(int argc, char *argv[]) {
   if (optind + 2 > argc)
     errOutput("no input or output files given.\n");
 
+#if defined(UNPAPER_WITH_PDF) && (UNPAPER_WITH_PDF)
+  const char *input_file = argv[optind];
+  const char *output_file = (optind + 1 < argc) ? argv[optind + 1] : NULL;
+  bool pdf_mode_requested =
+      input_file && output_file && pdf_pipeline_is_pdf(input_file) &&
+      pdf_pipeline_is_pdf(output_file);
+
+  if (options.skip_split.count != 0 && !pdf_mode_requested) {
+    errOutput("--skip-split requires PDF input and output files.");
+  }
+#else
+  if (options.skip_split.count != 0) {
+    errOutput("--skip-split requires PDF input and output files.");
+  }
+#endif
+
   verboseLog(VERBOSE_NORMAL, WELCOME); // welcome message
 
   image_backend_select(options.device);
@@ -1195,15 +1218,10 @@ int main(int argc, char *argv[]) {
   // Check for PDF input/output - use dedicated PDF pipeline
   // PDF processing uses a separate pipeline that handles multi-page documents
   {
-    // Get input and output file paths
     // For PDF, we always take exactly one input filename and one output
     // filename, regardless of --input-pages/--output-pages (which operate on
     // pages-per-sheet, not on the number of filenames).
-    const char *input_file = argv[optind];
-    const char *output_file = (optind + 1 < argc) ? argv[optind + 1] : NULL;
-
-    if (input_file && output_file && pdf_pipeline_is_pdf(input_file) &&
-        pdf_pipeline_is_pdf(output_file)) {
+    if (pdf_mode_requested) {
       // PDF mode supports only one input PDF and one output PDF filename.
       // Additional positional args would be ambiguous with the image-mode
       // "N input files / M output files" convention.

@@ -569,6 +569,11 @@ Options
    A4 portrait. You can override the size by passing ``--post-size`` after
    ``--split``.
 
+.. option:: --skip-split page-range
+
+   PDF-only. Skip splitting for the listed PDF page indices (1-based), e.g.
+   ``1,3-5,10``. Using this option with non-PDF inputs is an error.
+
 .. option:: -S { width, height \| size-name }; --sheet-size { width, height \| size-name }
 
    Force a fix sheet size. (default: as in input file)

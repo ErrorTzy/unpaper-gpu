@@ -58,6 +58,7 @@ typedef struct {
   struct MultiIndex ignore_multi_index;
   struct MultiIndex insert_blank;
   struct MultiIndex replace_blank;
+  struct MultiIndex skip_split;
 
   // 0: allow all, -1: disable all, n: individual entries
   struct MultiIndex no_blackfilter_multi_index;
