@@ -101,6 +101,7 @@ src/infra/*            # logging + threading utils
   - Initially call existing `process_sheet()` (no logic change).
 - Acceptance:
   - Pipelines call the new API, behavior unchanged.
+- Status: complete.
 
 **PR A4: Stage extraction from `process_sheet()`**
 - Scope:

@@ -51,6 +51,7 @@ unpaper_cpp_args = []
 unpaper_sources = [
     'file.c', 'parse.c', 'sheet_process.c',
     'src/cli/cli_main.c', 'src/cli/cli_options.c',
+    'src/core/sheet_pipeline.c',
     'imageprocess/blit.c',
     'imageprocess/backend.c',
     'imageprocess/cuda_mempool.c',
@@ -701,6 +702,7 @@ if have_pdf
     # PDF pipeline CPU test - uses processing pipeline without main()
     pdf_pipeline_cpu_test_sources = [
         'file.c', 'parse.c', 'sheet_process.c',
+        'src/core/sheet_pipeline.c',
         'imageprocess/blit.c',
         'imageprocess/backend.c',
         'imageprocess/cuda_mempool.c',

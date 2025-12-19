@@ -9,7 +9,7 @@
 #include "lib/gpu_monitor.h"
 #include "lib/logging.h"
 #include "lib/threadpool.h"
-#include "sheet_process.h"
+#include "src/core/sheet_pipeline.h"
 
 #include <libavutil/frame.h>
 #include <stdio.h>
@@ -184,7 +184,7 @@ bool batch_process_job(BatchWorkerContext *ctx, size_t job_index) {
     }
   }
 
-  bool success = process_sheet(&state, ctx->config);
+  bool success = sheet_pipeline_run(&state, ctx->config);
 
   if (success && ctx->post_process_fn != NULL) {
     if (!ctx->post_process_fn(ctx, job_index, &state, ctx->post_process_user_ctx)) {
