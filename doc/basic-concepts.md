@@ -58,17 +58,23 @@ The default value both for `--input-pages` and `--output-pages` is 1.
 
 ### File Formats
 
-The *image-file* formats accepted by `unpaper` are those that
-[libav](http://libav.org) can handle. In particular it supports the
-whole PNM-family: **PBM**, **PGM** and **PPM**. This ensures
-interoperability with the [SANE](http://www.sane-project.org/) tools
-under Linux. Support for TIFF and other complex file formats is not
-guaranteed.
+The *image-file* formats accepted by `unpaper` are those that FFmpeg can
+decode into the supported pixel formats (GRAY8, Y400A, RGB24, MONO).
+This includes the whole PNM family (**PBM**, **PGM**, **PPM**) and
+commonly used formats such as PNG, JPEG, and TIFF (depending on your
+FFmpeg build). This ensures interoperability with the
+[SANE](http://www.sane-project.org/) tools under Linux.
 
-The output format is restricted to the PNM family of formats, and
-conversions to other formats need to happen with tools such as
-`pnmtopng`, `pnmtotiff` or `pnmtojpeg`. Alternatively you can use the
-`convert` tool from [ImageMagick](http://www.imagemagick.org/).
+For image inputs, the default output is still PNM (PBM/PGM/PPM), and
+you can force a specific type with `--type`. When built with CUDA and
+nvImageCodec, batch mode can also write JPEG or JPEG2000 by using
+`.jpg`/`.jpeg` or `.jp2` extensions in the output filenames.
+
+PDF input/output is supported when built with MuPDF. PDF processing is
+enabled when both input and output are `.pdf` files. The pipeline
+extracts embedded raster images when possible and falls back to
+rendering at `--pdf-dpi` if needed. Output PDFs embed JPEG by default
+(`--pdf-quality=fast`) or JP2 (`--pdf-quality=high`) when supported.
 
 ## Layouts and Templates
 
@@ -457,9 +463,7 @@ measurement value. `--dpi` may also appear multiple times, e.g. if the
 resolution than those of the input file(s).
 
 Note that using the `--dpi` option will have no effect on the
-resolution of the *image-files* that get written as output. (The PNM
-format is not capable of storing information about the image
-resolution.) The value set via `--dpi` will only have effect on
-`unpaper`'s internal conversion of length measurements to absolute
-pixel values when *size* values are specified using length
-measurements or *size* names.
+resolution metadata of the *image-files* that get written as output.
+The value set via `--dpi` only affects `unpaper`'s internal conversion
+of length measurements to absolute pixel values when *size* values are
+specified using length measurements or *size* names.

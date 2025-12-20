@@ -33,11 +33,11 @@ results of unpaper and adjust the parameter settings according to the
 requirements of the input. Each processing step can also be disabled
 individually for each sheet.
 
-Input and output files can be in either ``.pbm``, ``.pgm`` or ``.ppm``
-format, thus generally in ``.pnm`` format, as also used by the Linux
-scanning tools ``scanimage`` and ``scanadf``. Conversion to PDF can e.g.
-be achieved with the Linux tools ``pgm2tiff``, ``tiffcp`` and
-``tiff2pdf``.
+Image input and output are handled via FFmpeg and support the PNM
+family (``.pbm``, ``.pgm``, ``.ppm``) plus other formats that decode to
+supported pixel formats (PNG/JPEG/TIFF/etc., depending on your FFmpeg
+build). PDF input/output is available when built with MuPDF and is
+activated when both input and output filenames are ``.pdf``.
 
 Input and Output files
 ----------------------
@@ -56,10 +56,13 @@ Missing output file names are fatal and will stop processing; missing
 initial input file names are fatal, and so is any missing input file if
 a range of sheets is defined through ``--sheet`` or ``--end-sheet``.
 
-``unpaper`` accepts files in PNM format, which means they might be in
-``.pbm``, ``.pgm``, ``.ppm`` or ``.pnm`` format, which is what is
-produced by Linux command line scanning tools such as ``scanimage`` and
-``scanadf``.
+PDF mode requires exactly one input PDF and one output PDF filename.
+Additional positional arguments are not allowed in PDF mode.
+
+``unpaper`` accepts PNM inputs and other FFmpeg-decoded image formats
+that map to supported pixel formats. For PDF processing, supply exactly
+one input PDF and one output PDF; PDF pages are processed in-place using
+the same image pipeline.
 
 Options
 -------
@@ -111,7 +114,8 @@ Options
    Use ``--device=cpu`` to force CPU and ``--device=cuda`` to force GPU.
    ``cuda`` requires unpaper to be built with CUDA support
    (``-Dcuda=enabled``). Building with CUDA support also requires
-   OpenCV 4.x with CUDA modules (cudaarithm, cudaimgproc). If CUDA
+   OpenCV 4.x with CUDA modules (cudaarithm, cudaimgproc, cudawarping)
+   and nvImageCodec for GPU JPEG/JP2 encode/decode. If CUDA
    support is not compiled in, selecting ``--device=cuda`` is a fatal
    error (no silent fallback). Even in CUDA-capable builds, explicitly
    selecting ``--device=cuda`` will fail if no compatible CUDA
@@ -144,12 +148,17 @@ Options
    - Enables concurrent processing via multiple CUDA streams
    - Pipelines decode/upload/process/download/encode stages
 
-   Batch mode requires input and output file patterns with ``%d``
-   placeholders (e.g., ``input%04d.png output%04d.pbm``).
+   Batch mode is most useful with input/output patterns that include
+   ``%d`` placeholders (e.g., ``input%04d.png output%04d.pbm``), but
+   explicit file lists are also supported. In PDF mode, batch operates
+   across pages while still using a single input/output PDF file.
 
    If any image fails processing, the batch continues with remaining
    images. Failed images are logged to stderr and counted in the batch
    summary.
+
+   Note: When using CUDA with JPEG output files, unpaper may
+   auto-enable batch mode to activate the GPU JPEG pipeline.
 
 .. option:: -j N ; --jobs=N
 
@@ -172,6 +181,19 @@ Options
 
    Example: ``unpaper --batch --jobs=4 --device=cuda input%04d.png output%04d.pbm``
 
+.. option:: --cuda-streams=N
+
+   Set the number of CUDA streams used for batch processing (0 = auto).
+   This controls GPU concurrency and also sizes the GPU buffer pools.
+   Only effective when using the CUDA backend.
+
+.. option:: --jpeg-quality=N
+
+   Set JPEG output quality (1-100, default 85). This is used for GPU
+   JPEG encoding in batch mode (``.jpg``/``.jpeg`` outputs) and for PDF
+   output when ``--pdf-quality`` is ``fast``. Ignored when JPEG output
+   is not in use.
+
 .. option:: --progress
 
    Show batch processing progress output. When enabled, prints a
@@ -181,6 +203,23 @@ Options
 
    The progress output is printed to stdout. This option is only
    effective when ``--batch`` is enabled.
+
+.. option:: --pdf-quality { fast | high }
+
+   PDF-only. Select PDF output image quality:
+
+   ``fast``
+      JPEG output (lossy, smaller and faster). This is the default.
+
+   ``high``
+      JPEG2000 output (lossless) when nvImageCodec JP2 support is
+      available; otherwise falls back to JPEG.
+
+.. option:: --pdf-dpi N
+
+   PDF-only. Set the DPI used when a page must be rendered (fallback
+   when the embedded image cannot be extracted). Valid range is 72-1200
+   (default 300).
 
 .. option:: --pre-rotate { -90 | 90 }
 
@@ -685,6 +724,10 @@ Options
    same, or closest, pixel format as the original input files will be
    used.
 
+   This option applies to image outputs. PDF output ignores ``--type``.
+   For CUDA batch JPEG/JP2 output, the format is selected by the output
+   filename extension (``.jpg``/``.jp2``).
+
    ``pbm``
       Portable Bit Map, monochrome raw image.
 
@@ -782,9 +825,11 @@ If ``--perf`` output shows "size mismatch" warnings, consider:
 
 **GPU Memory Requirements**
 
-CUDA batch mode requires significant GPU memory:
+CUDA batch mode requires significant GPU memory. Pool sizes are
+auto-tuned based on available VRAM and stream count:
 
-- Memory pool: 256MB (8 buffers x 32MB)
+- Streams: auto-scaled (1-32) unless overridden by ``--cuda-streams``
+- Buffer pool: 3x streams (triple-buffering), 32MB per buffer
 - Per-image working memory: ~2x image size during processing
 - Concurrent images: controlled by ``--jobs`` (default: auto)
 

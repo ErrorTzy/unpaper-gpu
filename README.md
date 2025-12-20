@@ -33,6 +33,15 @@ The program also tries to detect misaligned centering and rotation of
 pages and will automatically straighten each page by rotating it to
 the correct angle. This process is called "deskewing".
 
+Key Features
+------------
+
+- CPU and CUDA backends with auto-selection (`--device=cpu|cuda`)
+- Batch processing for large file sequences (`--batch`, `--jobs`, `--progress`)
+- PDF input/output pipeline (MuPDF) with image extraction + render fallback
+- GPU-accelerated JPEG/JP2 decode/encode via nvImageCodec (CUDA builds)
+- Broad image input support via FFmpeg (PNG/JPEG/TIFF/etc., subject to pixel formats)
+
 Note that the automatic processing will sometimes fail. It is always a
 good idea to manually control the results of unpaper and adjust the
 parameter settings according to the requirements of the input. Each
@@ -43,20 +52,33 @@ See [further documentation][3] for the supported file formats notes.
 Dependencies
 ------------
 
-The only hard dependency of `unpaper` is [ffmpeg][4], which is used for
-file input and output.
+Base build requirements:
+
+- **FFmpeg libraries**: `libavformat`, `libavcodec`, `libavutil`, `libswscale`
+- **POSIX threads** and the math library
+
+Optional features (auto-detected unless explicitly enabled):
+
+- **PDF support** (`-Dpdf=enabled`): **MuPDF**
+- **JBIG2 decode for PDF B&W images** (`-Djbig2=enabled`): **jbig2dec**
+- **CUDA backend** (`-Dcuda=enabled`): NVIDIA CUDA Toolkit + OpenCV 4.x CUDA
+
+Meson feature options default to `auto`. Use `-Dcuda=disabled`,
+`-Dpdf=disabled`, or `-Djbig2=disabled` to force features off.
 
 ### CUDA Backend Dependencies
 
 For GPU-accelerated processing (auto-detected or `--device=cuda`), the following
 are required:
 
-- **CUDA Toolkit**: Tested with CUDA 12.x and 13.x. The `nvcc` compiler
-  and CUDA runtime library (`cudart`) must be available.
+- **CUDA Toolkit**: Tested with CUDA 12.x and 13.x. The `nvcc` compiler,
+  CUDA runtime (`cudart`), **NPP**, and **nvJPEG** must be available.
 - **OpenCV 4.x with CUDA support**: Required for CUDA builds. OpenCV must
-  be built with CUDA support enabled, including the `cudaarithm` and
-  `cudaimgproc` modules. OpenCV provides GPU-accelerated operations
-  including connected component labeling for the noisefilter.
+  be built with CUDA support enabled, including `cudaarithm`,
+  `cudaimgproc`, and `cudawarping`. OpenCV provides GPU-accelerated
+  operations including connected-component labeling for the noisefilter.
+- **nvImageCodec** (`nvimgcodec`): Required for GPU JPEG/JP2 decode/encode.
+  Optional **nvjpeg2k** improves JPEG2000 support when available.
 
 Building instructions
 ---------------------
@@ -80,6 +102,24 @@ mileage may vary.
 Tests depend on `pytest` and `pillow`, which will be auto-detected by
 Meson.
 
+### Building with PDF Support
+
+To enable PDF input/output, configure with `-Dpdf=enabled` (MuPDF required):
+
+    unpaper$ meson setup builddir-pdf -Dpdf=enabled --buildtype=debugoptimized
+    unpaper$ meson compile -C builddir-pdf
+
+Optional JBIG2 decode for B&W PDF images:
+
+    unpaper$ meson setup builddir-pdf -Dpdf=enabled -Djbig2=enabled \
+        --buildtype=debugoptimized
+
+PDF processing is activated when **both** input and output files are PDFs:
+
+    unpaper$ unpaper input.pdf output.pdf
+    unpaper$ unpaper --pdf-quality=high input.pdf output.pdf
+    unpaper$ unpaper --pdf-dpi=400 input.pdf output.pdf
+
 ### Building with CUDA Support
 
 To enable GPU-accelerated processing, configure with `-Dcuda=enabled`:
@@ -88,8 +128,9 @@ To enable GPU-accelerated processing, configure with `-Dcuda=enabled`:
     unpaper$ meson compile -C builddir-cuda
 
 The CUDA backend requires:
-- NVIDIA CUDA Toolkit (nvcc compiler and cudart library)
-- OpenCV 4.x with CUDA support (cudaarithm and cudaimgproc modules)
+- NVIDIA CUDA Toolkit (nvcc compiler, cudart, NPP, nvJPEG)
+- OpenCV 4.x with CUDA support (cudaarithm, cudaimgproc, cudawarping)
+- nvImageCodec (nvimgcodec) for GPU JPEG/JP2 decode/encode
 
 By default, unpaper will use CUDA when it is available. Use `--device=cpu` to
 force CPU processing, or `--device=cuda` to force GPU processing.
@@ -114,6 +155,24 @@ These formats benefit from optimized OpenCV CUDA primitives including
 Other formats like Y400A (grayscale with alpha) and 1-bit mono (MONOWHITE,
 MONOBLACK) are supported but use custom CUDA kernels since OpenCV lacks
 native support for 2-channel and bit-packed images.
+
+### Output Formats
+
+For image inputs, the default output remains **PNM** (PBM/PGM/PPM). In CUDA
+batch mode with nvImageCodec available, you can write **JPEG** or **JPEG2000**
+by using `.jpg`/`.jpeg` or `.jp2` extensions in the output filenames.
+For PDF output, use PDF input/output files and `--pdf-quality` (and
+optionally `--pdf-dpi` for render fallback). Use `--jpeg-quality` to
+control JPEG encoding quality.
+
+### Batch Processing
+
+Batch mode pre-enumerates jobs and processes them in parallel:
+
+    unpaper$ unpaper --batch --jobs=4 input%04d.png output%04d.pbm
+
+When using CUDA with JPEG output files, batch mode may be auto-enabled
+to activate the GPU JPEG pipeline.
 
 FFmpeg automatically selects pixel format based on input. To ensure optimal
 format, you can pre-convert images:
