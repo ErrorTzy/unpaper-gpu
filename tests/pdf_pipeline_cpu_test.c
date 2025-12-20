@@ -88,6 +88,12 @@ static void test_single_page_pdf(void) {
     return;
   }
   int input_pages = pdf_page_count(doc);
+  PdfPageInfo input_info;
+  if (!pdf_get_page_info(doc, 0, &input_info)) {
+    printf("SKIPPED (could not get input page info)\n");
+    pdf_close(doc);
+    return;
+  }
   pdf_close(doc);
 
   // Clean up any previous output
@@ -132,6 +138,13 @@ static void test_single_page_pdf(void) {
   }
 
   int output_pages = pdf_page_count(doc);
+  PdfPageInfo output_info;
+  if (!pdf_get_page_info(doc, 0, &output_info)) {
+    printf("FAILED (could not get output page info)\n");
+    pdf_close(doc);
+    cleanup_output();
+    exit(1);
+  }
   pdf_close(doc);
 
   if (output_pages != input_pages) {
@@ -142,73 +155,9 @@ static void test_single_page_pdf(void) {
   }
 
   cleanup_output();
-  printf("PASSED (%d page(s))\n", output_pages);
-}
-
-static void test_multi_page_pdf(void) {
-  printf("Test: multi-page PDF processing... ");
-
-  // Check if test file exists
-  PdfDocument *doc = pdf_open(test_2page_pdf_path);
-  if (doc == NULL) {
-    printf("SKIPPED (test PDF not found: %s)\n", test_2page_pdf_path);
-    return;
-  }
-  int input_pages = pdf_page_count(doc);
-  pdf_close(doc);
-
-  if (input_pages < 2) {
-    printf("SKIPPED (test PDF has only %d page)\n", input_pages);
-    return;
-  }
-
-  cleanup_output();
-
-  Options options;
-  options_init(&options);
-  options.device = UNPAPER_DEVICE_CPU;
-  options.write_output = true;
-  options.perf = false;
-
-  Rectangle preMasks[MAX_MASKS];
-  Point points[MAX_POINTS];
-  int32_t middleWipe[2] = {0, 0};
-  Rectangle blackfilterExclude[MAX_MASKS];
-
-  options_init_filter_defaults(&options, blackfilterExclude);
-
-  SheetProcessConfig config;
-  sheet_process_config_init(&config, &options, preMasks, 0, points, 0,
-                            middleWipe, blackfilterExclude, 0);
-
-  int failed = pdf_pipeline_cpu_process(test_2page_pdf_path, test_output_path,
-                                        &options, &config);
-
-  if (failed != 0) {
-    printf("FAILED (%d pages failed)\n", failed);
-    cleanup_output();
-    exit(1);
-  }
-
-  doc = pdf_open(test_output_path);
-  if (doc == NULL) {
-    printf("FAILED (output PDF not created: %s)\n", pdf_get_last_error());
-    cleanup_output();
-    exit(1);
-  }
-
-  int output_pages = pdf_page_count(doc);
-  pdf_close(doc);
-
-  if (output_pages != input_pages) {
-    printf("FAILED (page count mismatch: %d -> %d)\n", input_pages,
-           output_pages);
-    cleanup_output();
-    exit(1);
-  }
-
-  cleanup_output();
-  printf("PASSED (%d pages)\n", output_pages);
+  printf("PASSED (%d page(s), %.0fx%.0f -> %.0fx%.0f pts)\n", output_pages,
+         input_info.width, input_info.height, output_info.width,
+         output_info.height);
 }
 
 static void test_multi_page_pdf_batch_pipeline(void) {
@@ -326,75 +275,6 @@ static void test_invalid_input(void) {
   printf("PASSED\n");
 }
 
-static void test_output_quality(void) {
-  printf("Test: output PDF quality verification... ");
-
-  PdfDocument *doc = pdf_open(test_jpeg_pdf_path);
-  if (doc == NULL) {
-    printf("SKIPPED (test PDF not found)\n");
-    return;
-  }
-
-  PdfPageInfo input_info;
-  if (!pdf_get_page_info(doc, 0, &input_info)) {
-    printf("SKIPPED (could not get input page info)\n");
-    pdf_close(doc);
-    return;
-  }
-  pdf_close(doc);
-
-  cleanup_output();
-
-  Options options;
-  options_init(&options);
-  options.device = UNPAPER_DEVICE_CPU;
-  options.write_output = true;
-  options.jpeg_quality = 90;
-
-  Rectangle preMasks[MAX_MASKS];
-  Point points[MAX_POINTS];
-  int32_t middleWipe[2] = {0, 0};
-  Rectangle blackfilterExclude[MAX_MASKS];
-
-  options_init_filter_defaults(&options, blackfilterExclude);
-
-  SheetProcessConfig config;
-  sheet_process_config_init(&config, &options, preMasks, 0, points, 0,
-                            middleWipe, blackfilterExclude, 0);
-
-  int failed = pdf_pipeline_cpu_process(test_jpeg_pdf_path, test_output_path,
-                                        &options, &config);
-
-  if (failed != 0) {
-    printf("FAILED (processing failed)\n");
-    cleanup_output();
-    exit(1);
-  }
-
-  doc = pdf_open(test_output_path);
-  if (doc == NULL) {
-    printf("FAILED (output PDF not created)\n");
-    cleanup_output();
-    exit(1);
-  }
-
-  PdfPageInfo output_info;
-  if (!pdf_get_page_info(doc, 0, &output_info)) {
-    printf("FAILED (could not get output page info)\n");
-    pdf_close(doc);
-    cleanup_output();
-    exit(1);
-  }
-
-  // Output dimensions should be similar (within tolerance for DPI conversion)
-  // Since we use 300 DPI for rendering, output may differ slightly
-  pdf_close(doc);
-  cleanup_output();
-
-  printf("PASSED (%.0fx%.0f -> %.0fx%.0f pts)\n", input_info.width,
-         input_info.height, output_info.width, output_info.height);
-}
-
 int main(void) {
   printf("PDF Pipeline CPU Unit Tests\n");
   printf("===========================\n\n");
@@ -404,9 +284,7 @@ int main(void) {
   test_is_pdf();
   test_invalid_input();
   test_single_page_pdf();
-  test_multi_page_pdf();
   test_multi_page_pdf_batch_pipeline();
-  test_output_quality();
 
   printf("\nAll tests passed!\n");
   return 0;

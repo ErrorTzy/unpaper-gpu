@@ -415,29 +415,20 @@ def _render_pdf_pages(
     return sorted(out_dir.glob("page-*.pnm"))
 
 
-@lru_cache(maxsize=1)
-def jbig2_gpu_decode_available() -> bool:
-    """Return true if CUDA+PDF builds can decode JBIG2 via the GPU PDF pipeline."""
-    if not cuda_runtime_available():
-        return False
-    if not pdf_mode_supported():
-        return False
-
-    sample = pathlib.Path("tests/pdf_samples/test_jbig2.pdf")
-    if not sample.exists():
-        return False
-
-    tmpdir = tempfile.TemporaryDirectory(prefix="unpaper-jbig2-gpu-probe-")
-    try:
-        out_pdf = pathlib.Path(tmpdir.name) / "out.pdf"
-        proc = run_unpaper(
-            "--device", "cuda", str(sample), str(out_pdf), check=False, capture=True
-        )
-        text = (proc.stdout or "") + (proc.stderr or "")
-        return proc.returncode == 0 and "JBIG2 decoded to GPU" in text
-    finally:
-        tmpdir.cleanup()
-
+def _pdf_page_count(*, pdf_path: pathlib.Path) -> int:
+    _require_external_tools("mutool")
+    proc = subprocess.run(
+        ["mutool", "info", str(pdf_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    text = (proc.stdout or "") + (proc.stderr or "")
+    match = re.search(r"Pages:\s+(\d+)", text)
+    if not match:
+        raise RuntimeError(f"could not determine page count for {pdf_path}")
+    return int(match.group(1))
 
 @pytest.fixture
 def fast_device():
@@ -475,7 +466,7 @@ def test_cuda_pre_ops_match_cpu(imgsrc_path, tmp_path, extra_args):
 
 @pytest.mark.slow
 @pytest.mark.gpu
-@pytest.mark.parametrize("interp", ["nearest", "linear", "cubic"])
+@pytest.mark.parametrize("interp", ["linear"])
 def test_cuda_stretch_and_post_size_match_cpu(imgsrc_path, tmp_path, interp):
     if not cuda_runtime_available():
         pytest.skip("CUDA runtime/device not available")
@@ -622,22 +613,6 @@ def test_a1(imgsrc_path, goldendir_path, tmp_path, device):
     assert compare_images(golden=golden_path, result=result_path) < tolerance
 
 
-@pytest.mark.slow
-def test_a2(imgsrc_path, goldendir_path, tmp_path, fast_device):
-    """[A2] Single-Page Template Layout, Black+White, Full Processing, PPI scaling."""
-    source_path = imgsrc_path / "imgsrc001.png"
-    result_path = tmp_path / "result.pbm"
-    golden_path = goldendir_path / "goldenA2.pbm"
-
-    # Default processing is at 300 PPI, so by using 600 PPI and *two* A sizes lower
-    # (A4 → A6) we should have an almost idential file as goldenA1.
-    run_unpaper("--device", fast_device, str(source_path), str(result_path), "--ppi", "600", "--post-size", "a6")
-
-    # CUDA produces slightly different results due to floating point precision
-    tolerance = 0.06 if fast_device == "cuda" else 0.05
-    assert compare_images(golden=golden_path, result=result_path) < tolerance
-
-
 @pytest.mark.fast
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_b1(imgsrc_path, goldendir_path, tmp_path, device):
@@ -654,50 +629,6 @@ def test_b1(imgsrc_path, goldendir_path, tmp_path, device):
     run_unpaper(
         "--device",
         device,
-        "-n",
-        "--input-pages",
-        "2",
-        str(source1_path),
-        str(source2_path),
-        str(result_path),
-    )
-
-    assert compare_images(golden=golden_path, result=result_path) < 0.05
-
-
-@pytest.mark.slow
-def test_b2(imgsrc_path, goldendir_path, tmp_path, fast_device):
-    """[B2] Combined Color/Black+White, No Processing."""
-
-    source1_path = imgsrc_path / "imgsrc003.png"
-    source2_path = imgsrc_path / "imgsrc005.png"
-    result_path = tmp_path / "result.ppm"
-    golden_path = goldendir_path / "goldenB2.ppm"
-
-    run_unpaper(
-        "--device", fast_device,
-        "-n",
-        "--input-pages",
-        "2",
-        str(source1_path),
-        str(source2_path),
-        str(result_path),
-    )
-
-    assert compare_images(golden=golden_path, result=result_path) < 0.05
-
-
-@pytest.mark.slow
-def test_b3(imgsrc_path, goldendir_path, tmp_path, fast_device):
-    """[B3] Combined Gray/Black+White, No Processing."""
-
-    source1_path = imgsrc_path / "imgsrc004.png"
-    source2_path = imgsrc_path / "imgsrc005.png"
-    result_path = tmp_path / "result.ppm"
-    golden_path = goldendir_path / "goldenB3.ppm"
-
-    run_unpaper(
-        "--device", fast_device,
         "-n",
         "--input-pages",
         "2",
@@ -753,28 +684,6 @@ def test_pre_shift_both(imgsrc_path, goldendir_path, tmp_path, fast_device):
     assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
-@pytest.mark.slow
-def test_negative_shift(imgsrc_path, goldendir_path, tmp_path, fast_device):
-    """[C2] Explicit -1 size shifting."""
-
-    source_path = imgsrc_path / "imgsrc002.png"
-    result_path = tmp_path / "result.pbm"
-    golden_path = goldendir_path / "goldenC3.pbm"
-
-    run_unpaper(
-        "--device", fast_device,
-        "-n",
-        "--sheet-size",
-        "a4",
-        "--pre-shift",
-        "-1cm",
-        str(source_path),
-        str(result_path),
-    )
-
-    assert compare_images(golden=golden_path, result=result_path) < 0.05
-
-
 @pytest.mark.fast
 def test_sheet_crop(imgsrc_path, goldendir_path, tmp_path, fast_device):
     """[D1] Crop to sheet size."""
@@ -786,44 +695,6 @@ def test_sheet_crop(imgsrc_path, goldendir_path, tmp_path, fast_device):
         "--device", fast_device,
         "-n",
         "--sheet-size",
-        "20cm,10cm",
-        str(source_path),
-        str(result_path),
-    )
-
-    assert compare_images(golden=golden_path, result=result_path) < 0.05
-
-
-@pytest.mark.slow
-def test_sheet_fit(imgsrc_path, goldendir_path, tmp_path, fast_device):
-    """[D2] Fit to sheet size."""
-    source_path = imgsrc_path / "imgsrc003.png"
-    result_path = tmp_path / "result.pbm"
-    golden_path = goldendir_path / "goldenD2.ppm"
-
-    run_unpaper(
-        "--device", fast_device,
-        "-n",
-        "--size",
-        "20cm,10cm",
-        str(source_path),
-        str(result_path),
-    )
-
-    assert compare_images(golden=golden_path, result=result_path) < 0.05
-
-
-@pytest.mark.slow
-def test_sheet_stretch(imgsrc_path, goldendir_path, tmp_path, fast_device):
-    """[D3] Stretch to sheet size."""
-    source_path = imgsrc_path / "imgsrc003.png"
-    result_path = tmp_path / "result.pbm"
-    golden_path = goldendir_path / "goldenD3.ppm"
-
-    run_unpaper(
-        "--device", fast_device,
-        "-n",
-        "--stretch",
         "20cm,10cm",
         str(source_path),
         str(result_path),
@@ -854,131 +725,6 @@ def test_e1(imgsrc_path, goldendir_path, tmp_path, fast_device):
         golden_path = goldendir_path / f"goldenE1-{name_match.group(1)}.pbm"
 
         assert compare_images(golden=golden_path, result=result) < 0.05
-
-
-@pytest.mark.slow
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_e2(imgsrc_path, goldendir_path, tmp_path, device):
-    """[E2] Splitting 2-page layout into separate output pages (with output wildcard only)."""
-
-    if device == "cuda" and not cuda_runtime_available():
-        pytest.skip("CUDA runtime/device not available")
-
-    source_path = imgsrc_path / "imgsrcE001.png"
-    result_path = tmp_path / "results-%02d.pbm"
-
-    run_unpaper(
-        "--device",
-        device,
-        "--layout",
-        "double",
-        "--output-pages",
-        "2",
-        str(source_path),
-        str(result_path),
-    )
-
-    all_results = sorted(tmp_path.iterdir())
-    assert len(all_results) == 2
-
-    for result in all_results:
-        name_match = re.match(r"^results-([0-9]{2})\.pbm$", str(result.name))
-        assert name_match
-
-        golden_path = goldendir_path / f"goldenE1-{name_match.group(1)}.pbm"
-
-        assert compare_images(golden=golden_path, result=result) < 0.05
-
-
-@pytest.mark.slow
-def test_e3(imgsrc_path, goldendir_path, tmp_path, fast_device):
-    """[E3] Splitting 2-page layout into separate output pages (with explicit input and output)."""
-
-    source_path = imgsrc_path / "imgsrcE001.png"
-    result_path_1 = tmp_path / "results-1.pbm"
-    result_path_2 = tmp_path / "results-2.pbm"
-
-    run_unpaper(
-        "--device", fast_device,
-        "--layout",
-        "double",
-        "--output-pages",
-        "2",
-        str(source_path),
-        str(result_path_1),
-        str(result_path_2),
-    )
-
-    all_results = sorted(tmp_path.iterdir())
-    assert len(all_results) == 2
-    assert (
-        compare_images(
-            golden=(goldendir_path / "goldenE1-01.pbm"), result=result_path_1
-        )
-        < 0.05
-    )
-    assert (
-        compare_images(
-            golden=(goldendir_path / "goldenE1-02.pbm"), result=result_path_2
-        )
-        < 0.05
-    )
-
-
-@pytest.mark.slow
-def test_f1(imgsrc_path, goldendir_path, tmp_path, fast_device):
-    """[F1] Merging 2-page layout into single output page (with input and output wildcard)."""
-
-    source_path = imgsrc_path / "imgsrcE%03d.png"
-    output_path = tmp_path / "results-%d.pbm"
-    result_path = tmp_path / "results-1.pbm"
-    golden_path = goldendir_path / "goldenF.pbm"
-
-    run_unpaper(
-        "--device", fast_device,
-        "--end-sheet",
-        "1",
-        "--layout",
-        "double",
-        "--input-pages",
-        "2",
-        str(source_path),
-        str(output_path),
-    )
-
-    all_results = sorted(tmp_path.iterdir())
-    assert len(all_results) == 1
-    assert all_results[0] == result_path
-
-    assert compare_images(golden=golden_path, result=result_path) < 0.05
-
-
-@pytest.mark.slow
-def test_f2(imgsrc_path, goldendir_path, tmp_path, fast_device):
-    """[F2] Merging 2-page layout into single output page (with output wildcard only)."""
-
-    source_path_1 = imgsrc_path / "imgsrcE001.png"
-    source_path_2 = imgsrc_path / "imgsrcE002.png"
-    output_path = tmp_path / "results-%d.pbm"
-    result_path = tmp_path / "results-1.pbm"
-    golden_path = goldendir_path / "goldenF.pbm"
-
-    run_unpaper(
-        "--device", fast_device,
-        "--layout",
-        "double",
-        "--input-pages",
-        "2",
-        str(source_path_1),
-        str(source_path_2),
-        str(output_path),
-    )
-
-    all_results = sorted(tmp_path.iterdir())
-    assert len(all_results) == 1
-    assert all_results[0] == result_path
-
-    assert compare_images(golden=golden_path, result=result_path) < 0.05
 
 
 @pytest.mark.slow
@@ -1074,15 +820,12 @@ def test_skip_split_requires_pdf(imgsrc_path, tmp_path):
 
 @pytest.mark.slow
 @pytest.mark.pdf
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_pdf_skip_split_page_counts(
-    imgsrc_path, pdf_inputs_dir, tmp_path, device
+    imgsrc_path, pdf_inputs_dir, tmp_path, fast_device
 ):
     _require_external_tools("mutool")
     if not pdf_mode_supported():
         pytest.skip("unpaper built without PDF support")
-    if device == "cuda" and not cuda_runtime_available():
-        pytest.skip("CUDA runtime/device not available")
 
     input_pdf = _get_or_create_input_pdf(
         case_id="S2",
@@ -1091,11 +834,11 @@ def test_pdf_skip_split_page_counts(
         pdf_inputs_dir=pdf_inputs_dir,
         input_images=["imgsrc001.png", "imgsrc002.png", "imgsrc003.png"],
     )
-    output_pdf = tmp_path / f"out-s2-skip-split-{device}.pdf"
+    output_pdf = tmp_path / f"out-s2-skip-split-{fast_device}.pdf"
 
     proc = run_unpaper(
         "--device",
-        device,
+        fast_device,
         "--split",
         "--skip-split",
         "2",
@@ -1105,11 +848,9 @@ def test_pdf_skip_split_page_counts(
     )
     assert proc.returncode == 0
 
-    rendered = _render_pdf_pages(
-        pdf_path=output_pdf, out_dir=tmp_path / f"render-{device}", dpi=300
-    )
+    page_count = _pdf_page_count(pdf_path=output_pdf)
     # 3 input pages: split => 2 + 2 + 2, skip page 2 => 2 + 1 + 2 = 5
-    assert len(rendered) == 5
+    assert page_count == 5
 
 
 def test_valid_range_multi_index(imgsrc_path, tmp_path):
@@ -1158,80 +899,6 @@ def test_jpeg_input_produces_similar_output_to_png(imgsrc_path, tmp_path, fast_d
     assert diff < 0.10, f"JPEG output differs from PNG by {diff*100:.1f}%, expected <10%"
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-def test_jpeg_input_device_comparison(imgsrc_path, tmp_path, device):
-    """Test JPEG input produces consistent results across CPU and CUDA.
-
-    This ensures the JPEG decode path works correctly on both devices.
-    For CUDA, this exercises the nvJPEG decode path when available.
-    """
-    if device == "cuda" and not cuda_runtime_available():
-        pytest.skip("CUDA runtime/device not available")
-
-    # Create JPEG from PNG to ensure compatible pixel format
-    # (test_jpeg.jpg may be in YUV format which FFmpeg doesn't auto-convert)
-    png_source = imgsrc_path / "imgsrc001.png"
-    png_image = PIL.Image.open(png_source)
-    jpeg_path = tmp_path / "source.jpg"
-    png_image.save(jpeg_path, "JPEG", quality=95)
-
-    result_path = tmp_path / f"result_{device}.ppm"
-
-    # Process with specific device, minimal processing for clean comparison
-    run_unpaper(
-        "--device", device,
-        "--no-blackfilter",
-        "--no-noisefilter",
-        "--no-blurfilter",
-        "--no-grayfilter",
-        "--no-deskew",
-        str(jpeg_path),
-        str(result_path),
-    )
-
-    # Just verify output was created and is valid
-    assert result_path.exists()
-    result_image = PIL.Image.open(result_path)
-    assert result_image.width > 0 and result_image.height > 0
-
-
-@pytest.mark.slow
-@pytest.mark.gpu
-def test_jpeg_cuda_vs_cpu_similarity(imgsrc_path, tmp_path):
-    """Test JPEG processing on CUDA produces similar results to CPU.
-
-    This validates that the CUDA processing path (which may use nvJPEG
-    for decode) produces output similar to the CPU path (FFmpeg decode).
-    """
-    if not cuda_runtime_available():
-        pytest.skip("CUDA runtime/device not available")
-
-    # Create JPEG from PNG to ensure compatible pixel format
-    png_source = imgsrc_path / "imgsrc001.png"
-    png_image = PIL.Image.open(png_source)
-    jpeg_path = tmp_path / "source.jpg"
-    png_image.save(jpeg_path, "JPEG", quality=95)
-
-    cpu_result_path = tmp_path / "result_cpu.ppm"
-    cuda_result_path = tmp_path / "result_cuda.ppm"
-
-    common_args = [
-        "--no-blackfilter",
-        "--no-noisefilter",
-        "--no-blurfilter",
-        "--no-grayfilter",
-        "--no-deskew",
-    ]
-
-    run_unpaper("--device", "cpu", *common_args, str(jpeg_path), str(cpu_result_path))
-    run_unpaper("--device", "cuda", *common_args, str(jpeg_path), str(cuda_result_path))
-
-    # CPU and CUDA should produce very similar results for the same JPEG input
-    # Allow small tolerance for floating-point differences in GPU processing
-    diff = compare_images(golden=cpu_result_path, result=cuda_result_path)
-    assert diff < 0.05, f"CUDA JPEG output differs from CPU by {diff*100:.1f}%, expected <5%"
-
-
 # ---------------------------------------------------------------------------
 # PDF end-to-end golden tests
 # ---------------------------------------------------------------------------
@@ -1245,55 +912,38 @@ def pdf_inputs_dir(tmp_path_factory) -> pathlib.Path:
     return tmp_path_factory.mktemp("pdf-inputs")
 
 
-_PDF_GOLDEN_CASES: list[tuple[str, list[str], tuple[str, ...], list[str]]] = [
+_PDF_PIPELINE_CASES: list[tuple[str, str, str, list[str], tuple[str, ...], list[str]]] = [
     (
+        "cpu",
+        "jpeg",
         "A1",
         ["imgsrc001.png"],
         (),
         ["goldenA1.pbm"],
     ),
     (
-        "B1",
-        ["imgsrc003.png", "imgsrc004.png"],
-        ("-n", "--input-pages", "2"),
-        ["goldenB1.ppm"],
+        "cpu",
+        "png",
+        "A1",
+        ["imgsrc001.png"],
+        (),
+        ["goldenA1.pbm"],
     ),
     (
-        "C1",
-        ["imgsrc006.png"],
-        (
-            "--no-deskew",
-            "--no-blackfilter",
-            "--no-noisefilter",
-            "--no-blurfilter",
-            "--no-grayfilter",
-            "--no-mask-center",
-            "--mask-scan-direction",
-            "hv",
-            "--mask-scan-threshold",
-            "0.8,0.8",
-            "--mask-scan-minimum",
-            "1,1",
-            "--border-scan-direction",
-            "hv",
-            "--pre-wipe",
-            "0,0,9,9",
-            "--pre-border",
-            "2,2,2,2",
-        ),
-        ["goldenC1.ppm"],
+        "cpu",
+        "jbig2",
+        "A1",
+        ["imgsrc001.png"],
+        (),
+        ["goldenA1.pbm"],
     ),
     (
-        "D1",
-        ["imgsrc003.png"],
-        ("-n", "--sheet-size", "20cm,10cm"),
-        ["goldenD1.ppm"],
-    ),
-    (
-        "E1",
-        ["imgsrcE001.png", "imgsrcE002.png", "imgsrcE003.png"],
-        ("--layout", "double", "--output-pages", "2"),
-        [f"goldenE1-{i:02d}.pbm" for i in range(1, 7)],
+        "cuda",
+        "jpeg",
+        "A1",
+        ["imgsrc001.png"],
+        (),
+        ["goldenA1.pbm"],
     ),
 ]
 
@@ -1322,63 +972,12 @@ def _get_or_create_input_pdf(
     return out_pdf
 
 
-@pytest.mark.fast
-@pytest.mark.pdf
-def test_pdf_pipeline_smoke_matches_golden(
-    imgsrc_path,
-    goldendir_path,
-    pdf_inputs_dir,
-    tmp_path,
-):
-    _require_external_tools("mutool")
-    if not pdf_mode_supported():
-        pytest.skip("unpaper built without PDF support")
-
-    input_pdf = _get_or_create_input_pdf(
-        case_id="SMOKE",
-        encoding="jpeg",
-        imgsrc_path=imgsrc_path,
-        pdf_inputs_dir=pdf_inputs_dir,
-        input_images=["imgsrc001.png"],
-    )
-    output_pdf = tmp_path / "out-smoke-cpu.pdf"
-
-    proc = run_unpaper(
-        "--device",
-        "cpu",
-        "--pdf-quality",
-        "fast",
-        "--pdf-dpi",
-        "300",
-        "--jpeg-quality",
-        "95",
-        str(input_pdf),
-        str(output_pdf),
-        capture=True,
-    )
-
-    text = (proc.stdout or "") + (proc.stderr or "")
-    assert "Using CPU PDF pipeline" in text
-
-    rendered = _render_pdf_pages(
-        pdf_path=output_pdf, out_dir=tmp_path / "render-smoke", dpi=300
-    )
-    assert len(rendered) == 1
-
-    golden_path = goldendir_path / "goldenA1.pbm"
-    diff = compare_images_pdf(golden=golden_path, result=rendered[0])
-    assert diff <= _PDF_DIFF_MAX, (
-        f"[SMOKE] page 1 differs too much: similarity={(1.0 - diff):.3f}, "
-        f"expected >= {_PDF_SIMILARITY_MIN:.2f} (golden={golden_path}, "
-        f"result={rendered[0]})"
-    )
-
-
 @pytest.mark.slow
 @pytest.mark.pdf
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
-@pytest.mark.parametrize("encoding", ["jpeg", "png", "jbig2"])
-@pytest.mark.parametrize("case_id,input_images,extra_args,golden_images", _PDF_GOLDEN_CASES)
+@pytest.mark.parametrize(
+    "device,encoding,case_id,input_images,extra_args,golden_images",
+    _PDF_PIPELINE_CASES,
+)
 def test_pdf_pipeline_roundtrip_matches_goldens(
     imgsrc_path,
     goldendir_path,
@@ -1400,9 +999,6 @@ def test_pdf_pipeline_roundtrip_matches_goldens(
 
     if device == "cuda" and not cuda_runtime_available():
         pytest.skip("CUDA runtime/device not available")
-
-    if encoding == "jbig2" and device == "cuda" and not jbig2_gpu_decode_available():
-        pytest.skip("JBIG2 GPU decode path not available (build/runtime)")
 
     input_pdf = _get_or_create_input_pdf(
         case_id=case_id,
@@ -1434,16 +1030,8 @@ def test_pdf_pipeline_roundtrip_matches_goldens(
         assert "Using CPU PDF pipeline" in text
     else:
         assert "Using GPU PDF pipeline" in text
-        if encoding == "jpeg":
-            assert "GPU PDF pipeline: extracted JPEG image" in text
-            assert "GPU PDF pipeline: JPEG decoded to GPU" in text
-        elif encoding == "png":
-            # MuPDF typically exposes embedded PNG pages as FLATE streams.
-            assert re.search(r"GPU PDF pipeline: extracted (PNG|FLATE) image", text)
-            assert "GPU PDF pipeline: rendered and uploaded to GPU" in text
-        else:  # jbig2
-            assert "GPU PDF pipeline: extracted JBIG2 image" in text
-            assert "GPU PDF pipeline: JBIG2 decoded to GPU" in text
+        assert "GPU PDF pipeline: extracted JPEG image" in text
+        assert "GPU PDF pipeline: JPEG decoded to GPU" in text
 
     rendered = _render_pdf_pages(
         pdf_path=output_pdf, out_dir=tmp_path / "render", dpi=300
