@@ -25,7 +25,7 @@ typedef struct {
   bool cpu_dirty;
   bool cuda_dirty;
   bool from_external; // True if GPU memory was allocated externally (e.g.,
-                      // nvJPEG)
+                      // nvImageCodec)
   bool owns_memory;   // True if this Image owns the GPU memory and should free
                       // it
 } ImageCudaState;
@@ -43,7 +43,7 @@ static void image_cuda_state_free(void *opaque, uint8_t *data) {
     // Only free GPU memory if we own it (not borrowed from pool, etc.)
     if (st->owns_memory) {
       if (st->from_external) {
-        // External memory (e.g., nvJPEG per-image) - use direct cudaFree
+        // External memory (e.g., nvImageCodec per-image) - use direct cudaFree
         cudaFree((void *)(uintptr_t)st->dptr);
       } else {
         // Pool-allocated memory - use pool release (falls back to cudaFree if
@@ -338,7 +338,7 @@ Image create_image_from_gpu(void *gpu_ptr, size_t pitch, int width, int height,
   // Allocate CPU buffer to match the GPU buffer layout
   // CRITICAL: The CPU buffer linesize MUST match the GPU pitch for correct
   // data transfer in image_ensure_cpu. av_frame_get_buffer uses its own
-  // alignment which may not match nvJPEG's pitch.
+  // alignment which may not match nvImageCodec's pitch.
 
   // Manually allocate the data buffer with the exact size we need
   size_t buffer_size = pitch * (size_t)height;

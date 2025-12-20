@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Pipeline analysis tool for nvJPEG batch processing.
+Pipeline analysis tool for nvImageCodec batch processing.
 
 This script isolates each component of the batch processing pipeline
 to identify bottlenecks and measure scaling potential.
@@ -118,12 +118,12 @@ def measure_full_pipeline(images, streams, workers=None):
 
         return elapsed, result.stderr
 
-def parse_nvjpeg_stats(stderr):
-    """Parse nvJPEG statistics from stderr."""
+def parse_codec_stats(stderr):
+    """Parse nvImageCodec statistics from stderr."""
     stats = {}
     for line in stderr.split('\n'):
-        if 'nvJPEG' in line:
-            stats['nvjpeg_line'] = line
+        if 'nvImageCodec' in line:
+            stats['codec_line'] = line
         if 'Peak concurrent' in line:
             try:
                 stats['peak_concurrent'] = int(line.split(':')[-1].strip())
@@ -164,7 +164,7 @@ def analyze_scaling(image_count=32):
     # Baseline: 1 stream
     print("\n--- Baseline: 1 stream ---")
     baseline_time, baseline_stderr = measure_full_pipeline(images, 1)
-    baseline_stats = parse_nvjpeg_stats(baseline_stderr)
+    baseline_stats = parse_codec_stats(baseline_stderr)
     print(f"Time: {baseline_time:.2f}s ({baseline_time/len(images)*1000:.1f}ms/image)")
     print(f"Stats: {baseline_stats}")
 
@@ -179,7 +179,7 @@ def analyze_scaling(image_count=32):
     for streams in stream_counts[1:]:
         print(f"\n--- {streams} streams ---")
         elapsed, stderr = measure_full_pipeline(images, streams)
-        stats = parse_nvjpeg_stats(stderr)
+        stats = parse_codec_stats(stderr)
         speedup = baseline_time / elapsed
 
         print(f"Time: {elapsed:.2f}s ({elapsed/len(images)*1000:.1f}ms/image)")
@@ -236,7 +236,7 @@ def measure_component_timing(images):
         print(f"\nTotal time: {elapsed:.2f}s")
         print(f"\nRelevant output:")
         for line in result.stderr.split('\n'):
-            if any(x in line.lower() for x in ['queue', 'decode', 'nvjpeg', 'gpu', 'worker', 'stream', 'time', 'ms']):
+            if any(x in line.lower() for x in ['queue', 'decode', 'nvimgcodec', 'gpu', 'worker', 'stream', 'time', 'ms']):
                 print(f"  {line}")
 
 def main():

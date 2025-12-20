@@ -1036,7 +1036,7 @@ void batch_decode_queue_release(BatchDecodeQueue *queue,
 
 #ifdef UNPAPER_WITH_CUDA
       // Only free GPU memory if it's NOT from the batch pool.
-      // Pool buffers are managed by nvjpeg_batched and freed in cleanup.
+      // Pool buffers are managed by the GPU batch decoder and freed in cleanup.
       // CRITICAL: cudaFree is synchronous and would add ~10-50ms overhead
       // per image if called on pool buffers (50 images = 500-2500ms).
       if (slot->image.on_gpu && slot->image.gpu_ptr != NULL &&

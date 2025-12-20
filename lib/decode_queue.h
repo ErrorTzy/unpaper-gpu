@@ -23,7 +23,7 @@ typedef struct {
   bool valid;              // True if decoding succeeded
   bool uses_pinned_memory; // True if frame data is in pinned memory
   // GPU decode fields (PR36+)
-  bool on_gpu;                // True if decoded directly to GPU via nvJPEG
+  bool on_gpu;                // True if decoded directly to GPU via nvImageCodec
   void *gpu_ptr;              // GPU memory pointer (if on_gpu)
   size_t gpu_pitch;           // Row pitch in bytes
   int gpu_width;              // Image width in pixels
@@ -64,9 +64,9 @@ typedef struct {
   size_t pinned_allocations; // Pinned memory allocations
   size_t peak_queue_depth;   // Maximum queue occupancy observed
   // GPU decode stats (PR36+)
-  size_t gpu_decodes;         // Images decoded via nvJPEG to GPU
+  size_t gpu_decodes;         // Images decoded via nvImageCodec to GPU
   size_t cpu_decodes;         // Images decoded via FFmpeg to CPU
-  size_t gpu_decode_failures; // nvJPEG failures (fell back to CPU)
+  size_t gpu_decode_failures; // GPU decode failures (fell back to CPU)
 } DecodeQueueStats;
 
 // Create a decode queue
@@ -86,10 +86,10 @@ DecodeQueue *decode_queue_create_parallel(size_t queue_depth,
 // Destroy the decode queue and free all resources
 void decode_queue_destroy(DecodeQueue *queue);
 
-// Enable GPU decode using nvJPEG for JPEG files
+// Enable GPU decode using nvImageCodec for JPEG/JP2 files
 // Must be called before start_producer
-// When enabled, JPEG files will be decoded directly to GPU memory,
-// eliminating the H2D transfer for JPEG inputs.
+// When enabled, JPEG/JP2 files will be decoded directly to GPU memory,
+// eliminating the H2D transfer for GPU-decodable inputs.
 void decode_queue_enable_gpu_decode(DecodeQueue *queue, bool enable);
 
 // Set an optional custom decoder callback.

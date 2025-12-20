@@ -852,48 +852,37 @@ Move all computation to GPU using:
 
 ---
 
-## Phase 5: nvJPEG GPU Pipeline (PR35-PR38)
+## Phase 5: GPU JPEG/JP2 Pipeline via nvImageCodec (PR35-PR38)
 
 ### Overview
 
-These PRs implement a complete GPU-resident JPEG pipeline using nvJPEG for decode and encode, eliminating host-device memory transfers for JPEG→JPEG workflows.
+These PRs implement a complete GPU-resident JPEG/JP2 pipeline using
+nvImageCodec for decode and encode, eliminating host-device memory
+transfers for JPEG→JPEG workflows and enabling JPEG2000 where supported.
 
-**PR 35: nvJPEG decode infrastructure**
+**PR 35: GPU decode infrastructure**
 
 - Status: complete
 - Scope:
-  - Add nvJPEG library integration to meson.build
-  - Create `nvjpeg_decode.c/.h` with single-image decode API
-  - Per-stream nvJPEG state management for concurrent decoding
+  - Integrate nvImageCodec and unified GPU decode API
+  - Per-stream decode state management for concurrent decoding
   - Support for RGB and grayscale output formats
 - Results:
-  - nvJPEG decode works for all JPEG inputs
+  - GPU decode works for JPEG inputs
   - GPU buffer directly usable by processing pipeline
   - Statistics tracking: decode time, failures
 
-**PR 36: nvJPEG decode queue integration**
+**PR 36: Decode queue integration**
 
 - Status: complete
 - Scope:
-  - Integrate nvJPEG decode with existing decode_queue
-  - GPU decode path for JPEG inputs, FFmpeg fallback for others
+  - Integrate GPU decode with existing decode_queue
+  - GPU decode path for JPEG/JP2 inputs, FFmpeg fallback for others
   - Event-based async tracking for decode completion
 - Results:
-  - Automatic JPEG detection by file extension
-  - Seamless fallback for non-JPEG inputs
+  - Automatic JPEG/JP2 detection by file extension
+  - Seamless fallback for non-GPU inputs
   - Per-image decode mode (faster than batched)
-
-**PR 36A: nvjpegDecodeBatched infrastructure**
-
-- Status: complete
-- Scope:
-  - `nvjpeg_batched_init()`: Initialize batched decoder with buffer pool
-  - `nvjpeg_decode_batch()`: Decode array of JPEG data pointers
-  - Pre-allocated GPU buffer pool with 256-byte pitch alignment
-  - Fallback to single-image decode if batched API fails
-- Implementation notes:
-  - `nvjpegDecodeBatchedInitialize()`: Use `max_cpu_threads=1` (0 causes INVALID_PARAMETER)
-  - `nvjpegDecodeBatchedSupported()`: Returns 0 for supported, non-zero for unsupported
 
 **PR 36B: Batch-oriented decode queue**
 
@@ -905,7 +894,7 @@ These PRs implement a complete GPU-resident JPEG pipeline using nvJPEG for decod
   - Integration with existing `BatchWorkerContext`
 - Architecture:
   - Phase 1 - Collect (parallel): I/O threads read JPEG data
-  - Phase 2 - Decode (batched): Single nvjpegDecodeBatched call
+  - Phase 2 - Decode (batched): Single batch decode call
   - Phase 3 - Distribute: Output to worker pool
 - Results:
   - Mixed JPEG+PNG batches handled correctly
@@ -924,22 +913,15 @@ These PRs implement a complete GPU-resident JPEG pipeline using nvJPEG for decod
 - Results:
   - Per-image decode 20% faster than batched (1249ms vs 1504ms for decode-only)
   - Per-image mode now the default
-  - Stream scaling NOT achieved (~0.99x at 8 streams due to cudaStreamSynchronize)
+  - Stream scaling limited by sync points in the pipeline
 
-**PR 37: nvJPEG GPU encode**
+**PR 37: GPU encode**
 
 - Status: complete
 - Scope:
-  - Add `nvjpeg_encode_from_gpu()` in `nvjpeg_encode.c/.h`
   - Per-stream encoder state pool for concurrent encoding
   - Quality parameter mapping (1-100)
-  - Chroma subsampling control (444/422/420/gray)
   - Integration with encode_queue for JPEG outputs
-- Implementation:
-  - Encoder state pool with lock-free acquisition
-  - Shared nvJPEG handle with decode context
-  - Grayscale support via RGB conversion + CSS_GRAY subsampling
-  - `encode_queue_enable_gpu()` / `encode_queue_submit_gpu()` integration
 - Results:
   - GPU-resident JPEG encoding works (RGB and grayscale)
   - Quality control (1-100) working
@@ -949,48 +931,15 @@ These PRs implement a complete GPU-resident JPEG pipeline using nvJPEG for decod
 
 - Status: complete
 - Scope:
-  - Connect nvJPEG decode → processing → nvJPEG encode pipeline
+  - Connect GPU decode → processing → GPU encode pipeline
   - Zero-copy path for JPEG-to-JPEG workflows
   - Fallback to CPU for non-JPEG formats
   - Auto-detected based on input/output file formats
-- Pipeline:
-  ```
-  JPEG file → [nvjpegDecode] → GPU buffer → [processing] → GPU buffer → [nvjpegEncode] → JPEG file
-                           ↑                                        ↓
-                      No H2D transfer                          No D2H transfer
-  ```
-- Implementation:
-  - GPU backend auto-enables nvJPEG decode for JPEG inputs
-  - GPU backend auto-enables nvJPEG encode when any output is JPEG
-  - `--jpeg-quality=N`: JPEG output quality (1-100, default 85)
-  - `image_get_gpu_ptr()` / `image_get_gpu_pitch()` for direct GPU encode submission
 - Results:
   - Full JPEG→JPEG processing without CPU memory touch
   - D2H transfer eliminated (~6ms/image saved)
   - Output size 10x smaller (JPEG vs PBM)
   - All tests pass
-
-### nvJPEG API Reference
-
-```c
-// Creating handle
-nvjpegCreateExV2(NVJPEG_BACKEND_GPU_HYBRID, &dev_alloc, &pin_alloc, flags, &handle);
-nvjpegCreateSimple(&handle);  // Simple alternative
-
-// Batched decode
-nvjpegJpegStateCreate(handle, &state);
-nvjpegDecodeBatchedInitialize(handle, state, batch_size, 1, NVJPEG_OUTPUT_RGBI);
-nvjpegDecodeBatched(handle, state, data_ptrs, sizes, outputs, stream);
-cudaStreamSynchronize(stream);  // Single sync for entire batch
-
-// Thread safety
-// nvjpegHandle_t: Thread-safe, one per process
-// nvjpegJpegState_t: NOT thread-safe, one per stream
-
-// Backend selection
-// NVJPEG_BACKEND_GPU_HYBRID: Uses CUDA SMs (all GPUs)
-// NVJPEG_BACKEND_HARDWARE: Uses dedicated decoder (A100/H100 only, ~20x faster)
-```
 
 ---
 
@@ -1002,4 +951,4 @@ cudaStreamSynchronize(stream);  // Single sync for entire batch
 | Batch processing | PR19-27 | ~15x vs sequential CPU |
 | GPU auto-tuning | PR28 | Auto-scale streams/buffers by VRAM |
 | Stream optimization | PR29-34 | 1.80x stream scaling (A1: 486ms) |
-| nvJPEG pipeline | PR35-38 | Zero-copy JPEG→JPEG, ~6ms/img saved |
+| nvImageCodec pipeline | PR35-38 | Zero-copy JPEG→JPEG, ~6ms/img saved |

@@ -225,7 +225,7 @@ int image_pipeline_run(int argc, char **argv, OptionsResolved *resolved) {
 
     // Batch processing with decode queue (works for any parallelism >= 1)
     // The old sequential path (parallelism == 1) doesn't support GPU pipeline
-    // or nvJPEG decode, so we always use the batch processing path.
+    // or GPU decode, so we always use the batch processing path.
     if (batch_queue.parallelism >= 1) {
       // Initialize GPU memory pool and stream pool for CUDA batch processing
       // Memory pool eliminates per-image cudaMalloc overhead

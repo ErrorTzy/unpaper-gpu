@@ -253,7 +253,7 @@ static bool init_decode_state(NvImgCodecDecodeState *state) {
   exec_params.max_num_cpu_threads = 1;
   exec_params.num_backends = 0; // Use all available backends
   // Use custom async allocators to avoid synchronous cudaMalloc/cudaFree
-  // which block all streams. This improves nvJPEG internal allocation
+  // which block all streams. This improves nvImageCodec internal allocation
   // performance.
   exec_params.device_allocator = &g_device_allocator;
   exec_params.pinned_allocator = &g_pinned_allocator;
@@ -315,7 +315,7 @@ static bool init_encode_state(NvImgCodecEncodeState *state) {
   exec_params.device_id = 0;
   exec_params.max_num_cpu_threads = 1;
   // Use custom async allocators to avoid synchronous cudaMalloc/cudaFree
-  // which block all streams. This improves nvJPEG internal allocation
+  // which block all streams. This improves nvImageCodec internal allocation
   // performance.
   exec_params.device_allocator = &g_device_allocator;
   exec_params.pinned_allocator = &g_pinned_allocator;

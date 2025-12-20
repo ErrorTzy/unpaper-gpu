@@ -921,7 +921,7 @@ def test_valid_range_multi_index(imgsrc_path, tmp_path):
 def test_jpeg_input_produces_similar_output_to_png(imgsrc_path, tmp_path, fast_device):
     """Test that JPEG input produces output similar to PNG input.
 
-    This validates that the JPEG decode path (FFmpeg or nvJPEG) produces
+    This validates that the JPEG decode path (FFmpeg or nvImageCodec) produces
     results comparable to PNG input. JPEG is lossy, so we allow up to 10%
     dissimilarity due to compression artifacts.
     """

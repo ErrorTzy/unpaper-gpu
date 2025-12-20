@@ -193,7 +193,7 @@ struct DecodeQueue {
 
   // Configuration
   bool use_pinned_memory;
-  bool use_gpu_decode; // Enable nvJPEG GPU decode for JPEG files
+  bool use_gpu_decode; // Enable nvImageCodec GPU decode for JPEG/JP2 files
 
   // Optional custom decode callback (for non-file sources like PDF pages)
   DecodeQueueCustomDecoder custom_decoder;
@@ -1022,7 +1022,7 @@ void decode_queue_print_stats(const DecodeQueue *queue) {
     }
     fprintf(stderr,
             "  GPU decode stats:\n"
-            "    GPU decodes (nvJPEG): %zu (%.1f%%)\n"
+            "    GPU decodes (nvImageCodec): %zu (%.1f%%)\n"
             "    CPU decodes (FFmpeg): %zu\n"
             "    GPU decode failures: %zu\n",
             stats.gpu_decodes, gpu_decode_rate, stats.cpu_decodes,

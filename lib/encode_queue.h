@@ -91,8 +91,7 @@ void encode_queue_print_stats(const EncodeQueue *queue);
 // ============================================================================
 
 // Enable GPU encoding for JPEG outputs.
-// When enabled and output file is .jpg/.jpeg, uses nvJPEG GPU encode.
-// Requires nvjpeg_encode_init() to be called first.
+// When enabled and output file is .jpg/.jpeg, uses nvImageCodec GPU encode.
 // quality: JPEG quality (1-100, 0 uses default of 85)
 void encode_queue_enable_gpu(EncodeQueue *queue, bool enable, int quality);
 

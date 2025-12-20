@@ -37,7 +37,7 @@ void image_ensure_cuda_alloc(Image *image);
 void image_mark_cpu_dirty(Image *image);
 void image_mark_cuda_dirty(Image *image);
 
-// Create Image from existing GPU memory (for nvJPEG decoded images)
+// Create Image from existing GPU memory (for nvImageCodec decoded images)
 // If owns_memory is true, the GPU memory will be freed when the Image is freed.
 // If owns_memory is false, the caller retains ownership (e.g., pool-managed).
 // The pitch is the row stride in bytes.

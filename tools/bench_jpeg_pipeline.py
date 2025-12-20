@@ -269,7 +269,7 @@ def main() -> int:
         # Get output sizes for standard path
         std_total, std_avg = get_output_file_sizes(output_pattern_pbm, args.images)
 
-        # Test 2: GPU pipeline (JPEG -> GPU -> nvJPEG encode -> JPEG)
+        # Test 2: GPU pipeline (JPEG -> GPU -> nvImageCodec encode -> JPEG)
         # GPU encode is auto-enabled because output is .jpg
         output_pattern_jpg = str(tmpdir / "output%04d.jpg")
         print("GPU pipeline (JPEG -> GPU -> JPEG, auto-enabled)...", end=" ", flush=True)
@@ -328,7 +328,7 @@ def main() -> int:
                 else:
                     print()
                     print("  *** GPU PIPELINE SLOWER THAN STANDARD PATH ***")
-                    print("  Note: This may indicate nvJPEG encode overhead or fallback to CPU.")
+                    print("  Note: This may indicate GPU encode overhead or fallback to CPU.")
                     return 1
         else:
             print("  ERROR: One or both benchmarks failed")

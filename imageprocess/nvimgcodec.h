@@ -21,9 +21,8 @@ typedef struct UnpaperCudaStream UnpaperCudaStream;
 // This module provides a unified interface for GPU-accelerated image decode
 // and encode, supporting both JPEG and JPEG2000 formats.
 //
-// Implementation priority:
-// 1. nvImageCodec (if available) - unified API for JPEG/JP2/TIFF/PNG
-// 2. nvJPEG (fallback) - JPEG only, always available with CUDA
+// Implementation:
+// - nvImageCodec (unified API for JPEG/JP2/TIFF/PNG)
 //
 // Key performance benefits:
 // - JPEG2000 GPU decode/encode for archival PDF workflows
@@ -117,7 +116,7 @@ typedef struct NvImgCodecEncodeState NvImgCodecEncodeState;
 // ============================================================================
 
 // Initialize the nvImageCodec context.
-// This initializes nvImageCodec if available, otherwise falls back to nvJPEG.
+// Initialize the nvImageCodec context.
 //
 // num_streams: Number of stream states to pre-allocate
 // Returns true on success.
@@ -127,15 +126,13 @@ bool nvimgcodec_init(int num_streams);
 // Clean up nvImageCodec context and free all resources.
 void nvimgcodec_cleanup(void);
 
-// Check if nvImageCodec (unified) is available and initialized.
-// Returns true if nvImageCodec library is loaded, false if using nvJPEG
-// fallback.
+// Check if nvImageCodec is available and initialized.
 bool nvimgcodec_is_available(void);
 
-// Check if any GPU codec (nvImageCodec or nvJPEG fallback) is available.
+// Check if any GPU codec is available (nvImageCodec).
 bool nvimgcodec_any_available(void);
 
-// Check if JPEG2000 is supported (only with nvImageCodec, not nvJPEG fallback).
+// Check if JPEG2000 is supported (nvImageCodec).
 bool nvimgcodec_jp2_supported(void);
 
 // ============================================================================
@@ -152,7 +149,7 @@ typedef struct {
   size_t successful_encodes; // Successful encodes
   size_t jpeg_encodes;       // JPEG encodes
   size_t jp2_encodes;        // JP2 encodes
-  bool using_nvimgcodec; // True if using nvImageCodec, false if nvJPEG fallback
+  bool using_nvimgcodec; // True if nvImageCodec is initialized
 } NvImgCodecStats;
 
 // Get current statistics.
@@ -250,7 +247,7 @@ int nvimgcodec_decode_batch(const uint8_t *const *data_ptrs,
 // Image Encode Operations
 // ============================================================================
 
-// Encode input format (matches NvJpegEncodeFormat for compatibility)
+// Encode input format for nvImageCodec encoding
 typedef enum {
   NVIMGCODEC_ENC_FMT_GRAY8 = 0, // Single-channel grayscale (8-bit)
   NVIMGCODEC_ENC_FMT_RGB = 1,   // Interleaved RGB (24-bit)

@@ -72,13 +72,13 @@ For GPU-accelerated processing (auto-detected or `--device=cuda`), the following
 are required:
 
 - **CUDA Toolkit**: Tested with CUDA 12.x and 13.x. The `nvcc` compiler,
-  CUDA runtime (`cudart`), **NPP**, and **nvJPEG** must be available.
+  CUDA runtime (`cudart`), and **NPP** must be available.
 - **OpenCV 4.x with CUDA support**: Required for CUDA builds. OpenCV must
   be built with CUDA support enabled, including `cudaarithm`,
   `cudaimgproc`, and `cudawarping`. OpenCV provides GPU-accelerated
   operations including connected-component labeling for the noisefilter.
 - **nvImageCodec** (`nvimgcodec`): Required for GPU JPEG/JP2 decode/encode.
-  Optional **nvjpeg2k** improves JPEG2000 support when available.
+  JPEG2000 support depends on the nvImageCodec build and available plugins.
 
 Building instructions
 ---------------------
@@ -128,7 +128,7 @@ To enable GPU-accelerated processing, configure with `-Dcuda=enabled`:
     unpaper$ meson compile -C builddir-cuda
 
 The CUDA backend requires:
-- NVIDIA CUDA Toolkit (nvcc compiler, cudart, NPP, nvJPEG)
+- NVIDIA CUDA Toolkit (nvcc compiler, cudart, NPP)
 - OpenCV 4.x with CUDA support (cudaarithm, cudaimgproc, cudawarping)
 - nvImageCodec (nvimgcodec) for GPU JPEG/JP2 decode/encode
 

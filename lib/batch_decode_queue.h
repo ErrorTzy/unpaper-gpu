@@ -29,12 +29,11 @@ struct Image;
 // this queue:
 //
 // 1. Collects JPEG file data in parallel (multiple I/O threads)
-// 2. Batch decodes using nvjpegDecodeBatched() (single sync per chunk)
+// 2. Batch decodes using GPU batch decode (single sync per chunk)
 // 3. Distributes decoded images to worker threads
 //
-// Key performance advantage: nvjpegDecodeBatched() achieves ~3x+ scaling
-// over per-image nvjpegDecode() because it uses a single sync point and
-// allows nvJPEG to optimize GPU parallelism internally.
+// Key performance advantage: batch decode reduces sync overhead and
+// allows the GPU decoder to optimize parallelism internally.
 
 // Maximum images to process in a single decode chunk.
 // This bounds GPU memory usage while maintaining batch efficiency.
@@ -49,7 +48,7 @@ typedef struct {
   bool valid;              // True if decoding succeeded
   bool uses_pinned_memory; // True if frame data is in pinned memory
   // GPU decode fields
-  bool on_gpu;         // True if decoded directly to GPU via nvJPEG
+  bool on_gpu;         // True if decoded directly to GPU via nvImageCodec
   void *gpu_ptr;       // GPU memory pointer (if on_gpu)
   size_t gpu_pitch;    // Row pitch in bytes
   int gpu_width;       // Image width in pixels
@@ -65,11 +64,11 @@ typedef struct BatchDecodeQueue BatchDecodeQueue;
 // Statistics for the batch decode queue
 typedef struct {
   size_t total_images;         // Total images processed
-  size_t gpu_batched_decodes;  // Images decoded via nvjpegDecodeBatched
-  size_t gpu_single_decodes;   // Images decoded via nvjpegDecode (fallback)
+  size_t gpu_batched_decodes;  // Images decoded via GPU batch decode
+  size_t gpu_single_decodes;   // Images decoded via GPU single decode
   size_t cpu_decodes;          // Images decoded via FFmpeg (non-JPEG)
   size_t decode_failures;      // Failed decodes
-  size_t batch_calls;          // Number of nvjpeg_decode_batch calls
+  size_t batch_calls;          // Number of GPU batch decode calls
   size_t io_threads_used;      // Number of I/O threads used
   size_t chunks_processed;     // Number of decode chunks processed
   size_t peak_queue_depth;     // Maximum queue occupancy
@@ -101,7 +100,7 @@ void batch_decode_queue_destroy(BatchDecodeQueue *queue);
 // Configuration
 // ============================================================================
 
-// Enable GPU decode using nvJPEG batched API.
+// Enable GPU decode using the batched GPU decode API.
 // Must be called before start_producer.
 // When enabled, JPEG files are batch-decoded directly to GPU memory.
 void batch_decode_queue_enable_gpu(BatchDecodeQueue *queue, bool enable);

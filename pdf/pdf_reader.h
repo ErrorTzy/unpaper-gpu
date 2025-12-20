@@ -117,7 +117,7 @@ bool pdf_get_page_info(PdfDocument *doc, int page, PdfPageInfo *info);
 //
 // Performance note: This is the zero-copy path. For JPEG/JP2/JBIG2 images,
 // the raw compressed bytes are returned without decompression, enabling
-// direct GPU decode via nvJPEG/nvImageCodec.
+// direct GPU decode via nvImageCodec.
 bool pdf_extract_page_image(PdfDocument *doc, int page, PdfImage *image);
 
 // Free an extracted image's data.
