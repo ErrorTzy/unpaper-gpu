@@ -18,6 +18,7 @@ from typing import Sequence
 import pytest
 import PIL.Image
 import PIL.ImageChops
+import PIL.ImageDraw
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -415,6 +416,19 @@ def _render_pdf_pages(
     return sorted(out_dir.glob("page-*.pnm"))
 
 
+def _build_full_range_pdf(*, out_pdf: pathlib.Path) -> None:
+    out_pdf.parent.mkdir(parents=True, exist_ok=True)
+    width, height = 256, 128
+    img = PIL.Image.new("RGB", (width, height), (255, 255, 255))
+    draw = PIL.ImageDraw.Draw(img)
+    draw.rectangle((width // 2, 0, width - 1, height - 1), fill=(0, 0, 0))
+    img.save(out_pdf, "PDF", resolution=300.0)
+
+
+def _pixel_luma(pixel: tuple[int, int, int]) -> float:
+    return (pixel[0] + pixel[1] + pixel[2]) / 3.0
+
+
 def _pdf_page_count(*, pdf_path: pathlib.Path) -> int:
     _require_external_tools("mutool")
     proc = subprocess.run(
@@ -429,6 +443,48 @@ def _pdf_page_count(*, pdf_path: pathlib.Path) -> int:
     if not match:
         raise RuntimeError(f"could not determine page count for {pdf_path}")
     return int(match.group(1))
+
+
+@pytest.mark.slow
+@pytest.mark.pdf
+def test_pdf_jpeg_output_full_range(tmp_path):
+    _require_external_tools("mutool")
+    if not pdf_mode_supported():
+        pytest.skip("unpaper built without PDF support")
+
+    input_pdf = tmp_path / "range-input.pdf"
+    _build_full_range_pdf(out_pdf=input_pdf)
+    output_pdf = tmp_path / "range-output.pdf"
+
+    proc = run_unpaper(
+        "--device",
+        "cpu",
+        "--no-processing",
+        "1",
+        "--pdf-quality",
+        "fast",
+        "--pdf-dpi",
+        "300",
+        "--jpeg-quality",
+        "95",
+        str(input_pdf),
+        str(output_pdf),
+        capture=True,
+    )
+    assert proc.returncode == 0
+
+    rendered = _render_pdf_pages(
+        pdf_path=output_pdf, out_dir=tmp_path / "range-render", dpi=300
+    )
+    assert len(rendered) == 1
+
+    img = PIL.Image.open(rendered[0]).convert("RGB")
+    w, h = img.size
+    white_px = img.getpixel((w // 4, h // 2))
+    black_px = img.getpixel((3 * w // 4, h // 2))
+
+    assert _pixel_luma(white_px) > 245, f"white pixel too dark: {white_px}"
+    assert _pixel_luma(black_px) < 10, f"black pixel too bright: {black_px}"
 
 @pytest.fixture
 def fast_device():

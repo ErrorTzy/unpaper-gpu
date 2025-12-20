@@ -31,6 +31,7 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
 #include <libavutil/frame.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
 #include <stdio.h>
@@ -46,6 +47,58 @@ static bool pdf_pipeline_size_matches(int width, int height, int expected_width,
   const int tol = 4;
   return (abs(width - expected_width) <= tol) &&
          (abs(height - expected_height) <= tol);
+}
+
+static int frame_is_full_range(const AVFrame *frame) {
+  if (frame == NULL) {
+    return 0;
+  }
+  if (frame->color_range == AVCOL_RANGE_JPEG) {
+    return 1;
+  }
+
+  const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(frame->format);
+  if (desc == NULL) {
+    return 0;
+  }
+
+  if (desc->flags & AV_PIX_FMT_FLAG_RGB) {
+    return 1;
+  }
+
+  // Single-component formats (e.g., GRAY8) are full range.
+  if (desc->nb_components == 1) {
+    return 1;
+  }
+
+  return 0;
+}
+
+static void sws_force_full_range(struct SwsContext *sws_ctx,
+                                 const AVFrame *src) {
+  if (sws_ctx == NULL) {
+    return;
+  }
+
+  int *inv_table = NULL;
+  int *table = NULL;
+  int src_range = 0;
+  int dst_range = 0;
+  int brightness = 0;
+  int contrast = 0;
+  int saturation = 0;
+
+  if (sws_getColorspaceDetails(sws_ctx, &inv_table, &src_range, &table,
+                               &dst_range, &brightness, &contrast,
+                               &saturation) < 0) {
+    return;
+  }
+
+  int desired_src = frame_is_full_range(src) ? 1 : 0;
+  int desired_dst = 1; // JPEG expects full-range YUV.
+
+  sws_setColorspaceDetails(sws_ctx, inv_table, desired_src, table, desired_dst,
+                           brightness, contrast, saturation);
 }
 
 static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
@@ -89,7 +142,8 @@ static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
   AVFrame *yuv_frame = NULL;
   struct SwsContext *sws_ctx = NULL;
 
-  if (image->frame->format != AV_PIX_FMT_YUV420P) {
+  if (image->frame->format != AV_PIX_FMT_YUV420P ||
+      image->frame->color_range != AVCOL_RANGE_JPEG) {
     yuv_frame = av_frame_alloc();
     if (!yuv_frame) {
       avcodec_free_context(&ctx);
@@ -115,6 +169,8 @@ static uint8_t *encode_image_jpeg(Image *image, int quality, size_t *out_len) {
       avcodec_free_context(&ctx);
       return NULL;
     }
+
+    sws_force_full_range(sws_ctx, image->frame);
 
     sws_scale(sws_ctx, (const uint8_t *const *)image->frame->data,
               image->frame->linesize, 0, image->frame->height, yuv_frame->data,
